@@ -1,0 +1,24 @@
+schema_version: 1
+shot_id: E01_S003_SH002
+episode_id: E01
+scene_id: E01_S003
+location: {location_id: classroom, coverage_view: wide_front}
+duration_seconds: 5
+camera: {framing: medium, movement: locked}
+characters:
+  - character_id: song
+    look_id: default
+    screen_position: left
+    prominence: primary
+    presence: {first_frame: true, entire_shot: true}
+    action: Looks toward Linsey and asks a question.
+  - character_id: linsey
+    look_id: default
+    screen_position: right
+    prominence: secondary
+    presence: {first_frame: true, entire_shot: true}
+    action: Listens to Song and replies.
+dialogue:
+  - {order: 1, speaker: song, language: zh-CN, text: "你觉得这样可以吗？"}
+  - {order: 2, speaker: linsey, language: zh-CN, text: "可以，就这样吧。"}
+constraints: {no_identity_swap: true, no_wardrobe_swap: true, no_speech_overlap: true, stable_scene: true}

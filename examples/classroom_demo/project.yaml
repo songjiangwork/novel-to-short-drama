@@ -1,0 +1,6 @@
+schema_version: 1
+project_id: classroom-demo
+title: Classroom Demo
+source: {type: txt, path: source/novel.txt, language: zh-CN}
+production: {output_language: zh-CN, profile: h3_v1}
+approval_policy: {adaptation_requires_approval: true, generation_preflight_requires_approval: true, shot_qc_requires_approval: true}

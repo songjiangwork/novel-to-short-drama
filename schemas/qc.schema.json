@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Shot QC",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "shot_id",
+    "attempt",
+    "decision",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "shot_id": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+    },
+    "decision": {
+      "enum": [
+        "approve",
+        "reject",
+        "retry"
+      ]
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "character_presence",
+        "identity_consistency",
+        "wardrobe_consistency",
+        "scene_identity",
+        "dialogue_order",
+        "speaker_attribution",
+        "speech_overlap",
+        "lip_sync",
+        "camera_stability"
+      ],
+      "properties": {
+        "character_presence": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "identity_consistency": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "wardrobe_consistency": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "scene_identity": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "dialogue_order": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "speaker_attribution": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "speech_overlap": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "lip_sync": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        },
+        "camera_stability": {
+          "enum": [
+            "pass",
+            "fail",
+            "na"
+          ]
+        }
+      }
+    },
+    "failure_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "notes": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

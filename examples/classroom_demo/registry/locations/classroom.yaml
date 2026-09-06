@@ -1,0 +1,5 @@
+schema_version: 1
+location_id: classroom
+display_name: Gothic Classroom
+coverage_views:
+  wide_front: {asset: location.classroom.wide_front}

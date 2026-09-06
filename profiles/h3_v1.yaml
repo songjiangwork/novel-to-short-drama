@@ -1,0 +1,29 @@
+schema_version: 1
+profile_id: h3_v1
+model:
+  diffusion: minimax_h3_ref2va_pruned_int8_convrot.safetensors
+video:
+  duration_seconds: 5
+  megapixels: 0.4
+  aspect_ratio: "16:9"
+  fps: 24
+sampling:
+  steps: 20
+  sampler: res_multistep
+  scheduler: simple
+reference:
+  ref_image_size: match
+  scene_refs_per_shot: 1
+  max_image_refs: 9
+lora:
+  turbo_lightning: false
+generation:
+  max_attempts: 3
+  retry_strategy: new_seed_only
+  control_after_generate: fixed
+production_envelope:
+  max_named_characters_per_shot: 2
+  max_speakers_per_shot: 2
+  important_unseen_camera_allowed: false
+  dialogue_camera_default: locked
+  conservative_zh_chars_per_5s: 20

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Production Shot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "shot_id",
+    "episode_id",
+    "scene_id",
+    "location",
+    "duration_seconds",
+    "camera",
+    "characters",
+    "dialogue",
+    "constraints"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "shot_id": {
+      "type": "string",
+      "pattern": "^E[0-9]+_S[0-9]+_SH[0-9]+$"
+    },
+    "episode_id": {
+      "type": "string",
+      "pattern": "^E[0-9]+$"
+    },
+    "scene_id": {
+      "type": "string",
+      "pattern": "^E[0-9]+_S[0-9]+$"
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location_id",
+        "coverage_view"
+      ],
+      "properties": {
+        "location_id": {
+          "type": "string"
+        },
+        "coverage_view": {
+          "type": "string"
+        }
+      }
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 30
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "framing",
+        "movement"
+      ],
+      "properties": {
+        "framing": {
+          "enum": [
+            "closeup",
+            "medium",
+            "full_body"
+          ]
+        },
+        "movement": {
+          "enum": [
+            "locked",
+            "simple"
+          ]
+        }
+      }
+    },
+    "characters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "character_id",
+          "look_id",
+          "screen_position",
+          "prominence",
+          "presence",
+          "action"
+        ],
+        "properties": {
+          "character_id": {
+            "type": "string"
+          },
+          "look_id": {
+            "type": "string"
+          },
+          "screen_position": {
+            "enum": [
+              "left",
+              "center",
+              "right",
+              "foreground",
+              "background"
+            ]
+          },
+          "prominence": {
+            "enum": [
+              "primary",
+              "secondary"
+            ]
+          },
+          "presence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "first_frame",
+              "entire_shot"
+            ],
+            "properties": {
+              "first_frame": {
+                "type": "boolean"
+              },
+              "entire_shot": {
+                "type": "boolean"
+              }
+            }
+          },
+          "action": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "dialogue": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "order",
+          "speaker",
+          "language",
+          "text"
+        ],
+        "properties": {
+          "order": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "speaker": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "no_identity_swap",
+        "no_wardrobe_swap",
+        "no_speech_overlap",
+        "stable_scene"
+      ],
+      "properties": {
+        "no_identity_swap": {
+          "type": "boolean"
+        },
+        "no_wardrobe_swap": {
+          "type": "boolean"
+        },
+        "no_speech_overlap": {
+          "type": "boolean"
+        },
+        "stable_scene": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

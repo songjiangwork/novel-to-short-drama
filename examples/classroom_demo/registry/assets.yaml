@@ -1,0 +1,11 @@
+schema_version: 1
+assets:
+  character.song.face_front: {kind: image, owner_type: character, owner_id: song, role: face_front, source_path: Song_Face_100.jpg, canonical: true, enabled: true}
+  character.song.face_three_quarter: {kind: image, owner_type: character, owner_id: song, role: face_three_quarter, source_path: Song_Face_75.jpg, canonical: true, enabled: true}
+  character.song.full_body: {kind: image, owner_type: character, owner_id: song, role: full_body, source_path: Song_full_body.jpg, canonical: true, enabled: true}
+  character.linsey.face_front: {kind: image, owner_type: character, owner_id: linsey, role: face_front, source_path: Linsey_Face_100.jpg, canonical: true, enabled: true}
+  character.linsey.face_three_quarter: {kind: image, owner_type: character, owner_id: linsey, role: face_three_quarter, source_path: Linsey_Face_75.jpg, canonical: true, enabled: true}
+  character.linsey.full_body: {kind: image, owner_type: character, owner_id: linsey, role: full_body, source_path: Linsey_full_body.jpg, canonical: true, enabled: true}
+  voice.song.zh: {kind: audio, owner_type: character, owner_id: song, role: canonical_voice, language: zh-CN, source_path: Song_voice_zh.wav, canonical: true, enabled: true}
+  voice.linsey.zh: {kind: audio, owner_type: character, owner_id: linsey, role: canonical_voice, language: zh-CN, source_path: Linsey_voice_zh.wav, canonical: true, enabled: true}
+  location.classroom.wide_front: {kind: image, owner_type: location, owner_id: classroom, role: coverage_view, source_path: classroom_wide.jpg, canonical: true, enabled: true}

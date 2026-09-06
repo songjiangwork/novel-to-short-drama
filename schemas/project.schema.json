@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Short Drama Project",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "title",
+    "source",
+    "production",
+    "approval_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "path",
+        "language"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "txt",
+            "pdf"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "language": {
+          "type": "string",
+          "minLength": 2
+        }
+      }
+    },
+    "production": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "output_language",
+        "profile"
+      ],
+      "properties": {
+        "output_language": {
+          "type": "string",
+          "minLength": 2
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "approval_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adaptation_requires_approval",
+        "generation_preflight_requires_approval",
+        "shot_qc_requires_approval"
+      ],
+      "properties": {
+        "adaptation_requires_approval": {
+          "type": "boolean"
+        },
+        "generation_preflight_requires_approval": {
+          "type": "boolean"
+        },
+        "shot_qc_requires_approval": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

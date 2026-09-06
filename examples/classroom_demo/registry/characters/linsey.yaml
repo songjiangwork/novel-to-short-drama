@@ -1,0 +1,9 @@
+schema_version: 1
+character_id: linsey
+display_name: Linsey
+persistent_attributes: {}
+looks:
+  default:
+    assets: {face_front: character.linsey.face_front, face_three_quarter: character.linsey.face_three_quarter, full_body: character.linsey.full_body}
+voices:
+  zh-CN: {asset: voice.linsey.zh}

@@ -1,31 +1,150 @@
-from ..io import load_yaml,load_json
+from __future__ import annotations
+
+from ..io import load_json, load_yaml
 from ..paths import TEMPLATES_DIR
-def plist(ids):
-    xs=[f"<Picture {i}>" for i in ids]
-    return xs[0] if len(xs)==1 else (f"{xs[0]} and {xs[1]}" if len(xs)==2 else ", ".join(xs[:-1])+f", and {xs[-1]}")
-def build_prompt(shot_path,refs_path):
-    s=load_yaml(shot_path);r=load_json(refs_path);tpl=(TEMPLATES_DIR/"h3_prompt_v1.txt").read_text(encoding="utf-8")
-    groups={}
-    for x in r["images"]:
-        if x["owner_type"]=="character":groups.setdefault(x["owner_id"],[]).append(x["index"])
-    amap={x["owner_id"]:x["index"] for x in r["audios"]}; scene=next(x for x in r["images"] if x["owner_type"]=="location")
-    mapping=[]
-    for c in s["characters"]:
-        cid=c["character_id"];mapping.append(f"- {cid} is the same person shown in {plist(groups[cid])}. Use those references only for {cid}'s identity, face, hairstyle, persistent attributes, wardrobe, and body proportions.")
-    mapping.append(f"- <Picture {scene['index']}> is the canonical environment for {s['location']['location_id']} / {s['location']['coverage_view']}.")
-    for sp,i in amap.items():mapping.append(f"- <Audio {i}> is {sp}'s VOICE IDENTITY ONLY.")
-    shot=f"{s['camera']['framing']} shot at {s['location']['location_id']} using canonical coverage '{s['location']['coverage_view']}'. "+" ".join(f"{c['character_id']} is {c['screen_position']}." for c in s["characters"])
-    presence="\n".join(f"- {c['character_id']} must be visible FROM THE FIRST FRAME and remain visible throughout the entire clip." for c in s["characters"] if c["presence"]["first_frame"] and c["presence"]["entire_shot"]) or "No special presence constraints."
-    actions="\n".join(f"- {c['character_id']}: {c['action']}" for c in s["characters"])
-    camera="Locked static camera. No pan, no dolly, no orbit, no zoom, no reframing, no cut, and no camera-angle transition." if s["camera"]["movement"]=="locked" else "Use only the simple camera movement explicitly described by the shot."
-    turns=sorted(s.get("dialogue",[]),key=lambda x:x["order"]); dl=[]
-    for i,t in enumerate(turns):
-        sp=t["speaker"]; ord="FIRST" if i==0 else "SECOND"
-        dl.append(f"{i+1}. {sp} speaks {ord}, using the voice identity from <Audio {amap[sp]}>:\n<d>[{t['language']}]{t['text']}</d>\nWhile {sp} speaks, only {sp}'s mouth should articulate speech.")
-        if i<len(turns)-1:dl.append(f"{sp} must then STOP COMPLETELY. No overlap with the next speaker.")
-    constraints=["Keep character identities strictly separated.","Do not merge faces or swap identities.","Do not swap wardrobes or persistent attributes.","Keep the canonical location identity stable."]
-    if s["constraints"].get("no_speech_overlap"):constraints.append("No simultaneous dialogue.")
-    if s["constraints"].get("stable_scene"):constraints.append("No major camera drift or location change.")
-    repl={"{{REFERENCE_MAPPING}}":"\n".join(mapping),"{{SHOT_DESCRIPTION}}":shot,"{{PRESENCE_REQUIREMENTS}}":presence,"{{ACTION_DESCRIPTION}}":actions,"{{CAMERA_DESCRIPTION}}":camera,"{{DIALOGUE_BLOCK}}":"\n\n".join(dl) if dl else "No spoken dialogue. Do not generate speech.","{{OUTPUT_LANGUAGE}}":turns[0]["language"] if turns else "target-language","{{CONSTRAINT_BLOCK}}":"\n".join("- "+x for x in constraints)}
-    for k,v in repl.items():tpl=tpl.replace(k,v)
-    return tpl.strip()+"\n"
+
+_LANGUAGE_LABELS = {"zh": "Chinese", "en": "English", "fr": "French"}
+_SPEECH_LANGUAGE_LABELS = {"zh": "Mandarin", "en": "English", "fr": "French"}
+
+
+def _picture_list(indices: list[int]) -> str:
+    labels = [f"<Picture {i}>" for i in indices]
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def _character_label(character_id: str) -> str:
+    return character_id.replace("_", " ").title()
+
+
+def _language_label(language: str) -> str:
+    return _LANGUAGE_LABELS.get(language.split("-", 1)[0].lower(), language)
+
+
+def _speech_language_label(language: str) -> str:
+    return _SPEECH_LANGUAGE_LABELS.get(language.split("-", 1)[0].lower(), language)
+
+
+def _listener_sentence(listeners: list[str]) -> str:
+    if not listeners:
+        return ""
+    if len(listeners) == 1:
+        return f" {listeners[0]} listens silently with a closed/resting mouth."
+    return f" {' and '.join(listeners)} listen silently with closed/resting mouths."
+
+
+def build_prompt(shot_path: str, refs_path: str) -> str:
+    shot = load_yaml(shot_path)
+    refs = load_json(refs_path)
+    template = (TEMPLATES_DIR / "h3_prompt_v1.txt").read_text(encoding="utf-8")
+
+    groups: dict[str, list[int]] = {}
+    for ref in refs["images"]:
+        if ref["owner_type"] == "character":
+            groups.setdefault(ref["owner_id"], []).append(ref["index"])
+
+    audio_map = {ref["owner_id"]: ref["index"] for ref in refs["audios"]}
+    scene_ref = next(ref for ref in refs["images"] if ref["owner_type"] == "location")
+    location_id = shot["location"]["location_id"]
+
+    mapping_lines = []
+    for character in shot["characters"]:
+        cid = character["character_id"]
+        label = _character_label(cid)
+        mapping_lines.append(
+            f"- {label} is the same person shown in {_picture_list(groups[cid])}. "
+            f"Use those references only for {label}'s face, hairstyle, persistent attributes, "
+            "wardrobe, and body proportions."
+        )
+
+    mapping_lines.append(
+        f"- <Picture {scene_ref['index']}> is the canonical {location_id} environment "
+        "and must control the scene/background."
+    )
+
+    for speaker, audio_index in audio_map.items():
+        mapping_lines.append(
+            f"- <Audio {audio_index}> is {_character_label(speaker)}'s VOICE IDENTITY ONLY."
+        )
+
+    placement = []
+    for character in shot["characters"]:
+        label = _character_label(character["character_id"])
+        position = character["screen_position"]
+        placement.append(
+            f"{label} stands on screen-{position}." if position in {"left", "right"}
+            else f"{label} is {position}."
+        )
+
+    shot_kind = "two-shot" if len(shot["characters"]) == 2 else "shot"
+    shot_description = (
+        f"A natural {shot['camera']['framing']} {shot_kind} in the {location_id} "
+        f"from <Picture {scene_ref['index']}>. "
+        + " ".join(placement)
+        + " Preserve each person's identity, face, hairstyle, persistent attributes, wardrobe, and body proportions. "
+          "Do not merge faces, swap identities, swap clothes, or transfer attributes between them."
+    )
+
+    presence_lines = []
+    for character in shot["characters"]:
+        requirements = []
+        if character["presence"]["first_frame"]:
+            requirements.append("visible FROM THE FIRST FRAME")
+        if character["presence"]["entire_shot"]:
+            requirements.append("remain visible throughout the entire clip")
+        if requirements:
+            presence_lines.append(
+                f"{_character_label(character['character_id'])} must be "
+                + " and ".join(requirements) + "."
+            )
+    if presence_lines:
+        shot_description += " " + " ".join(presence_lines)
+
+    camera = (
+        "Locked static camera. No pan, no dolly, no orbit, no zoom, no reframing, "
+        f"no cut, no camera-angle transition. Keep the {location_id} geometry and visual identity stable."
+        if shot["camera"]["movement"] == "locked"
+        else "Use only the simple camera movement explicitly described by the shot."
+    )
+
+    turns = sorted(shot.get("dialogue", []), key=lambda turn: turn["order"])
+    dialogue_lines = []
+    step = 1
+    for index, turn in enumerate(turns):
+        speaker = turn["speaker"]
+        speaker_label = _character_label(speaker)
+        ordinal = "FIRST" if index == 0 else "SECOND" if index == 1 else f"TURN {index + 1}"
+        listeners = [
+            _character_label(character["character_id"])
+            for character in shot["characters"]
+            if character["character_id"] != speaker
+        ]
+        dialogue_lines.append(
+            f"{step}. {speaker_label} speaks {ordinal}, "
+            f"using the voice identity from <Audio {audio_map[speaker]}>:\n"
+            f"<d>[{_language_label(turn['language'])}]{turn['text']}</d>\n"
+            f"While {speaker_label} speaks, ONLY {speaker_label}'s mouth should move for speech."
+            + _listener_sentence(listeners)
+        )
+        step += 1
+        if index < len(turns) - 1:
+            dialogue_lines.append(
+                f"{step}. {speaker_label} must then STOP COMPLETELY. No overlap."
+            )
+            step += 1
+
+    replacements = {
+        "{{REFERENCE_MAPPING}}": "\n".join(mapping_lines),
+        "{{SHOT_DESCRIPTION}}": shot_description,
+        "{{CAMERA_DESCRIPTION}}": camera,
+        "{{DIALOGUE_BLOCK}}": "\n\n".join(dialogue_lines) if dialogue_lines else "No spoken dialogue. Do not generate speech.",
+        "{{SPEECH_LANGUAGE}}": _speech_language_label(turns[0]["language"]) if turns else "target-language",
+        "{{LOCATION_ID}}": location_id,
+    }
+    for key, value in replacements.items():
+        template = template.replace(key, value)
+
+    return template.strip() + "\n"

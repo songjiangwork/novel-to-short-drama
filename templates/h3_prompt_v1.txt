@@ -1,14 +1,10 @@
-REFERENCE MAPPING — keep identities strictly separated:
+REFERENCE MAPPING — keep these identities strictly separated:
 {{REFERENCE_MAPPING}}
+Do not copy the spoken words from either reference audio.
+Generate only the new dialogue written below.
 
 SHOT:
 {{SHOT_DESCRIPTION}}
-
-CHARACTER PRESENCE:
-{{PRESENCE_REQUIREMENTS}}
-
-ACTION:
-{{ACTION_DESCRIPTION}}
 
 CAMERA:
 {{CAMERA_DESCRIPTION}}
@@ -17,9 +13,6 @@ DIALOGUE AND SPEAKER ATTRIBUTION:
 {{DIALOGUE_BLOCK}}
 
 AUDIO:
-Use each audio reference as VOICE IDENTITY ONLY. Do not copy spoken words from reference audio.
-Generate only the dialogue written above. Natural {{OUTPUT_LANGUAGE}} speech. No narrator. No extra dialogue.
-Keep lip movement synchronized to the correct active speaker. No simultaneous speech unless explicitly requested.
-
-CONTINUITY / NEGATIVE CONSTRAINTS:
-{{CONSTRAINT_BLOCK}}
+Natural {{SPEECH_LANGUAGE}} speech, clear turn-taking, no simultaneous speech, no voice swap, no extra dialogue, no narrator.
+Keep lip movement synchronized to the correct active speaker.
+Natural quiet {{LOCATION_ID}} ambience only; dialogue remains dominant.

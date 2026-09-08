@@ -1,0 +1,14 @@
+schema_version: 1
+
+# Native Windows / mirrored-networking default.
+# Under WSL NAT, replace this with the Windows vEthernet (WSL) address,
+# for example http://192.168.x.x:8188.
+server_url: http://127.0.0.1:8188
+
+# Example paths for Windows portable ComfyUI accessed from WSL.
+# Adjust for the local ComfyUI installation.
+input_dir: /mnt/c/AI/ComfyUI_windows_portable/ComfyUI/input
+output_dir: /mnt/c/AI/ComfyUI_windows_portable/ComfyUI/output
+
+poll_interval_seconds: 2.0
+timeout_seconds: 7200

@@ -1,1 +1,6 @@
-{"name":"novel-to-short-drama","version":"1.0.0","scope":"architecture + schemas + deterministic core","comfyui_adapter":"deferred_to_v1.1.0"}
+{
+  "name": "novel-to-short-drama",
+  "version": "1.1.0",
+  "scope": "v1.0 deterministic core + ComfyUI adapter",
+  "comfyui_adapter": "implemented"
+}

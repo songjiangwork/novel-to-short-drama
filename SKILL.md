@@ -44,3 +44,8 @@ Pi/Qwen: story understanding, adaptation, scene decomposition, shot planning, ac
 Deterministic Python: validation, registry lookup, reference selection/numbering, prompt rendering, seeds, request construction, QC transitions, assembly plan.
 
 Hermes: orchestration, approval gates, Pi delegation, deterministic command invocation, retries, episode progression.
+
+
+## ComfyUI Adapter v1.1
+
+The runtime adapter must use ComfyUI API format, never UI workflow format. H3 autogrow inputs are emitted as flat dotted keys (`ref_images.ref_image_0`, `ref_audios.ref_audio_0`). Asset files are staged into ComfyUI input before queueing. The adapter must validate required node classes, POST `/prompt`, poll `/history/{prompt_id}`, record the saved video reference, and transition the attempt to `QC_PENDING`.

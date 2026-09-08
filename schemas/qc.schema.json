@@ -6,6 +6,7 @@
   "required": [
     "schema_version",
     "shot_id",
+    "project_id",
     "attempt",
     "decision",
     "checks"
@@ -121,6 +122,10 @@
         "string",
         "null"
       ]
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
     }
   }
 }

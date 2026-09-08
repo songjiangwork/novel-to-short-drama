@@ -12,3 +12,5 @@ runs/
 output/
 .env
 .DS_Store
+
+profiles/comfyui_local.yaml

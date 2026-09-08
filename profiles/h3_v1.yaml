@@ -2,6 +2,9 @@ schema_version: 1
 profile_id: h3_v1
 model:
   diffusion: minimax_h3_ref2va_pruned_int8_convrot.safetensors
+  clip: qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+  video_vae: minimax_h3_video_vae_fp16.safetensors
+  audio_vae: minimax_h3_audio_vae_fp32.safetensors
 video:
   duration_seconds: 5
   megapixels: 0.4

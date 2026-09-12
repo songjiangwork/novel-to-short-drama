@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "artifact-ref.schema.json",
+  "title": "ArtifactRef",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_type", "artifact_id", "revision", "content_hash"],
+  "properties": {
+    "artifact_type": {"type": "string", "minLength": 1},
+    "artifact_id": {"type": "string", "minLength": 1},
+    "revision": {"type": "integer", "minimum": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

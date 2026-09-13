@@ -45,6 +45,29 @@ def _require_hash(value: Any) -> str:
     return value
 
 
+def artifact_hash_material(*, schema_version: int, payload: JSONValue) -> dict[str, JSONValue]:
+    """Return the exact object whose RFC 8785 bytes define artifact content identity.
+
+    The preimage contains exactly ``schema_version`` and ``payload``. Artifact type,
+    artifact id, revision, and the digest field are intentionally excluded.
+    """
+
+    _require_schema_version(schema_version)
+    payload_bytes = canonical_json_bytes(payload)
+    return {
+        "schema_version": schema_version,
+        "payload": strict_json_loads(payload_bytes),
+    }
+
+
+def artifact_content_hash(*, schema_version: int, payload: JSONValue) -> str:
+    """Hash the canonical artifact content-hash preimage."""
+
+    return hash_json_content(
+        artifact_hash_material(schema_version=schema_version, payload=payload)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactRef:
     artifact_type: str
@@ -83,11 +106,11 @@ class ArtifactRef:
 class ImmutableArtifactEnvelope:
     """Immutable artifact identity plus an immutable snapshot of JSON payload bytes.
 
-    `content_hash` is SHA-256 over canonical JSON containing `schema_version` +
-    `payload`.
-    Identity, revision, and the hash field itself are intentionally excluded. Including the
-    schema version makes ArtifactRef indirectly pin the interpretation contract as well as
-    payload bytes, while identical content across revisions retains the same hash.
+    ``content_hash`` is SHA-256 over RFC 8785 canonical bytes of the exact object
+    ``{"schema_version": schema_version, "payload": payload}``. Identity, revision,
+    and the hash field itself are intentionally excluded. Including schema version makes
+    ArtifactRef pin the interpretation contract while identical content across revisions
+    retains the same content hash.
     """
 
     artifact_type: str
@@ -112,8 +135,9 @@ class ImmutableArtifactEnvelope:
             raise ArtifactValidationError(f"invalid canonical artifact payload: {exc}") from exc
         if canonical != self._payload_bytes:
             raise ArtifactValidationError("artifact payload bytes are not canonical JSON")
-        actual_hash = hash_json_content(
-            {"schema_version": self.schema_version, "payload": payload}
+        actual_hash = artifact_content_hash(
+            schema_version=self.schema_version,
+            payload=payload,
         )
         if actual_hash != self.content_hash:
             raise ArtifactValidationError("artifact content_hash does not match payload")
@@ -129,9 +153,8 @@ class ImmutableArtifactEnvelope:
         payload: JSONValue,
     ) -> "ImmutableArtifactEnvelope":
         payload_bytes = canonical_json_bytes(payload)
-        digest = hash_json_content(
-            {"schema_version": schema_version, "payload": strict_json_loads(payload_bytes)}
-        )
+        snapshot = strict_json_loads(payload_bytes)
+        digest = artifact_content_hash(schema_version=schema_version, payload=snapshot)
         return cls(
             artifact_type=artifact_type,
             artifact_id=artifact_id,
@@ -143,7 +166,6 @@ class ImmutableArtifactEnvelope:
 
     @property
     def payload(self) -> JSONValue:
-        # A fresh parse prevents callers from mutating the stored snapshot in place.
         return strict_json_loads(self._payload_bytes)
 
     @property

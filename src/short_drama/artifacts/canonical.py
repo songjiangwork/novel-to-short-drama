@@ -5,18 +5,15 @@ import json
 import math
 from typing import Any
 
+import rfc8785
+
 from .errors import CanonicalSerializationError
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 
 
 def _validate_json_value(value: Any, *, _containers: set[int] | None = None) -> None:
-    """Validate the deliberately small JSON value domain used for canonical artifacts.
-
-    Canonicalization is representation-only: it never normalizes user strings, numbers,
-    or array ordering. Object keys must already be strings, and non-finite floats are
-    rejected instead of relying on Python's non-standard NaN/Infinity JSON extension.
-    """
+    """Validate the JSON value domain used for canonical artifacts."""
 
     if value is None or isinstance(value, (str, bool, int)):
         return
@@ -49,26 +46,13 @@ def _validate_json_value(value: Any, *, _containers: set[int] | None = None) -> 
 
 
 def canonical_json_bytes(value: JSONValue) -> bytes:
-    """Return deterministic UTF-8 JSON bytes for a validated JSON-compatible value.
-
-    The v1.2 content hash is SHA-256 over these bytes. No trailing newline is included.
-    """
+    """Return RFC 8785 (JCS) canonical JSON bytes."""
 
     _validate_json_value(value)
     try:
-        text = json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    except (TypeError, ValueError) as exc:  # Defensive: validation should catch these first.
-        raise CanonicalSerializationError(str(exc)) from exc
-    try:
-        return text.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise CanonicalSerializationError("canonical JSON strings must be valid UTF-8") from exc
+        return rfc8785.dumps(value)
+    except rfc8785.CanonicalizationError as exc:
+        raise CanonicalSerializationError(f"RFC 8785 canonicalization failed: {exc}") from exc
 
 
 def content_hash(value: JSONValue) -> str:
@@ -78,7 +62,7 @@ def content_hash(value: JSONValue) -> str:
 
 
 def strict_json_loads(data: bytes | str) -> JSONValue:
-    """Parse JSON while rejecting duplicate keys and non-standard numeric constants."""
+    """Parse JSON while rejecting duplicate keys and non-canonical values."""
 
     def reject_constant(token: str) -> None:
         raise CanonicalSerializationError(f"non-standard JSON numeric constant: {token}")
@@ -101,5 +85,7 @@ def strict_json_loads(data: bytes | str) -> JSONValue:
         raise
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise CanonicalSerializationError(f"invalid JSON: {exc}") from exc
+
     _validate_json_value(value)
+    canonical_json_bytes(value)
     return value

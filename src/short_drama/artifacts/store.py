@@ -18,6 +18,14 @@ from .errors import (
 from .models import ArtifactRef, ImmutableArtifactEnvelope
 
 _SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WINDOWS_RESERVED_BASENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 class FileArtifactStore:
@@ -35,8 +43,13 @@ class FileArtifactStore:
             raise ArtifactPathError(
                 f"{field_name} must match {_SAFE_COMPONENT_RE.pattern!r} for filesystem storage"
             )
-        if value in {".", ".."}:
+        if value in {".", ".."} or value.endswith("."):
             raise ArtifactPathError(f"unsafe {field_name}: {value!r}")
+        windows_basename = value.split(".", 1)[0].upper()
+        if windows_basename in _WINDOWS_RESERVED_BASENAMES:
+            raise ArtifactPathError(
+                f"{field_name} uses a Windows-reserved filesystem name: {value!r}"
+            )
         return value
 
     def _path(self, artifact_type: str, artifact_id: str, revision: int) -> Path:
@@ -47,7 +60,7 @@ class FileArtifactStore:
         path = self.root / safe_type / safe_id / f"r{revision:08d}.json"
         try:
             path.resolve().relative_to(self.root)
-        except ValueError as exc:  # Defensive; safe components should make this unreachable.
+        except ValueError as exc:
             raise ArtifactPathError("artifact path escapes configured store root") from exc
         return path
 
@@ -72,8 +85,6 @@ class FileArtifactStore:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            # Hard-link publication is an atomic no-replace operation on the same filesystem.
-            # It therefore cannot silently clobber an immutable revision in a writer race.
             os.link(temp_path, target)
             self._fsync_directory(target.parent)
             return envelope.ref
@@ -154,8 +165,6 @@ class FileArtifactStore:
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
-        # Directory fsync improves durability on POSIX. Some platforms/filesystems do not
-        # support it; publication is already atomic, so lack of directory fsync is non-fatal.
         try:
             fd = os.open(path, os.O_RDONLY)
         except OSError:

@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "validation-report.schema.json",
+  "title": "ValidationReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "validated_refs",
+    "findings",
+    "summary"
+  ],
+  "properties": {
+    "validated_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/lineageRef"
+      },
+      "uniqueItems": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "lineageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "artifact_ref"
+      ],
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/text"
+        },
+        "artifact_ref": {
+          "$ref": "#/$defs/artifactRef"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "code",
+        "severity",
+        "owner_stage",
+        "repair_route",
+        "message",
+        "artifact_refs",
+        "path"
+      ],
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/text"
+        },
+        "code": {
+          "$ref": "#/$defs/text"
+        },
+        "severity": {
+          "enum": [
+            "BLOCKING",
+            "REVIEW_REQUIRED",
+            "WARNING"
+          ]
+        },
+        "owner_stage": {
+          "$ref": "#/$defs/text"
+        },
+        "repair_route": {
+          "$ref": "#/$defs/text"
+        },
+        "message": {
+          "$ref": "#/$defs/text"
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          },
+          "uniqueItems": true
+        },
+        "path": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/text"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blocking_count",
+        "review_required_count",
+        "warning_count",
+        "result"
+      ],
+      "properties": {
+        "blocking_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "review_required_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warning_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "result": {
+          "enum": [
+            "FAIL",
+            "PASS_WITH_REVIEW_ITEMS",
+            "PASS"
+          ]
+        }
+      }
+    }
+  }
+}

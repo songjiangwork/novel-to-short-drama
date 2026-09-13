@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "approval-record.schema.json",
+  "title": "ApprovalRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "target_ref",
+    "validation_report_ref",
+    "target_role",
+    "decision",
+    "reviewer_ref",
+    "decision_timestamp",
+    "review_item_dispositions",
+    "reviewer_notes"
+  ],
+  "properties": {
+    "target_ref": {
+      "$ref": "#/$defs/artifactRef"
+    },
+    "validation_report_ref": {
+      "$ref": "#/$defs/artifactRef"
+    },
+    "target_role": {
+      "$ref": "#/$defs/text"
+    },
+    "decision": {
+      "enum": [
+        "APPROVE",
+        "REVISION_REQUESTED",
+        "ABANDON"
+      ]
+    },
+    "reviewer_ref": {
+      "$ref": "#/$defs/text"
+    },
+    "decision_timestamp": {
+      "$ref": "#/$defs/text"
+    },
+    "review_item_dispositions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/disposition"
+      }
+    },
+    "reviewer_notes": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/text"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "value"
+      ],
+      "properties": {
+        "finding_id": {
+          "$ref": "#/$defs/text"
+        },
+        "value": {
+          "enum": [
+            "ACCEPT_AS_DESIGNED",
+            "REVISION_REQUESTED"
+          ]
+        }
+      }
+    }
+  }
+}

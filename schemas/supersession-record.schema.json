@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supersession-record.schema.json",
+  "title": "SupersessionRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pointer_id",
+    "pointer_kind",
+    "superseded_pointer_ref",
+    "superseding_pointer_ref",
+    "superseded_target_ref",
+    "superseding_target_ref"
+  ],
+  "properties": {
+    "pointer_id": {
+      "$ref": "#/$defs/storageId"
+    },
+    "pointer_kind": {
+      "enum": [
+        "CURRENT",
+        "CURRENT_APPROVED"
+      ]
+    },
+    "superseded_pointer_ref": {
+      "$ref": "#/$defs/artifactRef"
+    },
+    "superseding_pointer_ref": {
+      "$ref": "#/$defs/artifactRef"
+    },
+    "superseded_target_ref": {
+      "$ref": "#/$defs/artifactRef"
+    },
+    "superseding_target_ref": {
+      "$ref": "#/$defs/artifactRef"
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+    },
+    "storageId": {
+      "allOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        {
+          "not": {
+            "pattern": "\\.$"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\\.|$)"
+          }
+        }
+      ]
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

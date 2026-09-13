@@ -18,6 +18,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 def _require_identity(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ArtifactValidationError(f"{field_name} must be a non-empty string without NUL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ArtifactValidationError(f"{field_name} must contain valid UTF-8 text") from exc
     return value
 
 

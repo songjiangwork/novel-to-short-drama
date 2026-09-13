@@ -97,7 +97,9 @@ def strict_json_loads(data: bytes | str) -> JSONValue:
             object_pairs_hook=unique_object,
             parse_constant=reject_constant,
         )
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except CanonicalSerializationError:
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise CanonicalSerializationError(f"invalid JSON: {exc}") from exc
     _validate_json_value(value)
     return value

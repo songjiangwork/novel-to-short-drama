@@ -13,8 +13,8 @@
     "payload"
   ],
   "properties": {
-    "artifact_type": {"type": "string", "minLength": 1},
-    "artifact_id": {"type": "string", "minLength": 1},
+    "artifact_type": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"},
+    "artifact_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"},
     "revision": {"type": "integer", "minimum": 1},
     "schema_version": {"type": "integer", "minimum": 1},
     "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

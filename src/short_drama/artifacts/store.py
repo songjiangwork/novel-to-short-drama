@@ -17,7 +17,7 @@ from .errors import (
 )
 from .models import ArtifactRef, ImmutableArtifactEnvelope
 
-_SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SAFE_COMPONENT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _WINDOWS_RESERVED_BASENAMES = {
     "CON",
     "PRN",
@@ -29,11 +29,25 @@ _WINDOWS_RESERVED_BASENAMES = {
 
 
 class FileArtifactStore:
-    """Lightweight immutable filesystem store for canonical v1.2 artifacts."""
+    """Lightweight immutable filesystem store for canonical v1.2 artifacts.
+
+    Security boundary: the configured store root and its parent path are expected to be
+    controlled by trusted code/users and must not be concurrently rewritten by an
+    untrusted process. The store rejects symlinked roots, artifact directories, and
+    revision targets, but it is not intended to sandbox a hostile shared filesystem.
+
+    Storage path components are deliberately restricted to lowercase ASCII so artifact
+    identities map one-to-one on both case-sensitive and case-insensitive filesystems.
+    """
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
-        self.root = Path(root).expanduser().resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        raw_root = Path(root).expanduser()
+        if raw_root.is_symlink():
+            raise ArtifactPathError(f"artifact store root must not be a symlink: {raw_root}")
+        raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.is_symlink():
+            raise ArtifactPathError(f"artifact store root must not be a symlink: {raw_root}")
+        self.root = raw_root.resolve()
         if not self.root.is_dir():
             raise ArtifactStoreError(f"artifact store root is not a directory: {self.root}")
 
@@ -52,12 +66,24 @@ class FileArtifactStore:
             )
         return value
 
+    @staticmethod
+    def _reject_symlink(path: Path, field_name: str) -> None:
+        if path.is_symlink():
+            raise ArtifactPathError(f"{field_name} must not be a symlink: {path}")
+
     def _path(self, artifact_type: str, artifact_id: str, revision: int) -> Path:
         safe_type = self._safe_component(artifact_type, "artifact_type")
         safe_id = self._safe_component(artifact_id, "artifact_id")
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise ArtifactPathError("revision must be an integer >= 1")
-        path = self.root / safe_type / safe_id / f"r{revision:08d}.json"
+
+        type_dir = self.root / safe_type
+        id_dir = type_dir / safe_id
+        path = id_dir / f"r{revision:08d}.json"
+        self._reject_symlink(type_dir, "artifact_type directory")
+        self._reject_symlink(id_dir, "artifact_id directory")
+        self._reject_symlink(path, "artifact revision target")
+
         try:
             path.resolve().relative_to(self.root)
         except ValueError as exc:
@@ -67,8 +93,22 @@ class FileArtifactStore:
     def put(self, envelope: ImmutableArtifactEnvelope) -> ArtifactRef:
         if not isinstance(envelope, ImmutableArtifactEnvelope):
             raise ArtifactStoreError("put() requires an ImmutableArtifactEnvelope")
+
         target = self._path(envelope.artifact_type, envelope.artifact_id, envelope.revision)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        type_dir = target.parent.parent
+        id_dir = target.parent
+        type_dir.mkdir(exist_ok=True)
+        self._reject_symlink(type_dir, "artifact_type directory")
+        if not type_dir.is_dir():
+            raise ArtifactPathError(f"artifact_type storage path is not a directory: {type_dir}")
+        id_dir.mkdir(exist_ok=True)
+        self._reject_symlink(id_dir, "artifact_id directory")
+        if not id_dir.is_dir():
+            raise ArtifactPathError(f"artifact_id storage path is not a directory: {id_dir}")
+
+        # Revalidate after directory creation. The trusted-root contract above excludes a
+        # hostile concurrent rename/symlink swap between this check and subsequent I/O.
+        target = self._path(envelope.artifact_type, envelope.artifact_id, envelope.revision)
         data = envelope.canonical_bytes()
 
         if target.exists():

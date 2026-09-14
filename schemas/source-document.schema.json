@@ -19,7 +19,7 @@
         "byte_size": {"type": "integer", "minimum": 0},
         "declared_language": {"type": "string", "minLength": 2},
         "detected_language": {"type": "string", "minLength": 1},
-        "language_detector": {"type": "string", "minLength": 1}
+        "language_detector": {"const": "langid-1.1.6"}
       }
     },
     "normalization": {

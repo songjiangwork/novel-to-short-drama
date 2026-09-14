@@ -19,7 +19,8 @@
     },
     "base_url": {
       "type": "string",
-      "pattern": "^https?://[^\\s@/]+(:\\d+)?(/.*)?$"
+      "description": "OpenAI-compatible endpoint prefix. Must be http(s) with a hostname, no embedded credentials, and a path of exactly /v1 (the adapter appends /chat/completions). The schema pins the coarse shape; Python validation is authoritative for a valid port, well-formed IPv6, and no query/fragment.",
+      "pattern": "^https?://[^\\s@/]+/v1$"
     },
     "credential_environment_name": {
       "anyOf": [

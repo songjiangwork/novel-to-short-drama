@@ -52,6 +52,45 @@ def test_runtime_config_rejects_semantic_field_via_schema():
     assert errors
 
 
+def _runtime_config_with_base_url(base_url: str) -> dict:
+    return {
+        "schema_version": 1,
+        "transport_id": "llm-local",
+        "base_url": base_url,
+        "credential_environment_name": None,
+        "timeout_seconds": 30,
+    }
+
+
+@pytest.mark.parametrize(
+    "bad_base_url",
+    [
+        "http://127.0.0.1:8080/foo",  # arbitrary non-canonical path
+        "http://127.0.0.1:8080/v1/",  # trailing slash
+        "http://127.0.0.1:8080",  # missing /v1 path
+        "https://user:pass@127.0.0.1:8080/v1",  # embedded credentials
+    ],
+)
+def test_runtime_config_schema_rejects_non_v1_base_url(bad_base_url):
+    # The schema no longer advertises arbitrary paths: a base_url that is not
+    # exactly a /v1 prefix (and carries no embedded credentials) is rejected.
+    errors = _validate(
+        _runtime_config_with_base_url(bad_base_url),
+        _schema("llm-runtime-config.schema.json"),
+    )
+    assert errors
+
+
+def test_runtime_config_schema_accepts_v1_base_url():
+    assert (
+        _validate(
+            _runtime_config_with_base_url("http://127.0.0.1:8080/v1"),
+            _schema("llm-runtime-config.schema.json"),
+        )
+        == []
+    )
+
+
 def test_semantic_profile_rejects_unknown_field_via_schema():
     data = load_yaml(PROFILES_DIR / "story_llm_qwen_v1.yaml")
     data["base_url"] = "http://127.0.0.1:8080"

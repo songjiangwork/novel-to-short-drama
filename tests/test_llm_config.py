@@ -143,6 +143,62 @@ def test_runtime_config_accepts_canonical_local_base_url(tmp_path):
     assert config.base_url == "http://127.0.0.1:8080/v1"
 
 
+def test_runtime_config_accepts_well_formed_ipv6_base_url(tmp_path):
+    # A well-formed bracketed IPv6 address with /v1 is a valid base URL.
+    path = tmp_path / "llm.yaml"
+    _write_runtime_config(path, base_url="http://[::1]:8080/v1")
+    config = load_runtime_config(path)
+    assert config.base_url == "http://[::1]:8080/v1"
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://[::1/v1",  # unclosed bracket
+        "http://[gg:gg:gg]/v1",  # non-hex IPv6 group
+        "http://[1:2:3:4:5:6:7:8:9]/v1",  # too many IPv6 groups
+        "http://[::1]junk:80/v1",  # trailing junk after a bracketed IPv6
+    ],
+)
+def test_runtime_config_rejects_malformed_ipv6_as_config_error(tmp_path, bad_url):
+    # Malformed bracketed IPv6 must surface as a secret-safe, non-retryable
+    # LLMConfigError, never a raw parser ValueError.
+    path = tmp_path / "llm.yaml"
+    _write_runtime_config(path, base_url=bad_url)
+    with pytest.raises(LLMConfigError):
+        load_runtime_config(path)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://127.0.0.1:99999/v1",  # port out of range
+        "http://127.0.0.1:0/v1",  # port 0 is not usable
+        "http://127.0.0.1:abc/v1",  # non-numeric port
+        "http://[::1]:99999/v1",  # out-of-range port on an IPv6 host
+    ],
+)
+def test_runtime_config_rejects_invalid_port_as_config_error(tmp_path, bad_url):
+    path = tmp_path / "llm.yaml"
+    _write_runtime_config(path, base_url=bad_url)
+    with pytest.raises(LLMConfigError):
+        load_runtime_config(path)
+
+
+def test_runtime_config_base_url_error_is_non_retryable():
+    # LLMConfigError is a non-retryable, secret-safe configuration failure.
+    assert LLMConfigError.retryable is False
+    for bad_url in ("http://[::1/v1", "http://127.0.0.1:99999/v1"):
+        with pytest.raises(LLMConfigError):
+            RuntimeConfig(
+                schema_version=1,
+                transport_id="t",
+                base_url=bad_url,
+                credential_environment_name=None,
+                timeout_seconds=30,
+            )
+
+
 # ---------------------------------------------------------------------------
 # Credential isolation
 # ---------------------------------------------------------------------------

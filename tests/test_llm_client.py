@@ -624,6 +624,59 @@ def test_validate_max_attempts_rejects_out_of_range():
 
 
 # ---------------------------------------------------------------------------
+# OutputSchema error taxonomy: invalid schema input is a non-retryable config
+# error, never a raw canonical-serialization / low-level parser exception.
+# ---------------------------------------------------------------------------
+
+
+def test_output_schema_create_rejects_nan_as_config_error():
+    # A non-canonical numeric value (NaN) is rejected by the canonical JSON
+    # authority; it must surface as a non-retryable LLMConfigError, not a raw
+    # CanonicalSerializationError / ArtifactError / ValueError.
+    schema = {"type": "object", "properties": {"a": {"const": float("nan")}}}
+    with pytest.raises(LLMConfigError) as exc:
+        OutputSchema.create(schema_id="s", schema_version=1, schema=schema)
+    assert exc.value.retryable is False
+
+
+def test_output_schema_create_rejects_inf_as_config_error():
+    schema = {"type": "object", "properties": {"a": {"const": float("inf")}}}
+    with pytest.raises(LLMConfigError):
+        OutputSchema.create(schema_id="s", schema_version=1, schema=schema)
+
+
+def test_output_schema_create_rejects_nested_nan_as_config_error():
+    schema = {"type": "object", "properties": {"a": {"enum": [1, float("nan")]}}}
+    with pytest.raises(LLMConfigError):
+        OutputSchema.create(schema_id="s", schema_version=1, schema=schema)
+
+
+def test_output_schema_from_dict_rejects_nan_as_config_error():
+    value = {
+        "schema_id": "s",
+        "schema_version": 1,
+        "schema_hash": "0" * 64,
+        "schema": {"type": "object", "properties": {"a": {"const": float("nan")}}},
+    }
+    with pytest.raises(LLMConfigError) as exc:
+        OutputSchema.from_dict(value)
+    assert exc.value.retryable is False
+
+
+def test_output_schema_create_accepts_canonical_schema():
+    # A canonical, valid schema still constructs fine (regression guard).
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["a"],
+        "properties": {"a": {"type": "string"}},
+    }
+    spec = OutputSchema.create(schema_id="s", schema_version=1, schema=schema)
+    assert len(spec.schema_hash) == 64
+    assert spec.schema == schema
+
+
+# ---------------------------------------------------------------------------
 # Request fingerprint
 # ---------------------------------------------------------------------------
 

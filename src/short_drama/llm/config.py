@@ -35,16 +35,30 @@ def _validate_base_url(value: Any) -> str:
     hostname, embed no credentials, use a valid port, carry no query or
     fragment, and have a path of exactly ``/v1`` (the llama.cpp convention).
     Non-canonical local URLs (trailing slashes, missing ``/v1``, embedded
-    credentials, ...) fail closed. Failures are non-retryable configuration
-    errors.
+    credentials, malformed IPv6, ...) fail closed. Malformed URL / IPv6 / port
+    syntax is converted to a secret-safe, non-retryable :class:`LLMConfigError`
+    rather than leaking a raw parser exception (e.g. ``ValueError``).
+
+    Python is authoritative for the details JSON Schema cannot express cleanly
+    (valid port, well-formed IPv6, no query/fragment); the schema only pins
+    the coarse shape (http/https, no credentials, path of exactly ``/v1``).
     """
 
     if not isinstance(value, str) or not value:
         raise LLMConfigError("base_url must be a non-empty string")
-    parts = urlsplit(value)
+    # urlsplit and the hostname/port properties can raise ValueError for
+    # malformed IPv6 (e.g. an unclosed bracket), a non-hex IPv6 group, or an
+    # invalid/out-of-range port. Catch it so a raw parser error never leaks;
+    # the message is secret-safe (it never echoes the raw URL).
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        raise LLMConfigError("base_url is not a valid URL") from None
     if parts.scheme not in ("http", "https"):
         raise LLMConfigError("base_url must use an http or https scheme")
-    if not parts.hostname:
+    if not hostname:
         raise LLMConfigError("base_url must include a hostname")
     if parts.username is not None or parts.password is not None:
         raise LLMConfigError(
@@ -52,22 +66,17 @@ def _validate_base_url(value: Any) -> str:
         )
     if parts.query or parts.fragment:
         raise LLMConfigError("base_url must not include a query or fragment")
-    # Validate the port explicitly (urlsplit reports out-of-range ports as None).
-    netloc = parts.netloc
-    if netloc and not netloc.startswith("["):
-        if ":" in netloc:
-            port_str = netloc.rsplit(":", 1)[1]
-            if not port_str.isdigit() or not 1 <= int(port_str) <= 65535:
-                raise LLMConfigError(
-                    "base_url port must be an integer in [1, 65535]"
-                )
+    # parts.port is None when no port is given, otherwise an int in [0, 65535]
+    # (invalid ports already raised ValueError above). Port 0 is not usable.
+    if port is not None and not 1 <= port <= 65535:
+        raise LLMConfigError("base_url port must be an integer in [1, 65535]")
     # The adapter appends /chat/completions to this prefix. Requiring the path
     # to be exactly /v1 keeps the request path canonical (the llama.cpp
     # convention) and prevents double-pathing or a silently wrong host.
     if parts.path != "/v1":
         raise LLMConfigError(
             "base_url path must be exactly /v1 "
-            f"(the adapter appends /chat/completions): {value!r}"
+            "(the adapter appends /chat/completions)"
         )
     return value
 

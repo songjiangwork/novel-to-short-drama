@@ -349,13 +349,23 @@ class OutputSchema:
     ) -> "OutputSchema":
         if not isinstance(schema, dict):
             raise LLMConfigError("schema must be a JSON object")
-        schema_bytes = canonical_json_bytes(schema)
-        snapshot = strict_json_loads(schema_bytes)
+        # Canonicalization / strict-snapshot construction of a user-supplied
+        # schema can fail (e.g. a non-canonical value such as NaN/Inf, a
+        # non-finite float, or an unserializable type). Any such failure is a
+        # non-retryable configuration error and must surface as LLMConfigError,
+        # never a raw CanonicalSerializationError / ArtifactError / TypeError /
+        # ValueError.
+        try:
+            schema_bytes = canonical_json_bytes(schema)
+            snapshot = strict_json_loads(schema_bytes)
+            schema_hash = content_hash(schema)
+        except (CanonicalSerializationError, TypeError, ValueError) as exc:
+            raise LLMConfigError(f"invalid output schema: {exc}") from exc
         cls._check_valid_schema(snapshot)
         return cls(
             schema_id=schema_id,
             schema_version=schema_version,
-            schema_hash=content_hash(schema),
+            schema_hash=schema_hash,
             _schema_bytes=schema_bytes,
         )
 
@@ -371,7 +381,12 @@ class OutputSchema:
                 "OutputSchema must contain exactly: "
                 "schema_id, schema_version, schema_hash, schema"
             )
-        schema_bytes = canonical_json_bytes(value["schema"])
+        # As in create(): any canonicalization failure of a user-supplied schema
+        # must surface as a non-retryable LLMConfigError, not a raw parser error.
+        try:
+            schema_bytes = canonical_json_bytes(value["schema"])
+        except (CanonicalSerializationError, TypeError, ValueError) as exc:
+            raise LLMConfigError(f"invalid output schema: {exc}") from exc
         return cls(
             schema_id=value["schema_id"],
             schema_version=value["schema_version"],

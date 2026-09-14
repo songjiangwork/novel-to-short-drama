@@ -31,8 +31,11 @@ max_output_tokens: 4096
 # JSON Schema validation remains the authority).
 structured_output_mode: json_schema
 
-# Reasoning settings (semantic; affect output). Local Qwen via llama.cpp does
-# not expose a reasoning-effort request field, so it is kept disabled.
+# Reasoning settings (semantic; affect output). Disabled reasoning is
+# explicitly mapped by the adapter to the provider request
+# reasoning_effort: "none", so the server startup default never silently
+# decides behavior. (Enabled reasoning would carry an explicit supported
+# effort, e.g. low/medium/high.)
 reasoning:
   enabled: false
   effort: null

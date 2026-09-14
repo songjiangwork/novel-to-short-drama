@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "v1.2 A-I3 LLM Runtime Transport Config",
+  "description": "Connection/runtime details only: which endpoint to reach, which environment variable holds the credential (or null), and the timeout. Must not contain result-affecting generation semantics (temperature, reasoning, prompt version, output-token budget, model). Never includes the credential value itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "transport_id",
+    "base_url",
+    "credential_environment_name",
+    "timeout_seconds"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "transport_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "base_url": {
+      "type": "string",
+      "pattern": "^https?://[^\\s@/]+(:\\d+)?(/.*)?$"
+    },
+    "credential_environment_name": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+      ]
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 3600
+    }
+  }
+}

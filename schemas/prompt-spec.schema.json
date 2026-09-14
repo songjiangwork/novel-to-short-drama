@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "v1.2 A-I3 PromptSpec metadata (prompt.yaml)",
+  "description": "Versioned prompt metadata. The authoritative prompt content hash is computed over the exact system.txt / user.txt template text plus this metadata and the required-variable list, not over this file alone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "prompt_id", "version", "required_variables"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "prompt_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "version": { "type": "integer", "minimum": 1 },
+    "required_variables": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+      "uniqueItems": true
+    }
+  }
+}

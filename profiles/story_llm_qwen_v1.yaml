@@ -1,0 +1,34 @@
+# v1.2 A-I3 Semantic LLM profile — TRACKED.
+#
+# Describes result-affecting generation semantics ONLY. It carries no endpoint,
+# timeout, credential, or hostname, so its hash is a stable semantic identity
+# that is not invalidated by runtime transport changes.
+#
+# Set `model` to the exact model name your OpenAI-compatible server exposes
+# (see GET /v1/models). The tracked example uses a generic Qwen identifier.
+schema_version: 1
+
+# Stable semantic identifier for this profile (part of the semantic identity).
+profile_id: story-llm-qwen-v1
+
+# Provider family (semantic, not a transport detail).
+provider_family: qwen
+
+# Exact model name served by the OpenAI-compatible endpoint.
+model: qwen
+
+# Deterministic generation for extraction.
+temperature: 0.0
+
+# Output token budget for a single structured generation.
+max_output_tokens: 4096
+
+# Structured-output generation constraint (a generation constraint only; local
+# JSON Schema validation remains the authority).
+structured_output_mode: json_schema
+
+# Reasoning settings (semantic; affect output). Local Qwen via llama.cpp does
+# not expose a reasoning-effort request field, so it is kept disabled.
+reasoning:
+  enabled: false
+  effort: null

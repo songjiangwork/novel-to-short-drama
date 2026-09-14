@@ -942,6 +942,37 @@ def test_real_urllib_connection_failure_classified():
         )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1 /v1/chat/completions",  # space in the hostname
+        "http://127.0.0.1\x00/v1/chat/completions",  # NUL in the hostname
+        "http://127.0.0.1\n/v1/chat/completions",  # newline in the hostname
+    ],
+)
+def test_urllib_transport_invalid_url_translated_to_config_error(url):
+    # Defense in depth: even if a malformed URL reaches the transport seam
+    # (bypassing config validation), the stdlib http.client.InvalidURL must
+    # never escape as a raw exception. It is translated to a non-retryable,
+    # secret-safe LLMConfigError. This is deterministic: InvalidURL is raised
+    # during request-line construction, before any I/O.
+    transport = UrllibTransport()
+    with pytest.raises(LLMConfigError) as exc:
+        transport.post(
+            url=url,
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=5,
+        )
+    error = exc.value
+    assert error.retryable is False
+    # Secret-safe: the raw malformed URL content is never echoed, and the
+    # stdlib cause (whose message embeds the URL) is dropped.
+    assert url not in str(error)
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
+
+
 class _SlowHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         time.sleep(1.0)

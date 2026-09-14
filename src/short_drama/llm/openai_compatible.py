@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import urllib.error
@@ -82,6 +83,17 @@ class UrllibTransport:
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 return TransportResponse(status=response.status, body=response.read())
+        except http.client.InvalidURL:
+            # Defense in depth: a malformed URL that bypassed config
+            # validation (e.g. injected at the transport seam) must never
+            # escape as a raw stdlib exception. It is a non-retryable
+            # configuration error. The stdlib InvalidURL message embeds the
+            # raw (potentially sensitive) URL, so the translation is
+            # secret-safe and drops the cause chain.
+            raise LLMConfigError(
+                "LLM request URL was rejected by the HTTP stack as invalid; "
+                "base_url must not contain whitespace or control characters"
+            ) from None
         except urllib.error.HTTPError as exc:
             try:
                 body_bytes = exc.read()

@@ -39,6 +39,11 @@ def _validate_base_url(value: Any) -> str:
     syntax is converted to a secret-safe, non-retryable :class:`LLMConfigError`
     rather than leaking a raw parser exception (e.g. ``ValueError``).
 
+    Whitespace and ASCII control characters (NUL, newline, tab, ...) are
+    rejected outright: Python's HTTP stack refuses to send a request whose
+    host/URL contains them (``http.client.InvalidURL``), so accepting them
+    here would only defer an untyped failure into the transport.
+
     Python is authoritative for the details JSON Schema cannot express cleanly
     (valid port, well-formed IPv6, no query/fragment); the schema only pins
     the coarse shape (http/https, no credentials, path of exactly ``/v1``).
@@ -46,6 +51,17 @@ def _validate_base_url(value: Any) -> str:
 
     if not isinstance(value, str) or not value:
         raise LLMConfigError("base_url must be a non-empty string")
+    # urlsplit does NOT reject whitespace or ASCII control characters (e.g.
+    # "http://127.0.0.1 /v1" parses with hostname "127.0.0.1 "), but Python's
+    # HTTP stack (http.client) refuses to send such a request and raises
+    # http.client.InvalidURL at transport time. Reject them here, before any
+    # transport, as a secret-safe, non-retryable configuration error. The
+    # message is fixed and never echoes the (potentially sensitive) raw URL.
+    for char in value:
+        if ord(char) < 32 or ord(char) == 127 or char.isspace():
+            raise LLMConfigError(
+                "base_url must not contain whitespace or control characters"
+            )
     # urlsplit and the hostname/port properties can raise ValueError for
     # malformed IPv6 (e.g. an unclosed bracket), a non-hex IPv6 group, or an
     # invalid/out-of-range port. Catch it so a raw parser error never leaks;

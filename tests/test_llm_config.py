@@ -185,10 +185,41 @@ def test_runtime_config_rejects_invalid_port_as_config_error(tmp_path, bad_url):
         load_runtime_config(path)
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://127.0.0.1 /v1",  # space in the hostname
+        "http://127.0.0.1:8080 /v1",  # space after the port
+        "http://127.0.0.1\x00/v1",  # NUL in the hostname
+        "http://127.0.0.1\n/v1",  # newline in the hostname
+        "http://127.0.0.1\t/v1",  # tab in the hostname
+    ],
+)
+def test_runtime_config_rejects_whitespace_and_control_chars(tmp_path, bad_url):
+    # Whitespace and ASCII control characters are rejected by Python's HTTP
+    # stack (http.client.InvalidURL). urlsplit does NOT catch them (e.g.
+    # "http://127.0.0.1 /v1" parses with hostname "127.0.0.1 "), so they must
+    # fail closed at config time as a secret-safe, non-retryable
+    # LLMConfigError, never escape to the transport as a raw exception.
+    path = tmp_path / "llm.yaml"
+    _write_runtime_config(path, base_url=bad_url)
+    with pytest.raises(LLMConfigError) as exc:
+        load_runtime_config(path)
+    assert exc.value.retryable is False
+    # Secret-safe: the fixed message never echoes the raw URL content.
+    assert str(exc.value) == (
+        "base_url must not contain whitespace or control characters"
+    )
+
+
 def test_runtime_config_base_url_error_is_non_retryable():
     # LLMConfigError is a non-retryable, secret-safe configuration failure.
     assert LLMConfigError.retryable is False
-    for bad_url in ("http://[::1/v1", "http://127.0.0.1:99999/v1"):
+    for bad_url in (
+        "http://[::1/v1",
+        "http://127.0.0.1:99999/v1",
+        "http://127.0.0.1 /v1",  # whitespace/control char
+    ):
         with pytest.raises(LLMConfigError):
             RuntimeConfig(
                 schema_version=1,

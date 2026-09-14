@@ -9,6 +9,7 @@ from .comfyui.client import ComfyUIClient
 from .io import dump_json, load_json, load_yaml
 from .prompting.builder import build_prompt
 from .qc.state import record_qc_result
+from .story import StoryError, ingest_source_project, plan_chunks_project
 from .validation import validate_file, validate_shot
 from .workflows.request import build_generation_request
 from .workflows.retry import build_gated_retry
@@ -27,6 +28,8 @@ def main():
     a=s.add_parser("record-qc"); a.add_argument("qc"); a.add_argument("--result",required=True)
     a=s.add_parser("retry"); a.add_argument("request"); a.add_argument("--result",required=True); a.add_argument("-o","--output",default="retry_request.json")
     a=s.add_parser("assemble"); a.add_argument("timeline"); a.add_argument("--concat-file",default="concat.txt")
+    a=s.add_parser("ingest-source"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--encoding")
+    a=s.add_parser("plan-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--profile",required=True)
     x=p.parse_args()
     if x.cmd=="validate":
         e=validate_shot(x.path) if x.kind=="shot" else validate_file(x.path,x.kind); out({"valid":not e,"errors":e}); return 0 if not e else 2
@@ -48,5 +51,13 @@ def main():
         gated=build_gated_retry(load_json(x.request),load_json(x.result))
         if not gated["valid"]: out(gated); return 2
         q=gated["request"]; dump_json(q,x.output); out({"output":x.output,"state":"READY","attempt":q["attempt"],"seed":q["seed"]}); return 0
+    if x.cmd=="ingest-source":
+        try: q=ingest_source_project(x.project,runs_root=x.runs_root,encoding=x.encoding)
+        except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
+        out(q); return 0
+    if x.cmd=="plan-chunks":
+        try: q=plan_chunks_project(x.project,runs_root=x.runs_root,profile_path=x.profile)
+        except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
+        out(q); return 0
     if x.cmd=="assemble": q=build_concat_plan(x.timeline); render_concat_file(q,x.concat_file); out({"concat_file":x.concat_file,"clips":len(q["clips"])}); return 0
     return 1

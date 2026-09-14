@@ -21,25 +21,33 @@ SOURCE_PARSER_ID = "short_drama_source_ingestion_v1"
 SOURCE_PARSER_VERSION = "1"
 LANGUAGE_DETECTOR_ID = "langid-1.1.6"
 
+_STORAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CHAPTER_ID_RE = re.compile(r"^CH[0-9]{3,}$")
 _PARAGRAPH_ID_RE = re.compile(r"^CH[0-9]{3,}_P[0-9]{4,}$")
 
+_ENGLISH_NUMBER_WORD = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
+)
+_ENGLISH_NUMBER = (
+    rf"(?:\d+|[ivxlcdm]+|{_ENGLISH_NUMBER_WORD}(?:[- ]{_ENGLISH_NUMBER_WORD})*)"
+)
 _ENGLISH_CHAPTER_RE = re.compile(
-    r"^(?P<kind>chapter|part)\s+"
-    r"(?P<number>(?:\d+|[ivxlcdm]+|[a-z]+(?:[- ][a-z]+)*))"
-    r"(?:\s*[:.\-–—]\s*|\s+)?(?P<title>.*)$",
+    rf"^(?P<kind>chapter|part)\s+{_ENGLISH_NUMBER}"
+    r"(?:\s*[:.\-–—](?:\s*\S.*)?)?$",
     re.IGNORECASE,
 )
 _ENGLISH_SPECIAL_RE = re.compile(
-    r"^(?P<kind>prologue|epilogue)(?:\s*[:.\-–—]\s*|\s+)?(?P<title>.*)$",
+    r"^(?P<kind>prologue|epilogue)(?:\s*[:.\-–—](?:\s*\S.*)?)?$",
     re.IGNORECASE,
 )
 _CHINESE_HEADING_RE = re.compile(
     r"^(?P<kind>"
     r"第[零〇一二三四五六七八九十百千万两\d]+[章节卷部]"
     r"|序章|序言|楔子|尾声|后记"
-    r")(?P<title>(?:\s*[:：.\-–—]?\s*.*)?)$"
+    r")(?:\s*[:：.\-–—]\s*\S.*|\s+\S.*)?$"
 )
 
 
@@ -53,9 +61,19 @@ def _require_text(value: Any, field_name: str) -> str:
     return value
 
 
+def _require_storage_id(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or _STORAGE_ID_RE.fullmatch(value) is None:
+        raise SourceStructureError(
+            f"{field_name} must match {_STORAGE_ID_RE.pattern!r}"
+        )
+    return value
+
+
 def _require_exact_keys(value: Any, keys: set[str], name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
-        raise SourceStructureError(f"{name} must contain exactly: {', '.join(sorted(keys))}")
+        raise SourceStructureError(
+            f"{name} must contain exactly: {', '.join(sorted(keys))}"
+        )
     return value
 
 
@@ -79,26 +97,43 @@ class SourceParagraph:
         if self.source_pages is not None:
             pages = tuple(self.source_pages)
             if not pages:
-                raise SourceStructureError("source_pages must be null or a non-empty page list")
-            if any(isinstance(page, bool) or not isinstance(page, int) or page < 1 for page in pages):
-                raise SourceStructureError("source_pages must contain positive integers")
+                raise SourceStructureError(
+                    "source_pages must be null or a non-empty page list"
+                )
+            if any(
+                isinstance(page, bool) or not isinstance(page, int) or page < 1
+                for page in pages
+            ):
+                raise SourceStructureError(
+                    "source_pages must contain positive integers"
+                )
             if tuple(sorted(set(pages))) != pages:
-                raise SourceStructureError("source_pages must be strictly increasing and unique")
+                raise SourceStructureError(
+                    "source_pages must be strictly increasing and unique"
+                )
             object.__setattr__(self, "source_pages", pages)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "paragraph_id": self.paragraph_id,
             "text_original": self.text_original,
-            "source_pages": None if self.source_pages is None else list(self.source_pages),
+            "source_pages": (
+                None if self.source_pages is None else list(self.source_pages)
+            ),
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "SourceParagraph":
-        _require_exact_keys(value, {"paragraph_id", "text_original", "source_pages"}, "SourceParagraph")
+        _require_exact_keys(
+            value,
+            {"paragraph_id", "text_original", "source_pages"},
+            "SourceParagraph",
+        )
         pages = value["source_pages"]
         if pages is not None and not isinstance(pages, list):
-            raise SourceStructureError("SourceParagraph.source_pages must be null or a list")
+            raise SourceStructureError(
+                "SourceParagraph.source_pages must be null or a list"
+            )
         return cls(
             paragraph_id=value["paragraph_id"],
             text_original=value["text_original"],
@@ -119,29 +154,46 @@ class SourceChapter:
             raise SourceStructureError(f"invalid chapter_id: {self.chapter_id!r}")
         if self.title_original is not None:
             _require_text(self.title_original, "title_original")
-        if self.heading_kind not in {"chapter", "part", "prologue", "epilogue", "synthetic"}:
-            raise SourceStructureError(f"unsupported heading_kind: {self.heading_kind!r}")
+        if self.heading_kind not in {
+            "chapter",
+            "part",
+            "prologue",
+            "epilogue",
+            "synthetic",
+        }:
+            raise SourceStructureError(
+                f"unsupported heading_kind: {self.heading_kind!r}"
+            )
+
         paragraphs = tuple(self.paragraphs)
         if not paragraphs:
-            raise SourceStructureError(f"chapter {self.chapter_id} must contain at least one paragraph")
-        expected_prefix = f"{self.chapter_id}_P"
+            raise SourceStructureError(
+                f"chapter {self.chapter_id} must contain at least one paragraph"
+            )
+
         ids = [paragraph.paragraph_id for paragraph in paragraphs]
         if len(ids) != len(set(ids)):
-            raise SourceStructureError(f"chapter {self.chapter_id} contains duplicate paragraph IDs")
-        if any(not pid.startswith(expected_prefix) for pid in ids):
-            raise SourceStructureError(f"paragraph ID does not belong to {self.chapter_id}")
+            raise SourceStructureError(
+                f"chapter {self.chapter_id} contains duplicate paragraph IDs"
+            )
         expected_ids = [
             f"{self.chapter_id}_P{index:04d}"
             for index in range(1, len(paragraphs) + 1)
         ]
         if ids != expected_ids:
             raise SourceStructureError(
-                f"chapter {self.chapter_id} paragraph IDs must be deterministic and sequential"
+                f"chapter {self.chapter_id} paragraph IDs must be deterministic "
+                "and sequential"
             )
+
         if self.heading_kind == "synthetic" and self.title_original is not None:
-            raise SourceStructureError("synthetic chapter must not have title_original")
+            raise SourceStructureError(
+                "synthetic chapter must not have title_original"
+            )
         if self.heading_kind != "synthetic" and self.title_original is None:
-            raise SourceStructureError("detected chapter heading requires title_original")
+            raise SourceStructureError(
+                "detected chapter heading requires title_original"
+            )
         object.__setattr__(self, "paragraphs", paragraphs)
 
     def to_dict(self) -> dict[str, object]:
@@ -149,7 +201,9 @@ class SourceChapter:
             "chapter_id": self.chapter_id,
             "title_original": self.title_original,
             "heading_kind": self.heading_kind,
-            "paragraphs": [paragraph.to_dict() for paragraph in self.paragraphs],
+            "paragraphs": [
+                paragraph.to_dict() for paragraph in self.paragraphs
+            ],
         }
 
     @classmethod
@@ -160,12 +214,17 @@ class SourceChapter:
             "SourceChapter",
         )
         if not isinstance(value["paragraphs"], list):
-            raise SourceStructureError("SourceChapter.paragraphs must be a list")
+            raise SourceStructureError(
+                "SourceChapter.paragraphs must be a list"
+            )
         return cls(
             chapter_id=value["chapter_id"],
             title_original=value["title_original"],
             heading_kind=value["heading_kind"],
-            paragraphs=tuple(SourceParagraph.from_dict(item) for item in value["paragraphs"]),
+            paragraphs=tuple(
+                SourceParagraph.from_dict(item)
+                for item in value["paragraphs"]
+            ),
         )
 
 
@@ -183,12 +242,20 @@ class SourceInfo:
         if self.type not in {"txt", "pdf"}:
             raise SourceStructureError("source.type must be 'txt' or 'pdf'")
         _require_text(self.path, "source.path")
-        if not isinstance(self.raw_sha256, str) or _SHA256_RE.fullmatch(self.raw_sha256) is None:
-            raise SourceStructureError("source.raw_sha256 must be lowercase SHA-256 hex")
+        if (
+            not isinstance(self.raw_sha256, str)
+            or _SHA256_RE.fullmatch(self.raw_sha256) is None
+        ):
+            raise SourceStructureError(
+                "source.raw_sha256 must be lowercase SHA-256 hex"
+            )
         _require_nonnegative_int(self.byte_size, "source.byte_size")
         _require_text(self.declared_language, "source.declared_language")
         _require_text(self.detected_language, "source.detected_language")
-        _require_text(self.language_detector, "source.language_detector")
+        if self.language_detector != LANGUAGE_DETECTOR_ID:
+            raise SourceStructureError(
+                f"source.language_detector must be {LANGUAGE_DETECTOR_ID!r}"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -230,7 +297,10 @@ class NormalizationInfo:
         _require_text(self.input_encoding, "normalization.input_encoding")
         if self.newline != "LF":
             raise SourceStructureError("normalization.newline must be LF")
-        _require_text(self.parser_id, "normalization.parser_id")
+        if self.parser_id != SOURCE_PARSER_ID:
+            raise SourceStructureError(
+                f"normalization.parser_id must be {SOURCE_PARSER_ID!r}"
+            )
         _require_text(self.parser_version, "normalization.parser_version")
 
     def to_dict(self) -> dict[str, str]:
@@ -263,20 +333,25 @@ class SourceDocument:
     def __post_init__(self) -> None:
         if self.schema_version != SOURCE_DOCUMENT_SCHEMA_VERSION:
             raise SourceStructureError(
-                f"SourceDocument.schema_version must be {SOURCE_DOCUMENT_SCHEMA_VERSION}"
+                "SourceDocument.schema_version must be "
+                f"{SOURCE_DOCUMENT_SCHEMA_VERSION}"
             )
-        _require_text(self.project_id, "project_id")
-        _require_text(self.document_id, "document_id")
+        _require_storage_id(self.project_id, "project_id")
+        _require_storage_id(self.document_id, "document_id")
         if not isinstance(self.source, SourceInfo):
             raise SourceStructureError("source must be SourceInfo")
         if not isinstance(self.normalization, NormalizationInfo):
-            raise SourceStructureError("normalization must be NormalizationInfo")
+            raise SourceStructureError(
+                "normalization must be NormalizationInfo"
+            )
+
         chapters = tuple(self.chapters)
         if not chapters:
-            raise SourceStructureError("SourceDocument must contain at least one chapter")
+            raise SourceStructureError(
+                "SourceDocument must contain at least one chapter"
+            )
+
         chapter_ids = [chapter.chapter_id for chapter in chapters]
-        if len(chapter_ids) != len(set(chapter_ids)):
-            raise SourceStructureError("SourceDocument chapter IDs must be unique")
         expected_chapter_ids = [
             f"CH{index:03d}" for index in range(1, len(chapters) + 1)
         ]
@@ -284,13 +359,51 @@ class SourceDocument:
             raise SourceStructureError(
                 "SourceDocument chapter IDs must be deterministic and sequential"
             )
+
         paragraph_ids = [
             paragraph.paragraph_id
             for chapter in chapters
             for paragraph in chapter.paragraphs
         ]
         if len(paragraph_ids) != len(set(paragraph_ids)):
-            raise SourceStructureError("SourceDocument paragraph IDs must be globally unique")
+            raise SourceStructureError(
+                "SourceDocument paragraph IDs must be globally unique"
+            )
+
+        if self.source.type == "txt":
+            if self.normalization.parser_version != SOURCE_PARSER_VERSION:
+                raise SourceStructureError(
+                    "TXT SourceDocument uses unsupported parser_version"
+                )
+            if any(
+                paragraph.source_pages is not None
+                for chapter in chapters
+                for paragraph in chapter.paragraphs
+            ):
+                raise SourceStructureError(
+                    "TXT SourceDocument paragraphs must not carry source_pages"
+                )
+        else:
+            if self.normalization.input_encoding != "pdf-text-extraction":
+                raise SourceStructureError(
+                    "PDF SourceDocument input_encoding must be "
+                    "'pdf-text-extraction'"
+                )
+            if not self.normalization.parser_version.startswith(
+                f"{SOURCE_PARSER_VERSION};pypdf="
+            ):
+                raise SourceStructureError(
+                    "PDF SourceDocument uses unsupported parser metadata"
+                )
+            if any(
+                paragraph.source_pages is None
+                for chapter in chapters
+                for paragraph in chapter.paragraphs
+            ):
+                raise SourceStructureError(
+                    "PDF SourceDocument paragraphs require source_pages"
+                )
+
         object.__setattr__(self, "chapters", chapters)
 
     @property
@@ -302,7 +415,10 @@ class SourceDocument:
         )
 
     def paragraph_index(self) -> dict[str, SourceParagraph]:
-        return {paragraph.paragraph_id: paragraph for paragraph in self.paragraphs}
+        return {
+            paragraph.paragraph_id: paragraph
+            for paragraph in self.paragraphs
+        }
 
     def chapter_index(self) -> dict[str, SourceChapter]:
         return {chapter.chapter_id: chapter for chapter in self.chapters}
@@ -315,7 +431,9 @@ class SourceDocument:
             "source": self.source.to_dict(),
             "normalization": self.normalization.to_dict(),
             "structure": {
-                "chapters": [chapter.to_dict() for chapter in self.chapters],
+                "chapters": [
+                    chapter.to_dict() for chapter in self.chapters
+                ],
             },
         }
 
@@ -323,20 +441,36 @@ class SourceDocument:
     def from_dict(cls, value: dict[str, Any]) -> "SourceDocument":
         _require_exact_keys(
             value,
-            {"schema_version", "project_id", "document_id", "source", "normalization", "structure"},
+            {
+                "schema_version",
+                "project_id",
+                "document_id",
+                "source",
+                "normalization",
+                "structure",
+            },
             "SourceDocument",
         )
         structure = value["structure"]
-        _require_exact_keys(structure, {"chapters"}, "SourceDocument.structure")
+        _require_exact_keys(
+            structure, {"chapters"}, "SourceDocument.structure"
+        )
         if not isinstance(structure["chapters"], list):
-            raise SourceStructureError("SourceDocument.structure.chapters must be a list")
+            raise SourceStructureError(
+                "SourceDocument.structure.chapters must be a list"
+            )
         return cls(
             schema_version=value["schema_version"],
             project_id=value["project_id"],
             document_id=value["document_id"],
             source=SourceInfo.from_dict(value["source"]),
-            normalization=NormalizationInfo.from_dict(value["normalization"]),
-            chapters=tuple(SourceChapter.from_dict(item) for item in structure["chapters"]),
+            normalization=NormalizationInfo.from_dict(
+                value["normalization"]
+            ),
+            chapters=tuple(
+                SourceChapter.from_dict(item)
+                for item in structure["chapters"]
+            ),
         )
 
 
@@ -344,12 +478,17 @@ def _heading_kind(text: str) -> str | None:
     if "\n" in text:
         return None
     stripped = text.strip()
+    if not stripped:
+        return None
+
     special = _ENGLISH_SPECIAL_RE.fullmatch(stripped)
     if special:
         return special.group("kind").lower()
+
     english = _ENGLISH_CHAPTER_RE.fullmatch(stripped)
     if english:
         return english.group("kind").lower()
+
     chinese = _CHINESE_HEADING_RE.fullmatch(stripped)
     if chinese:
         raw = chinese.group("kind")
@@ -370,12 +509,17 @@ class _SourceLine:
     page_break: bool = False
 
 
-def _lines_from_text(text: str, source_page: int | None = None) -> list[_SourceLine]:
+def _lines_from_text(
+    text: str,
+    source_page: int | None = None,
+) -> list[_SourceLine]:
     text = normalize_newlines(text)
     return [_SourceLine(line, source_page) for line in text.split("\n")]
 
 
-def _paragraphize_segment(lines: list[_SourceLine]) -> list[tuple[str, tuple[int, ...] | None]]:
+def _paragraphize_segment(
+    lines: list[_SourceLine],
+) -> list[tuple[str, tuple[int, ...] | None]]:
     while lines and not lines[0].text.strip():
         lines = lines[1:]
     while lines and not lines[-1].text.strip():
@@ -417,9 +561,11 @@ def _paragraphize_segment(lines: list[_SourceLine]) -> list[tuple[str, tuple[int
     return paragraphs
 
 
-def _paragraphize(lines: list[_SourceLine]) -> list[tuple[str, tuple[int, ...] | None]]:
-    # PDF page boundaries are hard paragraphization boundaries. They are not
-    # interpreted as semantic blank lines inside either page.
+def _paragraphize(
+    lines: list[_SourceLine],
+) -> list[tuple[str, tuple[int, ...] | None]]:
+    # PDF page boundaries are hard paragraphization boundaries. A1 does not
+    # heuristically stitch prose across pages.
     segments: list[list[_SourceLine]] = []
     current: list[_SourceLine] = []
     for line in lines:
@@ -440,7 +586,11 @@ def _paragraphize(lines: list[_SourceLine]) -> list[tuple[str, tuple[int, ...] |
 
 def _parse_lines(lines: Iterable[_SourceLine]) -> tuple[SourceChapter, ...]:
     chapter_specs: list[
-        tuple[str | None, str, list[tuple[str, tuple[int, ...] | None]]]
+        tuple[
+            str | None,
+            str,
+            list[tuple[str, tuple[int, ...] | None]],
+        ]
     ] = []
     current_title: str | None = None
     current_kind = "synthetic"
@@ -450,7 +600,9 @@ def _parse_lines(lines: Iterable[_SourceLine]) -> tuple[SourceChapter, ...]:
         nonlocal current_title, current_kind, current_lines
         paragraphs = _paragraphize(current_lines)
         if paragraphs:
-            chapter_specs.append((current_title, current_kind, paragraphs))
+            chapter_specs.append(
+                (current_title, current_kind, paragraphs)
+            )
         current_title = None
         current_kind = "synthetic"
         current_lines = []
@@ -473,15 +625,22 @@ def _parse_lines(lines: Iterable[_SourceLine]) -> tuple[SourceChapter, ...]:
         raise SourceStructureError("source contains no usable paragraphs")
 
     chapters: list[SourceChapter] = []
-    for chapter_index, (title, kind, paragraph_specs) in enumerate(chapter_specs, start=1):
+    for chapter_index, (
+        title,
+        kind,
+        paragraph_specs,
+    ) in enumerate(chapter_specs, start=1):
         chapter_id = f"CH{chapter_index:03d}"
         paragraphs = tuple(
             SourceParagraph(
-                paragraph_id=f"{chapter_id}_P{paragraph_index:04d}",
+                paragraph_id=(
+                    f"{chapter_id}_P{paragraph_index:04d}"
+                ),
                 text_original=text,
                 source_pages=pages,
             )
-            for paragraph_index, (text, pages) in enumerate(paragraph_specs, start=1)
+            for paragraph_index, (text, pages)
+            in enumerate(paragraph_specs, start=1)
         )
         chapters.append(
             SourceChapter(
@@ -506,32 +665,51 @@ def normalize_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def decode_txt_bytes(raw: bytes, explicit_encoding: str | None = None) -> tuple[str, str]:
+def decode_txt_bytes(
+    raw: bytes,
+    explicit_encoding: str | None = None,
+) -> tuple[str, str]:
     if not isinstance(raw, bytes):
         raise SourceDecodeError("TXT source must be bytes")
+
     if explicit_encoding is not None:
         try:
             encoding = codecs.lookup(explicit_encoding).name
         except LookupError as exc:
-            raise SourceDecodeError(f"unknown explicit encoding: {explicit_encoding!r}") from exc
-    elif raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(codecs.BOM_UTF32_BE):
+            raise SourceDecodeError(
+                f"unknown explicit encoding: {explicit_encoding!r}"
+            ) from exc
+    elif raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(
+        codecs.BOM_UTF32_BE
+    ):
         encoding = "utf-32"
-    elif raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+    elif raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(
+        codecs.BOM_UTF16_BE
+    ):
         encoding = "utf-16"
     elif raw.startswith(codecs.BOM_UTF8):
         encoding = "utf-8-sig"
     else:
         encoding = "utf-8"
+
     try:
-        return normalize_newlines(raw.decode(encoding, errors="strict")), encoding
+        text = raw.decode(encoding, errors="strict")
     except (UnicodeDecodeError, LookupError) as exc:
-        hint = " use --encoding explicitly for non-UTF source text" if explicit_encoding is None else ""
-        raise SourceDecodeError(f"failed to decode TXT as {encoding}:{hint} {exc}") from exc
+        hint = (
+            " use --encoding explicitly for non-UTF source text"
+            if explicit_encoding is None
+            else ""
+        )
+        raise SourceDecodeError(
+            f"failed to decode TXT as {encoding}:{hint} {exc}"
+        ) from exc
+    return normalize_newlines(text), encoding
 
 
-def extract_txt_structure(raw: bytes, explicit_encoding: str | None = None) -> tuple[
-    tuple[SourceChapter, ...], str, str
-]:
+def extract_txt_structure(
+    raw: bytes,
+    explicit_encoding: str | None = None,
+) -> tuple[tuple[SourceChapter, ...], str, str]:
     text, encoding = decode_txt_bytes(raw, explicit_encoding)
     chapters = _parse_lines(_lines_from_text(text))
     return chapters, encoding, SOURCE_PARSER_VERSION
@@ -541,7 +719,9 @@ def _load_pdf_reader():
     try:
         from pypdf import PdfReader
     except ImportError as exc:
-        raise SourcePdfError("pypdf is required for text-based PDF ingestion") from exc
+        raise SourcePdfError(
+            "pypdf is required for text-based PDF ingestion"
+        ) from exc
     return PdfReader
 
 
@@ -552,7 +732,9 @@ def _package_version(name: str, fallback: str) -> str:
         return fallback
 
 
-def extract_pdf_structure(raw: bytes) -> tuple[tuple[SourceChapter, ...], str, str]:
+def extract_pdf_structure(
+    raw: bytes,
+) -> tuple[tuple[SourceChapter, ...], str, str]:
     reader_cls = _load_pdf_reader()
     try:
         reader = reader_cls(io.BytesIO(raw))
@@ -568,32 +750,49 @@ def extract_pdf_structure(raw: bytes) -> tuple[tuple[SourceChapter, ...], str, s
             usable_chars += len(page_text.strip())
             if page_number > 1:
                 lines.append(_SourceLine("", None, page_break=True))
-            lines.extend(_lines_from_text(page_text, source_page=page_number))
+            lines.extend(
+                _lines_from_text(page_text, source_page=page_number)
+            )
     except Exception as exc:
-        raise SourcePdfError(f"failed to extract PDF text: {exc}") from exc
+        raise SourcePdfError(
+            f"failed to extract PDF text: {exc}"
+        ) from exc
 
     if usable_chars == 0:
         raise SourcePdfError(
-            "PDF contains no extractable text; OCR/image-only PDF support is outside the v1.2 MVP"
+            "PDF contains no extractable text; OCR/image-only PDF support "
+            "is outside the v1.2 MVP"
         )
+
     chapters = _parse_lines(lines)
     pypdf_version = _package_version("pypdf", "unknown")
-    return chapters, "pdf-text-extraction", f"{SOURCE_PARSER_VERSION};pypdf={pypdf_version}"
+    parser_version = (
+        f"{SOURCE_PARSER_VERSION};pypdf={pypdf_version}"
+    )
+    return chapters, "pdf-text-extraction", parser_version
 
 
 def detect_language(text: str) -> tuple[str, str]:
     if not isinstance(text, str) or not text.strip():
-        raise SourceLanguageError("cannot detect language from empty text")
+        raise SourceLanguageError(
+            "cannot detect language from empty text"
+        )
     try:
         import langid
     except ImportError as exc:
-        raise SourceLanguageError("langid==1.1.6 is required for source-language detection") from exc
+        raise SourceLanguageError(
+            "langid==1.1.6 is required for source-language detection"
+        ) from exc
     try:
         language, _score = langid.classify(text)
     except Exception as exc:
-        raise SourceLanguageError(f"source-language detection failed: {exc}") from exc
+        raise SourceLanguageError(
+            f"source-language detection failed: {exc}"
+        ) from exc
     if not isinstance(language, str) or not language:
-        raise SourceLanguageError("source-language detector returned no language")
+        raise SourceLanguageError(
+            "source-language detector returned no language"
+        )
     return language, LANGUAGE_DETECTOR_ID
 
 
@@ -613,13 +812,22 @@ def build_source_document(
     explicit_encoding: str | None = None,
 ) -> SourceDocument:
     if source_type == "txt":
-        chapters, input_encoding, parser_version = extract_txt_structure(raw, explicit_encoding)
+        chapters, input_encoding, parser_version = extract_txt_structure(
+            raw,
+            explicit_encoding,
+        )
     elif source_type == "pdf":
         if explicit_encoding is not None:
-            raise SourceDecodeError("--encoding is only valid for TXT sources")
-        chapters, input_encoding, parser_version = extract_pdf_structure(raw)
+            raise SourceDecodeError(
+                "--encoding is only valid for TXT sources"
+            )
+        chapters, input_encoding, parser_version = (
+            extract_pdf_structure(raw)
+        )
     else:
-        raise SourceStructureError(f"unsupported source type: {source_type!r}")
+        raise SourceStructureError(
+            f"unsupported source type: {source_type!r}"
+        )
 
     detector_text = "\n\n".join(
         paragraph.text_original

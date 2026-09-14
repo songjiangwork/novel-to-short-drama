@@ -391,6 +391,11 @@ class FilePointerStore:
             )
         except ArtifactError as exc:
             raise SupersessionError("matching SupersessionRecord cannot be resolved") from exc
+        if envelope.schema_version != POINTER_SCHEMA_VERSION:
+            raise SupersessionError(
+                "unsupported SupersessionRecord schema_version: "
+                f"{envelope.schema_version}; supported={POINTER_SCHEMA_VERSION}"
+            )
         payload = envelope.payload
         if not isinstance(payload, dict):
             raise SupersessionError("persisted SupersessionRecord payload must be an object")
@@ -442,12 +447,17 @@ class FilePointerStore:
                 ) from exc
             revision += 1
 
-    def _load_pointer_ref(self, ref: ArtifactRef) -> CurrentPointer:
+    def _decode_pointer_snapshot(self, ref: ArtifactRef) -> CurrentPointer:
         self._require_pointer_ref_identity(ref.artifact_id, ref)
         try:
             envelope = self.artifact_store.get_ref(ref)
         except ArtifactError as exc:
             raise PointerIntegrityError(f"failed to resolve CurrentPointer: {ref!r}") from exc
+        if envelope.schema_version != POINTER_SCHEMA_VERSION:
+            raise PointerIntegrityError(
+                "unsupported CurrentPointer schema_version: "
+                f"{envelope.schema_version}; supported={POINTER_SCHEMA_VERSION}"
+            )
         payload = envelope.payload
         if not isinstance(payload, dict):
             raise PointerIntegrityError("persisted CurrentPointer payload must be an object")
@@ -457,13 +467,20 @@ class FilePointerStore:
             raise PointerIntegrityError(f"invalid persisted CurrentPointer: {exc}") from exc
         if pointer.pointer_id != ref.artifact_id:
             raise PointerIntegrityError("CurrentPointer payload pointer_id mismatches artifact identity")
-        if (
-            pointer.previous_pointer_ref is not None
-            and pointer.previous_pointer_ref.revision >= ref.revision
-        ):
-            raise PointerIntegrityError(
-                "CurrentPointer previous_pointer_ref must reference an earlier pointer revision"
-            )
+        return pointer
+
+    def _load_pointer_ref(self, ref: ArtifactRef) -> CurrentPointer:
+        pointer = self._decode_pointer_snapshot(ref)
+        if pointer.previous_pointer_ref is not None:
+            if pointer.previous_pointer_ref.revision >= ref.revision:
+                raise PointerIntegrityError(
+                    "CurrentPointer previous_pointer_ref must reference an earlier pointer revision"
+                )
+            previous = self._load_pointer_ref(pointer.previous_pointer_ref)
+            if previous.pointer_kind is not pointer.pointer_kind:
+                raise PointerIntegrityError(
+                    "CurrentPointer previous_pointer_ref must preserve pointer_kind"
+                )
         try:
             self.artifact_store.get_ref(pointer.target_ref)
         except ArtifactError as exc:

@@ -315,10 +315,18 @@ def load_validation_report(store: FileArtifactStore, ref: ArtifactRef) -> Valida
         envelope = store.get_ref(ref)
     except ArtifactError as exc:
         raise ValidationModelError(f"failed to resolve ValidationReport: {ref!r}") from exc
+    if envelope.schema_version != VALIDATION_REPORT_SCHEMA_VERSION:
+        raise ValidationModelError(
+            "unsupported ValidationReport schema_version: "
+            f"{envelope.schema_version}; supported={VALIDATION_REPORT_SCHEMA_VERSION}"
+        )
     payload = envelope.payload
     if not isinstance(payload, dict):
         raise ValidationModelError("persisted ValidationReport payload must be an object")
-    return ValidationReport.from_dict(payload)
+    report = ValidationReport.from_dict(payload)
+    if report.to_dict() != payload:
+        raise ValidationModelError("persisted ValidationReport payload is not in canonical semantic order")
+    return report
 
 
 def jsonschema_findings(

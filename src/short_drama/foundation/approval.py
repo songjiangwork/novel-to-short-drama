@@ -299,13 +299,21 @@ def load_approval_record(store: FileArtifactStore, ref: ArtifactRef) -> Approval
         envelope = store.get_ref(ref)
     except ArtifactError as exc:
         raise ApprovalResolutionError(f"failed to resolve ApprovalRecord: {ref!r}") from exc
+    if envelope.schema_version != APPROVAL_RECORD_SCHEMA_VERSION:
+        raise ApprovalResolutionError(
+            "unsupported ApprovalRecord schema_version: "
+            f"{envelope.schema_version}; supported={APPROVAL_RECORD_SCHEMA_VERSION}"
+        )
     payload = envelope.payload
     if not isinstance(payload, dict):
         raise ApprovalResolutionError("persisted ApprovalRecord payload must be an object")
     try:
-        return ApprovalRecord.from_dict(payload)
+        record = ApprovalRecord.from_dict(payload)
     except ApprovalError as exc:
         raise ApprovalResolutionError(f"invalid persisted ApprovalRecord: {exc}") from exc
+    if record.to_dict() != payload:
+        raise ApprovalResolutionError("persisted ApprovalRecord payload is not in canonical semantic order")
+    return record
 
 
 def resolve_approval_ref(store: FileArtifactStore, approval_ref: ApprovalRef) -> ApprovalRecord:

@@ -7,6 +7,7 @@ from short_drama.llm import (
     LLMPromptError,
     PromptRegistry,
     PromptSpec,
+    compute_prompt_content_hash,
     extract_placeholders,
     render_prompt,
 )
@@ -28,11 +29,22 @@ def _write_prompt(
         required_variables = sorted(
             extract_placeholders(system) | extract_placeholders(user)
         )
+    # Pin the authoritative content hash for this version. It is computed over
+    # the semantic prompt material (not the metadata file) and must match what
+    # the registry recomputes, or the load fails closed.
+    content_hash = compute_prompt_content_hash(
+        prompt_id=prompt_id,
+        version=version,
+        system_template=system,
+        user_template=user,
+        required_variables=required_variables,
+    )
     metadata = {
         "schema_version": 1,
         "prompt_id": prompt_id,
         "version": version,
         "required_variables": list(required_variables),
+        "content_hash": content_hash,
     }
     if yaml_overrides:
         metadata.update(yaml_overrides)
@@ -227,3 +239,107 @@ def test_prompt_spec_render_method_matches_documented_usage(tmp_path):
     via_function = render_prompt(spec, {"chunk_text": "abc"})
     assert via_method == via_function
     assert via_method.user_text == "Extract from: abc"
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: prompt identity (prompt_id + version + content_hash) is immutable.
+# ---------------------------------------------------------------------------
+
+
+def test_load_rejects_system_template_mutated_same_version(tmp_path):
+    _write_prompt(tmp_path, "p", 1)
+    version_dir = tmp_path / "p" / "v1"
+    # Mutate the semantic material WITHOUT re-versioning: the pinned content
+    # hash no longer matches the recomputed hash -> fail closed.
+    (version_dir / "system.txt").write_text(
+        "You are a DIFFERENT extractor.", encoding="utf-8"
+    )
+    with pytest.raises(LLMPromptError, match="content_hash"):
+        PromptRegistry(tmp_path).load("p", version=1)
+
+
+def test_load_rejects_required_variables_mutated_same_version(tmp_path):
+    _write_prompt(
+        tmp_path, "p", 1, user="Extract from: {{chunk_text}}", required_variables=("chunk_text",)
+    )
+    # Rewrite the pinned metadata with a DIFFERENT required_variables but the
+    # OLD content_hash -> the recomputed hash differs -> fail closed.
+    version_dir = tmp_path / "p" / "v1"
+    old_yaml = yaml.safe_load((version_dir / "prompt.yaml").read_text(encoding="utf-8"))
+    old_yaml["required_variables"] = ["something_else"]
+    (version_dir / "prompt.yaml").write_text(
+        yaml.safe_dump(old_yaml, sort_keys=False), encoding="utf-8"
+    )
+    with pytest.raises(LLMPromptError, match="content_hash"):
+        PromptRegistry(tmp_path).load("p", version=1)
+
+
+def test_load_accepts_reversioned_prompt_with_new_hash(tmp_path):
+    _write_prompt(tmp_path, "p", 1)
+    # A NEW version with different content and its own correct hash is fine.
+    _write_prompt(
+        tmp_path,
+        "p",
+        2,
+        system="You are a v2 extractor.",
+        user="Extract from: {{chunk_text}}",
+    )
+    spec = PromptRegistry(tmp_path).load("p", version=2)
+    assert spec.version == 2
+    assert spec.content_hash != PromptRegistry(tmp_path).load("p", version=1).content_hash
+
+
+def test_load_rejects_wrong_pinned_content_hash(tmp_path):
+    _write_prompt(tmp_path, "p", 1)
+    version_dir = tmp_path / "p" / "v1"
+    bad = {
+        "schema_version": 1,
+        "prompt_id": "p",
+        "version": 1,
+        "required_variables": ["chunk_text"],
+        "content_hash": "0" * 64,  # wrong pinned hash
+    }
+    (version_dir / "prompt.yaml").write_text(
+        yaml.safe_dump(bad, sort_keys=False), encoding="utf-8"
+    )
+    with pytest.raises(LLMPromptError, match="content_hash"):
+        PromptRegistry(tmp_path).load("p", version=1)
+
+
+def test_load_rejects_malformed_content_hash(tmp_path):
+    _write_prompt(tmp_path, "p", 1)
+    version_dir = tmp_path / "p" / "v1"
+    bad = {
+        "schema_version": 1,
+        "prompt_id": "p",
+        "version": 1,
+        "required_variables": ["chunk_text"],
+        "content_hash": "not-a-hash",
+    }
+    (version_dir / "prompt.yaml").write_text(
+        yaml.safe_dump(bad, sort_keys=False), encoding="utf-8"
+    )
+    with pytest.raises(LLMPromptError, match="SHA-256"):
+        PromptRegistry(tmp_path).load("p", version=1)
+
+
+def test_load_rejects_prompt_id_before_path_construction(tmp_path):
+    # An unsafe prompt_id must be rejected BEFORE it is used to build a path.
+    with pytest.raises(LLMPromptError):
+        PromptRegistry(tmp_path).load("../evil", version=1)
+    with pytest.raises(LLMPromptError):
+        PromptRegistry(tmp_path).load("UPPER", version=1)
+
+
+def test_prompt_spec_hash_matches_pinned_hash(tmp_path):
+    _write_prompt(tmp_path, "p", 1)
+    spec = PromptRegistry(tmp_path).load("p", version=1)
+    # The spec's content_hash equals the registry-recomputed hash and is
+    # deterministic.
+    assert spec.content_hash == compute_prompt_content_hash(
+        prompt_id="p",
+        version=1,
+        system_template="You are a strict extractor.",
+        user_template="Extract from: {{chunk_text}}",
+        required_variables=["chunk_text"],
+    )

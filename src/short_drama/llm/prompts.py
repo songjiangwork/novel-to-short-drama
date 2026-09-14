@@ -8,14 +8,23 @@ from short_drama.io import load_yaml
 
 from .errors import LLMPromptError
 from .models import (
+    SHA256_RE,
     PromptSpec,
     RenderedPrompt,
+    compute_prompt_content_hash,
     compute_rendered_prompt_hash,
+    require_storage_id,
     substitute_template,
 )
 
 PROMPT_DIR_LAYOUT_VERSION = 1
-_PROMPT_YAML_FIELDS = {"schema_version", "prompt_id", "version", "required_variables"}
+_PROMPT_YAML_FIELDS = {
+    "schema_version",
+    "prompt_id",
+    "version",
+    "required_variables",
+    "content_hash",
+}
 
 
 class PromptRegistry:
@@ -40,8 +49,9 @@ class PromptRegistry:
         return self._base_dir
 
     def load(self, prompt_id: str, *, version: int) -> PromptSpec:
-        if not isinstance(prompt_id, str) or not prompt_id:
-            raise LLMPromptError("prompt_id must be a non-empty string")
+        # Validate the prompt_id against the safe storage-ID contract BEFORE
+        # using it to construct filesystem paths (no traversal / unsafe names).
+        require_storage_id(prompt_id, "prompt_id", LLMPromptError)
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             raise LLMPromptError("version must be an integer >= 1")
 
@@ -69,6 +79,26 @@ class PromptRegistry:
             user_template = user_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise LLMPromptError(f"failed to read prompt templates: {exc}") from exc
+
+        # Enforce same-version immutability: the pinned content hash in
+        # prompt.yaml must exactly match the hash computed from the semantic
+        # prompt material. Changing system.txt, user.txt, or semantic metadata
+        # (e.g. required_variables) under the same prompt_id + version without
+        # re-versioning fails closed rather than being silently accepted.
+        actual_hash = compute_prompt_content_hash(
+            prompt_id=prompt_id,
+            version=version,
+            system_template=system_template,
+            user_template=user_template,
+            required_variables=metadata["required_variables"],
+        )
+        if actual_hash != metadata["content_hash"]:
+            raise LLMPromptError(
+                "prompt.yaml content_hash does not match the computed prompt "
+                "content hash; a prompt version was modified without "
+                "re-versioning (prompt identity is "
+                "prompt_id + version + content_hash)"
+            )
 
         return PromptSpec.create(
             prompt_id=prompt_id,
@@ -101,6 +131,11 @@ class PromptRegistry:
             isinstance(item, str) for item in required
         ):
             raise LLMPromptError("required_variables must be a list of strings")
+        pinned_hash = metadata["content_hash"]
+        if not isinstance(pinned_hash, str) or SHA256_RE.fullmatch(pinned_hash) is None:
+            raise LLMPromptError(
+                "content_hash must be a lowercase 64-char SHA-256 hex digest"
+            )
 
 
 def render_prompt(

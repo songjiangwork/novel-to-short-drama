@@ -8,7 +8,9 @@ from .errors import LLMConfigError, LLMError, LLMRetryExhaustedError
 T = TypeVar("T")
 
 DEFAULT_MAX_ATTEMPTS = 3
-MAX_ALLOWED_ATTEMPTS = 10
+# The contract caps the total attempt budget at 1..3 (initial attempt plus at
+# most two retries). This is enforced fail-closed by validate_max_attempts.
+MAX_ALLOWED_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.25
 _BACKOFF_CAP_SECONDS = 2.0
 
@@ -60,6 +62,9 @@ def run_with_retry(
     raised. Non-LLM exceptions propagate unchanged.
     """
 
+    # Defensively validate the budget here as well; callers must not be the
+    # sole guard against an out-of-range attempt budget.
+    max_attempts = validate_max_attempts(max_attempts)
     if not callable(sleeper):
         raise LLMConfigError("sleeper must be callable")
     last_error: LLMError | None = None

@@ -65,8 +65,31 @@ def test_prompt_spec_schema_accepts_valid_metadata(tmp_path):
         "prompt_id": "a3.chunk-extraction",
         "version": 1,
         "required_variables": ["chunk_text", "left_context"],
+        "content_hash": "0" * 64,
     }
     assert _validate(metadata, _schema("prompt-spec.schema.json")) == []
+
+
+def test_prompt_spec_schema_rejects_missing_content_hash(tmp_path):
+    # The pinned content hash is now a REQUIRED field of the prompt metadata.
+    metadata = {
+        "schema_version": 1,
+        "prompt_id": "a3.chunk-extraction",
+        "version": 1,
+        "required_variables": ["chunk_text"],
+    }
+    assert _validate(metadata, _schema("prompt-spec.schema.json"))
+
+
+def test_prompt_spec_schema_rejects_malformed_content_hash(tmp_path):
+    metadata = {
+        "schema_version": 1,
+        "prompt_id": "a3.chunk-extraction",
+        "version": 1,
+        "required_variables": ["chunk_text"],
+        "content_hash": "zzz",  # not a 64-char lowercase hex digest
+    }
+    assert _validate(metadata, _schema("prompt-spec.schema.json"))
 
 
 def test_prompt_spec_schema_rejects_bad_metadata(tmp_path):
@@ -75,6 +98,39 @@ def test_prompt_spec_schema_rejects_bad_metadata(tmp_path):
         "prompt_id": "Bad_ID",
         "version": 0,
         "required_variables": ["ok", "ok"],
+        "content_hash": "0" * 64,
     }
     errors = _validate(bad, _schema("prompt-spec.schema.json"))
     assert errors
+
+
+def _profile_with_reasoning(reasoning: dict) -> dict:
+    return {
+        "schema_version": 1,
+        "profile_id": "story-llm-qwen-v1",
+        "provider_family": "qwen",
+        "model": "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M",
+        "temperature": 0.0,
+        "max_output_tokens": 4096,
+        "structured_output_mode": "json_schema",
+        "reasoning": reasoning,
+    }
+
+
+def test_semantic_profile_schema_reasoning_disabled_requires_null_effort():
+    schema = _schema("llm-semantic-profile.schema.json")
+    # enabled=false + effort=null is valid.
+    assert _validate(_profile_with_reasoning({"enabled": False, "effort": None}), schema) == []
+    # enabled=false + a real effort is INVALID (incoherent).
+    assert _validate(_profile_with_reasoning({"enabled": False, "effort": "low"}), schema)
+
+
+def test_semantic_profile_schema_reasoning_enabled_requires_supported_effort():
+    schema = _schema("llm-semantic-profile.schema.json")
+    # enabled=true + each supported effort is valid.
+    for effort in ("low", "medium", "high"):
+        assert _validate(_profile_with_reasoning({"enabled": True, "effort": effort}), schema) == []
+    # enabled=true + effort=null is INVALID (no concrete value).
+    assert _validate(_profile_with_reasoning({"enabled": True, "effort": None}), schema)
+    # enabled=true + an unsupported effort is INVALID.
+    assert _validate(_profile_with_reasoning({"enabled": True, "effort": "bogus"}), schema)

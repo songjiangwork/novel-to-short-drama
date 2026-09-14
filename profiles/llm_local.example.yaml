@@ -12,9 +12,11 @@ schema_version: 1
 # Stable identifier for this transport endpoint (not a secret).
 transport_id: llm-local
 
-# OpenAI-compatible Chat Completions base URL for a local llama.cpp server.
-# Must not embed credentials (no user:pass@).
-base_url: http://127.0.0.1:8080
+# OpenAI-compatible Chat Completions base URL prefix for a local llama.cpp
+# server. The adapter appends /chat/completions, so the canonical llama.cpp
+# prefix is /v1 -> http://127.0.0.1:8080/v1/chat/completions. Must not embed
+# credentials (no user:pass@).
+base_url: http://127.0.0.1:8080/v1
 
 # Name of the environment variable holding the credential, or null for no
 # auth. The credential value is only ever read from the environment at request

@@ -89,6 +89,22 @@ def run_smoke(
 
     client = OpenAICompatibleLLMClient(runtime_config)
 
+    # Inspect the provider request body to confirm the semantic reasoning
+    # settings map to an EXPLICIT provider value (reasoning_effort), so the
+    # server startup default never silently decides reasoning behavior.
+    request_body = client.build_request_body(
+        rendered, output_schema, semantic_profile
+    )
+    reasoning_effort = request_body.get("reasoning_effort")
+    expected_effort = semantic_profile.reasoning.request_effort
+    if reasoning_effort != expected_effort:
+        print(
+            f"SMOKE FAILED: request reasoning_effort {reasoning_effort!r} does "
+            f"not match profile {expected_effort!r}",
+            file=sys.stderr,
+        )
+        return 2
+
     print("== A-I3 structured-output smoke ==")
     print(f"transport_id:        {runtime_config.transport_id}")
     print(f"base_url:            {runtime_config.base_url}")
@@ -97,6 +113,7 @@ def run_smoke(
     print(f"provider_family:     {semantic_profile.provider_family}")
     print(f"model:               {semantic_profile.model}")
     print(f"structured_output:   {semantic_profile.structured_output_mode}")
+    print(f"reasoning_effort:    {reasoning_effort}")
     print()
 
     result = client.generate_structured(rendered, output_schema, semantic_profile)
@@ -108,10 +125,15 @@ def run_smoke(
     print("provenance:")
     print(json.dumps(result.provenance.to_dict(), ensure_ascii=False, indent=2))
 
-    assert result.parsed_json == {"answer": 42}, (
-        "smoke expected the model to return {'answer': 42}; "
-        f"got {result.parsed_json!r}"
-    )
+    # Explicit runtime failure handling (not `assert`, which is stripped under
+    # `python -O`) so the documented failure exit behavior always holds.
+    if result.parsed_json != {"answer": 42}:
+        print(
+            f"SMOKE FAILED: expected the model to return {{'answer': 42}}; "
+            f"got {result.parsed_json!r}",
+            file=sys.stderr,
+        )
+        return 2
     print("SMOKE OK")
     return 0
 

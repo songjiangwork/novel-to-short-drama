@@ -16,9 +16,14 @@ from short_drama.artifacts import (
 from .errors import LLMConfigError, LLMPromptError
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_STORAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+STORAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _VAR_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 _STRUCTURED_OUTPUT_MODES = frozenset({"none", "json_object", "json_schema"})
+# Explicit provider reasoning-effort values the OpenAI-compatible adapter can
+# map. Disabled reasoning maps to "none"; enabled reasoning must name one of
+# these so the server startup default never silently decides behavior.
+SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
+REASONING_DISABLED_EFFORT = "none"
 
 SEMANTIC_PROFILE_SCHEMA_VERSION = 1
 PROMPT_SPEC_SCHEMA_VERSION = 1
@@ -55,6 +60,15 @@ def _require_positive_int(value: Any, field_name: str, error_type: type) -> int:
 def _require_hash(value: Any, field_name: str, error_type: type) -> str:
     if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
         raise error_type(f"{field_name} must be a lowercase 64-char SHA-256 hex digest")
+    return value
+
+
+def require_storage_id(value: Any, field_name: str, error_type: type) -> str:
+    """Validate a safe lowercase storage identifier (no path traversal)."""
+
+    _require_text(value, field_name, error_type)
+    if STORAGE_ID_RE.fullmatch(value) is None:
+        raise error_type(f"{field_name} must be a safe lowercase storage identifier")
     return value
 
 
@@ -141,17 +155,49 @@ def substitute_template(template: str, variables: Mapping[str, str]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ReasoningSettings:
+    """Coherent reasoning semantics.
+
+    Invariants (enforced in Python and mirrored in the semantic-profile schema):
+      * disabled reasoning (``enabled`` False) MUST carry ``effort is None``;
+      * enabled reasoning (``enabled`` True) MUST carry an explicit supported
+        effort (one of :data:`SUPPORTED_REASONING_EFFORTS`).
+
+    The adapter maps disabled reasoning to the provider request
+    ``reasoning_effort: "none"`` and enabled reasoning to
+    ``reasoning_effort: <effort>``, so the provider request always carries an
+    explicit value and the server default never decides behavior.
+    """
+
     enabled: bool
     effort: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise LLMConfigError("reasoning.enabled must be a boolean")
-        if self.effort is not None:
-            _require_text(self.effort, "reasoning.effort", LLMConfigError)
+        if self.enabled:
+            if self.effort is None:
+                raise LLMConfigError(
+                    "reasoning.effort is required when reasoning is enabled"
+                )
+            if not isinstance(self.effort, str) or self.effort not in SUPPORTED_REASONING_EFFORTS:
+                raise LLMConfigError(
+                    "reasoning.effort must be one of: "
+                    + ", ".join(sorted(SUPPORTED_REASONING_EFFORTS))
+                )
+        else:
+            if self.effort is not None:
+                raise LLMConfigError(
+                    "reasoning.effort must be null when reasoning is disabled"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "effort": self.effort}
+
+    @property
+    def request_effort(self) -> str:
+        """The explicit provider ``reasoning_effort`` value to send."""
+
+        return self.effort if self.enabled else REASONING_DISABLED_EFFORT
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ReasoningSettings":
@@ -186,9 +232,7 @@ class SemanticLLMProfile:
                 "SemanticLLMProfile.schema_version must be "
                 f"{SEMANTIC_PROFILE_SCHEMA_VERSION}"
             )
-        _require_text(self.profile_id, "profile_id", LLMConfigError)
-        if _STORAGE_ID_RE.fullmatch(self.profile_id) is None:
-            raise LLMConfigError("profile_id must be a safe lowercase storage identifier")
+        require_storage_id(self.profile_id, "profile_id", LLMConfigError)
         _require_text(self.provider_family, "provider_family", LLMConfigError)
         _require_text(self.model, "model", LLMConfigError)
         if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
@@ -273,9 +317,7 @@ class OutputSchema:
     _schema_bytes: bytes
 
     def __post_init__(self) -> None:
-        _require_text(self.schema_id, "schema_id", LLMConfigError)
-        if _STORAGE_ID_RE.fullmatch(self.schema_id) is None:
-            raise LLMConfigError("schema_id must be a safe lowercase storage identifier")
+        require_storage_id(self.schema_id, "schema_id", LLMConfigError)
         _require_positive_int(self.schema_version, "schema_version", LLMConfigError)
         _require_hash(self.schema_hash, "schema_hash", LLMConfigError)
         if not isinstance(self._schema_bytes, bytes):
@@ -387,9 +429,7 @@ class PromptSpec:
     content_hash: str
 
     def __post_init__(self) -> None:
-        _require_text(self.prompt_id, "prompt_id", LLMPromptError)
-        if _STORAGE_ID_RE.fullmatch(self.prompt_id) is None:
-            raise LLMPromptError("prompt_id must be a safe lowercase storage identifier")
+        require_storage_id(self.prompt_id, "prompt_id", LLMPromptError)
         _require_positive_int(self.version, "version", LLMPromptError)
         _require_valid_text(self.system_template, "system_template", LLMPromptError)
         _require_text(self.user_template, "user_template", LLMPromptError)

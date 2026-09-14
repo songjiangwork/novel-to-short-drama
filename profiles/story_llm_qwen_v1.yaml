@@ -4,8 +4,11 @@
 # timeout, credential, or hostname, so its hash is a stable semantic identity
 # that is not invalidated by runtime transport changes.
 #
-# Set `model` to the exact model name your OpenAI-compatible server exposes
-# (see GET /v1/models). The tracked example uses a generic Qwen identifier.
+# `model` is semantic identity (it participates in the semantic profile hash
+# and request fingerprint), NOT machine-specific runtime configuration. It is
+# pinned to the exact model identifier that the local-Qwen structured-output
+# smoke successfully executed against, so this tracked profile is directly
+# executable by the smoke without a model override.
 schema_version: 1
 
 # Stable semantic identifier for this profile (part of the semantic identity).
@@ -14,8 +17,9 @@ profile_id: story-llm-qwen-v1
 # Provider family (semantic, not a transport detail).
 provider_family: qwen
 
-# Exact model name served by the OpenAI-compatible endpoint.
-model: qwen
+# Exact model identifier (semantic identity) served by the OpenAI-compatible
+# endpoint. Pinned to the model the local-Qwen smoke validated against.
+model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
 
 # Deterministic generation for extraction.
 temperature: 0.0

@@ -29,7 +29,9 @@ from short_drama.llm import (
     TransportResponse,
     UrllibTransport,
     build_structured_request,
+    parse_and_validate_response,
     render_prompt,
+    validate_max_attempts,
 )
 
 
@@ -168,7 +170,7 @@ def make_client(
     values = dict(
         schema_version=1,
         transport_id="llm-local",
-        base_url="http://127.0.0.1:8080",
+        base_url="http://127.0.0.1:8080/v1",
         credential_environment_name=None,
         timeout_seconds=30,
     )
@@ -203,12 +205,15 @@ def test_request_mapping_json_schema():
     client = make_client(transport)
     client.generate_structured(make_rendered(), make_schema(), make_profile())
     call = transport.calls[0]
-    assert call.url == "http://127.0.0.1:8080/chat/completions"
+    assert call.url == "http://127.0.0.1:8080/v1/chat/completions"
     assert call.headers["Content-Type"] == "application/json"
     assert "Authorization" not in call.headers
     assert call.body["model"] == "qwen"
     assert call.body["temperature"] == 0.0
     assert call.body["max_tokens"] == 256
+    # Reasoning is disabled in the default profile -> an EXPLICIT "none" must
+    # be sent so the server startup default never decides behavior.
+    assert call.body["reasoning_effort"] == "none"
     assert call.body["messages"] == [
         {"role": "system", "content": "You are a strict extractor."},
         {"role": "user", "content": "Echo the value: hello"},
@@ -262,6 +267,76 @@ def test_request_mapping_sends_auth_header_when_credential_set(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Finding 3: reasoning settings map to a concrete request field.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "settings,expected",
+    [
+        (ReasoningSettings(False), "none"),
+        (ReasoningSettings(True, "low"), "low"),
+        (ReasoningSettings(True, "medium"), "medium"),
+        (ReasoningSettings(True, "high"), "high"),
+    ],
+)
+def test_request_mapping_reasoning_effort_explicit(settings, expected):
+    transport = FakeTransport()
+    transport.queue(ok_response(json.dumps({"a": "hello"})))
+    client = make_client(transport)
+    client.generate_structured(
+        make_rendered(), make_schema(), make_profile(reasoning=settings)
+    )
+    assert transport.calls[0].body["reasoning_effort"] == expected
+
+
+def test_build_request_body_reflects_reasoning():
+    # build_request_body is a read-only inspection hook (no transport used).
+    client = make_client(FakeTransport())
+    body = client.build_request_body(
+        make_rendered(), make_schema(), make_profile(reasoning=ReasoningSettings(True, "low"))
+    )
+    assert body["reasoning_effort"] == "low"
+    assert body["model"] == "qwen"
+
+
+# ---------------------------------------------------------------------------
+# Finding 4: a provider length truncation is invalid structured output.
+# ---------------------------------------------------------------------------
+
+
+def test_length_truncation_rejected_even_if_json_and_schema_valid():
+    # Structurally valid JSON that ALSO passes the local schema, BUT the
+    # provider reported finish_reason=length -> must be rejected as invalid
+    # structured output (never silently accepted as a valid extraction).
+    response = ok_response(json.dumps({"a": "hello"}), finish_reason="length")
+    with pytest.raises(LLMStructuredOutputError, match="truncated"):
+        parse_and_validate_response(response, make_schema())
+
+
+def test_stop_finish_reason_accepted_by_parser():
+    response = ok_response(json.dumps({"a": "hello"}), finish_reason="stop")
+    parsed, meta = parse_and_validate_response(response, make_schema())
+    assert parsed == {"a": "hello"}
+    assert meta.finish_reason == "stop"
+
+
+def test_length_truncation_never_accepted_end_to_end():
+    # End-to-end: a length truncation is a retryable structured-output failure
+    # (per the contract). It is retried and then surfaces as retry-exhausted,
+    # so a truncated (even schema-valid) extraction is never returned as valid.
+    transport = FakeTransport()
+    for _ in range(3):
+        transport.queue(
+            ok_response(json.dumps({"a": "hello"}), finish_reason="length")
+        )
+    client = make_client(transport)
+    with pytest.raises(LLMRetryExhaustedError):
+        client.generate_structured(make_rendered(), make_schema(), make_profile())
+    assert len(transport.calls) == 3
+
+
+# ---------------------------------------------------------------------------
 # Provider capability
 # ---------------------------------------------------------------------------
 
@@ -276,7 +351,7 @@ def test_capability_unsupported_mode_fails_before_request():
 
     transport = FakeTransport()
     client = _NoSchemaClient(
-        RuntimeConfig(1, "t", "http://127.0.0.1:8080", None, 30),
+        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
         transport=transport,
         sleeper=lambda d: None,
     )
@@ -500,31 +575,52 @@ def test_no_real_sleep_in_tests():
     assert elapsed < 1.0
 
 
-def test_max_attempts_is_bounded():
+def test_max_attempts_three_is_the_ceiling_and_works():
+    # 3 is the maximum allowed budget and still functions (exhausts after 3).
     sleeper = RecordingSleeper()
     transport = FakeTransport()
-    for _ in range(4):
+    for _ in range(3):
         transport.queue(TransportResponse(500, b"e"))
     client = OpenAICompatibleLLMClient(
-        RuntimeConfig(1, "t", "http://127.0.0.1:8080", None, 30),
+        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
         transport=transport,
         sleeper=sleeper,
-        max_attempts=4,
+        max_attempts=3,
     )
     with pytest.raises(LLMRetryExhaustedError) as exc:
         client.generate_structured(make_rendered(), make_schema(), make_profile())
-    assert exc.value.attempts == 4
-    assert len(transport.calls) == 4
+    assert exc.value.attempts == 3
+    assert len(transport.calls) == 3
+
+
+def test_max_attempts_above_three_rejected():
+    # The contract caps the retry budget at 1..3; 4 must be rejected before any
+    # request is sent.
+    with pytest.raises(LLMConfigError):
+        OpenAICompatibleLLMClient(
+            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
+            transport=FakeTransport(),
+            sleeper=lambda d: None,
+            max_attempts=4,
+        )
 
 
 def test_invalid_max_attempts_rejected():
     with pytest.raises(LLMConfigError):
         OpenAICompatibleLLMClient(
-            RuntimeConfig(1, "t", "http://127.0.0.1:8080", None, 30),
+            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
             transport=FakeTransport(),
             sleeper=lambda d: None,
             max_attempts=0,
         )
+
+
+def test_validate_max_attempts_rejects_out_of_range():
+    assert validate_max_attempts(1) == 1
+    assert validate_max_attempts(3) == 3
+    for bad in (0, 4, 10, -1, "3", True):
+        with pytest.raises(LLMConfigError):
+            validate_max_attempts(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -642,16 +738,19 @@ def test_provenance_optional_fields_null_when_absent():
     assert prov.usage is None
 
 
-def test_provenance_never_contains_runtime_details():
+def test_provenance_never_contains_runtime_details(monkeypatch):
+    # A real credential value is set so auth-header resolution succeeds; the
+    # provenance must still never contain the endpoint host/port or the secret.
+    monkeypatch.setenv("SECRET", "super-secret-token")
     transport = FakeTransport()
     transport.queue(ok_response(json.dumps({"a": "hello"})))
     client = make_client(
-        transport, base_url="http://10.1.2.3:9999", credential_environment_name="SECRET"
+        transport, base_url="http://10.1.2.3:9999/v1", credential_environment_name="SECRET"
     )
     result = client.generate_structured(make_rendered(), make_schema(), make_profile())
     prov_text = json.dumps(result.provenance.to_dict())
     assert "10.1.2.3" not in prov_text
-    assert "SECRET" not in prov_text
+    assert "super-secret-token" not in prov_text
     assert "9999" not in prov_text
 
 
@@ -733,12 +832,12 @@ def test_real_urllib_request_mapping_and_success():
     server, port = _start_server(200, body)
     try:
         client = make_client(
-            UrllibTransport(), base_url=f"http://127.0.0.1:{port}"
+            UrllibTransport(), base_url=f"http://127.0.0.1:{port}/v1"
         )
         result = client.generate_structured(make_rendered(), make_schema(), make_profile())
         assert result.parsed_json == {"a": "hello"}
         received = _RecordHandler.received
-        assert received["path"] == "/chat/completions"
+        assert received["path"] == "/v1/chat/completions"
         assert received["headers"]["Content-Type"] == "application/json"
         sent = json.loads(received["body"])
         assert sent["model"] == "qwen"
@@ -750,7 +849,7 @@ def test_real_urllib_request_mapping_and_success():
 def test_real_urllib_http_500_is_retryable():
     server, port = _start_server(500, b'{"error": "boom"}')
     try:
-        client = make_client(UrllibTransport(), base_url=f"http://127.0.0.1:{port}")
+        client = make_client(UrllibTransport(), base_url=f"http://127.0.0.1:{port}/v1")
         with pytest.raises(LLMRetryExhaustedError) as exc:
             client.generate_structured(make_rendered(), make_schema(), make_profile())
         assert exc.value.attempts == 3
@@ -761,7 +860,7 @@ def test_real_urllib_http_500_is_retryable():
 def test_real_urllib_http_400_is_not_retryable():
     server, port = _start_server(400, b'{"error": "nope"}')
     try:
-        client = make_client(UrllibTransport(), base_url=f"http://127.0.0.1:{port}")
+        client = make_client(UrllibTransport(), base_url=f"http://127.0.0.1:{port}/v1")
         with pytest.raises(LLMHTTPError) as exc:
             client.generate_structured(make_rendered(), make_schema(), make_profile())
         assert exc.value.status == 400

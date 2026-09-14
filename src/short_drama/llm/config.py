@@ -5,16 +5,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from short_drama.io import load_yaml
 
 from .errors import LLMConfigError
-from .models import SemanticLLMProfile
+from .models import SemanticLLMProfile, require_storage_id
 
 RUNTIME_CONFIG_SCHEMA_VERSION = 1
 _TRANSPORT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_BASE_URL_RE = re.compile(r"^https?://[^\s@/]+(:\d+)?(/.*)?$")
 
 
 def _require_text(value: Any, field_name: str) -> str:
@@ -24,6 +24,51 @@ def _require_text(value: Any, field_name: str) -> str:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise LLMConfigError(f"{field_name} must contain valid UTF-8 text") from exc
+    return value
+
+
+def _validate_base_url(value: Any) -> str:
+    """Validate a runtime base URL using proper URL parsing.
+
+    A base URL is the endpoint prefix the adapter appends ``/chat/completions``
+    to (e.g. ``http://127.0.0.1:8080/v1``). It must be http(s), carry a
+    hostname, embed no credentials, use a valid port, carry no query or
+    fragment, and have a path of exactly ``/v1`` (the llama.cpp convention).
+    Non-canonical local URLs (trailing slashes, missing ``/v1``, embedded
+    credentials, ...) fail closed. Failures are non-retryable configuration
+    errors.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise LLMConfigError("base_url must be a non-empty string")
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https"):
+        raise LLMConfigError("base_url must use an http or https scheme")
+    if not parts.hostname:
+        raise LLMConfigError("base_url must include a hostname")
+    if parts.username is not None or parts.password is not None:
+        raise LLMConfigError(
+            "base_url must not embed credentials; use credential_environment_name"
+        )
+    if parts.query or parts.fragment:
+        raise LLMConfigError("base_url must not include a query or fragment")
+    # Validate the port explicitly (urlsplit reports out-of-range ports as None).
+    netloc = parts.netloc
+    if netloc and not netloc.startswith("["):
+        if ":" in netloc:
+            port_str = netloc.rsplit(":", 1)[1]
+            if not port_str.isdigit() or not 1 <= int(port_str) <= 65535:
+                raise LLMConfigError(
+                    "base_url port must be an integer in [1, 65535]"
+                )
+    # The adapter appends /chat/completions to this prefix. Requiring the path
+    # to be exactly /v1 keeps the request path canonical (the llama.cpp
+    # convention) and prevents double-pathing or a silently wrong host.
+    if parts.path != "/v1":
+        raise LLMConfigError(
+            "base_url path must be exactly /v1 "
+            f"(the adapter appends /chat/completions): {value!r}"
+        )
     return value
 
 
@@ -48,17 +93,8 @@ class RuntimeConfig:
                 "RuntimeConfig.schema_version must be "
                 f"{RUNTIME_CONFIG_SCHEMA_VERSION}"
             )
-        _require_text(self.transport_id, "transport_id")
-        if _TRANSPORT_ID_RE.fullmatch(self.transport_id) is None:
-            raise LLMConfigError("transport_id must be a safe lowercase storage identifier")
-        _require_text(self.base_url, "base_url")
-        if _BASE_URL_RE.fullmatch(self.base_url) is None:
-            raise LLMConfigError("base_url must be an http(s) URL")
-        authority = self.base_url.split("://", 1)[1].split("/", 1)[0]
-        if "@" in authority:
-            raise LLMConfigError(
-                "base_url must not embed credentials; use credential_environment_name"
-            )
+        require_storage_id(self.transport_id, "transport_id", LLMConfigError)
+        _validate_base_url(self.base_url)
         if self.credential_environment_name is not None:
             _require_text(self.credential_environment_name, "credential_environment_name")
             if _ENV_NAME_RE.fullmatch(self.credential_environment_name) is None:
@@ -139,9 +175,12 @@ def resolve_auth_header(runtime_config: RuntimeConfig) -> str | None:
     """Resolve the Authorization header value from the runtime environment.
 
     The credential is only ever read from the environment at request time. It is
-    never persisted, printed, hashed, or stored in provenance. A missing or
-    empty environment variable resolves to no Authorization header (local
-    servers typically need no credential).
+    never persisted, printed, hashed, or stored in provenance. When
+    ``credential_environment_name`` is ``None``, unauthenticated transport is
+    intentional and valid. When a credential environment-variable name IS
+    configured, that variable must exist and be non-empty; otherwise we fail
+    closed with a secret-safe :class:`LLMConfigError` before any HTTP request is
+    sent. The error message names the variable but never the credential value.
     """
 
     if not isinstance(runtime_config, RuntimeConfig):
@@ -151,5 +190,7 @@ def resolve_auth_header(runtime_config: RuntimeConfig) -> str | None:
         return None
     value = os.environ.get(name)
     if value is None or value == "":
-        return None
+        raise LLMConfigError(
+            f"credential environment variable {name!r} is not set or is empty"
+        )
     return f"Bearer {value}"

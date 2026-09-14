@@ -213,6 +213,16 @@ def parse_and_validate_response(
     if response_id is not None and not isinstance(response_id, str):
         raise LLMResponseError("malformed provider envelope: id is not a string")
 
+    # A provider-reported length truncation is treated as invalid structured
+    # output even if the (truncated) content is syntactically valid JSON and
+    # passes the schema: a structurally valid but incomplete extraction must
+    # not be accepted. Absent finish_reason remains valid (provenance optional).
+    if finish_reason == "length":
+        raise LLMStructuredOutputError(
+            "model output was truncated by the provider (finish_reason=length); "
+            "treated as invalid structured output"
+        )
+
     if not content.strip():
         raise LLMStructuredOutputError("model returned empty content")
 
@@ -308,6 +318,29 @@ class OpenAICompatibleLLMClient(LLMClient):
             attempt=lambda number: self._attempt(request, number),
         )
 
+    def build_request_body(
+        self,
+        rendered_prompt: RenderedPrompt,
+        output_schema: OutputSchema,
+        semantic_profile: SemanticLLMProfile,
+    ) -> dict[str, Any]:
+        """Build (but do not send) the provider request body for inspection.
+
+        Useful for verifying that the semantic request maps to the exact
+        provider fields (e.g. an explicit ``reasoning_effort``) before any
+        transport is used. Fails closed on an unsupported structured-output
+        capability, mirroring :meth:`generate_structured`.
+        """
+
+        request = build_structured_request(
+            rendered_prompt=rendered_prompt,
+            output_schema=output_schema,
+            semantic_profile=semantic_profile,
+        )
+        self._require_structured_output_capability(semantic_profile)
+        _url, _headers, body_bytes = self._map_request(request)
+        return json.loads(body_bytes)
+
     def _require_structured_output_capability(
         self, semantic_profile: SemanticLLMProfile
     ) -> None:
@@ -346,6 +379,10 @@ class OpenAICompatibleLLMClient(LLMClient):
             "temperature": profile.temperature,
             "max_tokens": profile.max_output_tokens,
         }
+        # Explicitly map reasoning semantics so the provider request always
+        # carries a concrete value (disabled -> "none", enabled -> the effort)
+        # and the server startup default never silently decides behavior.
+        body["reasoning_effort"] = profile.reasoning.request_effort
         mode = profile.structured_output_mode
         if mode == "json_schema":
             body["response_format"] = {

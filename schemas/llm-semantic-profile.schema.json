@@ -37,7 +37,27 @@
             { "type": "string", "minLength": 1 }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": false } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": { "effort": { "const": null } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "properties": { "effort": { "enum": ["low", "medium", "high"] } }
+          }
+        }
+      ]
     }
   }
 }

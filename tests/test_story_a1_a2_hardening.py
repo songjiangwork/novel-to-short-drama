@@ -266,7 +266,7 @@ def test_non_normal_current_manifest_chunk_order_fails_closed(
 
     with pytest.raises(
         StoryIntegrityError,
-        match="deterministic chapter/chunk order",
+        match="deterministic planner output",
     ):
         plan_chunks_project(
             project_path,

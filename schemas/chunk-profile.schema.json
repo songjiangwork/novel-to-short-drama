@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "v1.2 A2 ChunkPlanningProfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "token_counter",
+    "ownership_token_budget",
+    "context_overlap_token_budget",
+    "context_token_budget"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "token_counter": {"const": "utf8-bytes-div3-v1"},
+    "ownership_token_budget": {"type": "integer", "minimum": 1},
+    "context_overlap_token_budget": {"type": "integer", "minimum": 0},
+    "context_token_budget": {"type": "integer", "minimum": 1}
+  }
+}

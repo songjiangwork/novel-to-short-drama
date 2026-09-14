@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "v1.2 A-I3 PromptSpec metadata (prompt.yaml)",
+  "description": "Versioned prompt metadata. content_hash is the pinned, authoritative hash of the semantic prompt material (prompt_id + version + exact system.txt / user.txt text + required_variables). The registry recomputes it and fails closed on any mismatch, so a same-version mutation is never silently accepted. content_hash itself never participates in its own computation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "prompt_id", "version", "required_variables", "content_hash"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "prompt_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "version": { "type": "integer", "minimum": 1 },
+    "required_variables": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+      "uniqueItems": true
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

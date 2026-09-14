@@ -1,0 +1,41 @@
+# v1.2 A-I3 Semantic LLM profile — TRACKED.
+#
+# Describes result-affecting generation semantics ONLY. It carries no endpoint,
+# timeout, credential, or hostname, so its hash is a stable semantic identity
+# that is not invalidated by runtime transport changes.
+#
+# `model` is semantic identity (it participates in the semantic profile hash
+# and request fingerprint), NOT machine-specific runtime configuration. It is
+# pinned to the exact model identifier that the local-Qwen structured-output
+# smoke successfully executed against, so this tracked profile is directly
+# executable by the smoke without a model override.
+schema_version: 1
+
+# Stable semantic identifier for this profile (part of the semantic identity).
+profile_id: story-llm-qwen-v1
+
+# Provider family (semantic, not a transport detail).
+provider_family: qwen
+
+# Exact model identifier (semantic identity) served by the OpenAI-compatible
+# endpoint. Pinned to the model the local-Qwen smoke validated against.
+model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
+
+# Deterministic generation for extraction.
+temperature: 0.0
+
+# Output token budget for a single structured generation.
+max_output_tokens: 4096
+
+# Structured-output generation constraint (a generation constraint only; local
+# JSON Schema validation remains the authority).
+structured_output_mode: json_schema
+
+# Reasoning settings (semantic; affect output). Disabled reasoning is
+# explicitly mapped by the adapter to the provider request
+# reasoning_effort: "none", so the server startup default never silently
+# decides behavior. (Enabled reasoning would carry an explicit supported
+# effort, e.g. low/medium/high.)
+reasoning:
+  enabled: false
+  effort: null

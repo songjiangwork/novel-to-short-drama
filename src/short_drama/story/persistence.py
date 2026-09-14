@@ -17,6 +17,7 @@ from .chunking import (
     SOURCE_CHUNK_SCHEMA_VERSION,
     ChunkManifest,
     SourceChunk,
+    plan_chunks,
 )
 from .errors import StoryIntegrityError, StoryPersistenceError
 from .source import (
@@ -402,4 +403,55 @@ def load_chunk_manifest(
             "persisted ChunkManifest payload is not in canonical "
             "semantic form"
         )
+
+    try:
+        source = load_source_document(
+            store,
+            manifest.source_document_ref,
+        )
+        persisted_chunks = tuple(
+            load_source_chunk(store, chunk_ref)
+            for chunk_ref in manifest.chunk_refs
+        )
+        canonical_chunks, canonical_coverage = plan_chunks(
+            source,
+            manifest.source_document_ref,
+            manifest.profile,
+        )
+    except StoryIntegrityError:
+        raise
+    except Exception as exc:
+        raise StoryIntegrityError(
+            "failed to verify ChunkManifest deterministic planner output"
+        ) from exc
+
+    if (
+        persisted_chunks != canonical_chunks
+        or manifest.coverage != canonical_coverage
+    ):
+        raise StoryIntegrityError(
+            "persisted ChunkManifest does not match deterministic "
+            "planner output"
+        )
+
+    for chunk_ref, chunk in zip(
+        manifest.chunk_refs,
+        persisted_chunks,
+        strict=True,
+    ):
+        expected_chunk_id = source_chunk_artifact_id(
+            manifest.project_id,
+            manifest.document_id,
+            manifest.profile.profile_id,
+            chunk.chunk_id,
+        )
+        if (
+            chunk_ref.artifact_id != expected_chunk_id
+            or chunk_ref.revision != ref.revision
+        ):
+            raise StoryIntegrityError(
+                "ChunkManifest child ref identity/revision does not match "
+                "deterministic plan"
+            )
+
     return manifest

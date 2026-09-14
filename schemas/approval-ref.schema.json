@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "approval-ref.schema.json",
+  "title": "ApprovalRef",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "target_ref",
+    "approval_record_ref"
+  ],
+  "properties": {
+    "target_ref": {
+      "$ref": "#/$defs/artifactRef"
+    },
+    "approval_record_ref": {
+      "$ref": "#/$defs/artifactRef"
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

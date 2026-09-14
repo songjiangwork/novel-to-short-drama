@@ -1,0 +1,14 @@
+schema_version: 1
+project_id: story-analysis-demo
+title: Story Analysis Demo
+source:
+  type: txt
+  path: source/novel.txt
+  language: en-CA
+production:
+  output_language: en-CA
+  profile: h3_v1
+approval_policy:
+  adaptation_requires_approval: true
+  generation_preflight_requires_approval: true
+  shot_qc_requires_approval: true

@@ -1,0 +1,6 @@
+schema_version: 1
+profile_id: story-analysis-v1
+token_counter: utf8-bytes-div3-v1
+ownership_token_budget: 12000
+context_overlap_token_budget: 2000
+context_token_budget: 16000

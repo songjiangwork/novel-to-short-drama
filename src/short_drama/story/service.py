@@ -35,7 +35,6 @@ from .errors import (
     SourceReadError,
 )
 from .persistence import (
-    chunk_manifest_artifact_id,
     chunk_pointer_id,
     chunk_validation_artifact_id,
     load_chunk_manifest,
@@ -55,47 +54,73 @@ from .source import SourceDocument, base_language, build_source_document
 DOCUMENT_ID = "src_001"
 
 
-def _load_project(project_path: str | Path) -> tuple[Path, dict[str, Any]]:
+def _load_project(
+    project_path: str | Path,
+) -> tuple[Path, dict[str, Any]]:
     path = Path(project_path).expanduser()
     if not path.is_file():
         raise StoryConfigError(f"project file not found: {path}")
     try:
         errors = validate_file(path, "project")
     except Exception as exc:
-        raise StoryConfigError(f"failed to validate project file: {exc}") from exc
+        raise StoryConfigError(
+            f"failed to validate project file: {exc}"
+        ) from exc
     if errors:
-        raise StoryConfigError("invalid project file: " + "; ".join(errors))
+        raise StoryConfigError(
+            "invalid project file: " + "; ".join(errors)
+        )
     data = load_yaml(path)
     if not isinstance(data, dict):
-        raise StoryConfigError("project file must contain an object")
+        raise StoryConfigError(
+            "project file must contain an object"
+        )
     return path.resolve(), data
 
 
-def _load_profile(profile_path: str | Path) -> ChunkPlanningProfile:
+def _load_profile(
+    profile_path: str | Path,
+) -> ChunkPlanningProfile:
     path = Path(profile_path).expanduser()
     if not path.is_file():
-        raise StoryConfigError(f"chunk profile not found: {path}")
+        raise StoryConfigError(
+            f"chunk profile not found: {path}"
+        )
     try:
         data = load_yaml(path)
     except Exception as exc:
-        raise StoryConfigError(f"failed to load chunk profile: {exc}") from exc
+        raise StoryConfigError(
+            f"failed to load chunk profile: {exc}"
+        ) from exc
     if not isinstance(data, dict):
-        raise StoryConfigError("chunk profile must contain an object")
+        raise StoryConfigError(
+            "chunk profile must contain an object"
+        )
     try:
         return ChunkPlanningProfile.from_dict(data)
     except StoryError:
         raise
     except Exception as exc:
-        raise StoryConfigError(f"invalid chunk profile: {exc}") from exc
+        raise StoryConfigError(
+            f"invalid chunk profile: {exc}"
+        ) from exc
 
 
-def _stores(runs_root: str | Path, project_id: str) -> tuple[FileArtifactStore, FilePointerStore]:
+def _stores(
+    runs_root: str | Path,
+    project_id: str,
+) -> tuple[FileArtifactStore, FilePointerStore]:
     root = Path(runs_root).expanduser() / project_id / "story"
     try:
         artifact_store = FileArtifactStore(root / "artifacts")
-        pointer_store = FilePointerStore(root / "pointers", artifact_store)
+        pointer_store = FilePointerStore(
+            root / "pointers",
+            artifact_store,
+        )
     except Exception as exc:
-        raise StoryPersistenceError(f"failed to initialize Story artifact stores: {exc}") from exc
+        raise StoryPersistenceError(
+            f"failed to initialize Story artifact stores: {exc}"
+        ) from exc
     return artifact_store, pointer_store
 
 
@@ -104,7 +129,9 @@ def _current_pointer(
     pointer_id: str,
 ) -> tuple[ArtifactRef | None, ArtifactRef | None]:
     try:
-        pointer_ref = pointer_store.resolve_current_pointer_ref(pointer_id)
+        pointer_ref = (
+            pointer_store.resolve_current_pointer_ref(pointer_id)
+        )
         pointer = pointer_store.resolve_current(pointer_id)
         return pointer_ref, pointer.target_ref
     except PointerNotFoundError:
@@ -120,7 +147,11 @@ def _validation_ref_for_revision(
     expected_findings: tuple[ValidationFinding, ...] = (),
 ) -> ArtifactRef:
     try:
-        ref = store.get("validation_report", artifact_id, revision).ref
+        ref = store.get(
+            "validation_report",
+            artifact_id,
+            revision,
+        ).ref
         report = load_validation_report(store, ref)
         expected_report = ValidationReport(
             validated_refs=expected_refs,
@@ -128,16 +159,20 @@ def _validation_ref_for_revision(
         )
         if report != expected_report:
             raise StoryIntegrityError(
-                "ValidationReport does not match the exact expected stage validation result"
+                "ValidationReport does not match the exact expected "
+                "stage validation result"
             )
         if report.summary.result is ValidationResult.FAIL:
-            raise StoryIntegrityError("current artifact is backed by a FAIL ValidationReport")
+            raise StoryIntegrityError(
+                "current artifact is backed by a FAIL ValidationReport"
+            )
         return ref
     except Exception as exc:
         if isinstance(exc, StoryIntegrityError):
             raise
         raise StoryIntegrityError(
-            f"matching ValidationReport is missing or invalid for {artifact_id} revision {revision}"
+            "matching ValidationReport is missing or invalid for "
+            f"{artifact_id} revision {revision}"
         ) from exc
 
 
@@ -145,9 +180,9 @@ def _source_findings(
     document: SourceDocument,
     source_ref: ArtifactRef,
 ) -> tuple[ValidationFinding, ...]:
-    if base_language(document.source.declared_language) == base_language(
-        document.source.detected_language
-    ):
+    if base_language(
+        document.source.declared_language
+    ) == base_language(document.source.detected_language):
         return ()
     return (
         ValidationFinding(
@@ -158,7 +193,8 @@ def _source_findings(
             repair_route="A1_SOURCE_CONFIGURATION",
             message=(
                 "declared source language "
-                f"{document.source.declared_language!r} does not match detected base language "
+                f"{document.source.declared_language!r} does not match "
+                "detected base language "
                 f"{document.source.detected_language!r}"
             ),
             artifact_refs=(source_ref,),
@@ -167,19 +203,41 @@ def _source_findings(
     )
 
 
+def _require_source_identity(
+    document: SourceDocument,
+    *,
+    project_id: str,
+    document_id: str,
+) -> None:
+    if (
+        document.project_id != project_id
+        or document.document_id != document_id
+    ):
+        raise StoryIntegrityError(
+            "SourceDocument CURRENT pointer targets the wrong "
+            "project/document identity"
+        )
+
+
 def _require_current_source_validation(
     store: FileArtifactStore,
     document: SourceDocument,
     source_ref: ArtifactRef,
 ) -> ArtifactRef:
-    """Prove that the exact current SourceDocument passed A1 validation."""
-
     return _validation_ref_for_revision(
         store,
-        artifact_id=source_validation_artifact_id(document.project_id, document.document_id),
+        artifact_id=source_validation_artifact_id(
+            document.project_id,
+            document.document_id,
+        ),
         revision=source_ref.revision,
-        expected_refs=(LineageRef("source_document", source_ref),),
-        expected_findings=_source_findings(document, source_ref),
+        expected_refs=(
+            LineageRef("source_document", source_ref),
+        ),
+        expected_findings=_source_findings(
+            document,
+            source_ref,
+        ),
     )
 
 
@@ -197,7 +255,9 @@ def ingest_source_project(
     try:
         raw = source_path.read_bytes()
     except OSError as exc:
-        raise SourceReadError(f"failed to read source file {source_path}: {exc}") from exc
+        raise SourceReadError(
+            f"failed to read source file {source_path}: {exc}"
+        ) from exc
 
     candidate = build_source_document(
         project_id=project_id,
@@ -211,23 +271,49 @@ def ingest_source_project(
 
     store, pointers = _stores(runs_root, project_id)
     pointer_id = source_pointer_id(project_id, DOCUMENT_ID)
-    current_pointer_ref, current_source_ref = _current_pointer(pointers, pointer_id)
+    current_pointer_ref, current_source_ref = _current_pointer(
+        pointers,
+        pointer_id,
+    )
 
     if current_source_ref is not None:
-        current = load_source_document(store, current_source_ref)
+        current = load_source_document(
+            store,
+            current_source_ref,
+        )
+        _require_source_identity(
+            current,
+            project_id=project_id,
+            document_id=DOCUMENT_ID,
+        )
         if current.to_dict() == candidate.to_dict():
-            report_ref = _require_current_source_validation(store, current, current_source_ref)
-            if pointers.resolve_current_pointer_ref(pointer_id) != current_pointer_ref:
+            report_ref = _require_current_source_validation(
+                store,
+                current,
+                current_source_ref,
+            )
+            if (
+                pointers.resolve_current_pointer_ref(pointer_id)
+                != current_pointer_ref
+            ):
                 raise StoryPersistenceError(
-                    "SourceDocument CURRENT pointer changed during reuse verification"
+                    "SourceDocument CURRENT pointer changed during "
+                    "reuse verification"
                 )
             assert current_pointer_ref is not None
             return {
                 "source_document_ref": current_source_ref.to_dict(),
-                "source_validation_report_ref": report_ref.to_dict(),
-                "source_current_pointer_ref": current_pointer_ref.to_dict(),
+                "source_validation_report_ref": (
+                    report_ref.to_dict()
+                ),
+                "source_current_pointer_ref": (
+                    current_pointer_ref.to_dict()
+                ),
                 "reused": True,
-                "validation": load_validation_report(store, report_ref).summary.to_dict(),
+                "validation": load_validation_report(
+                    store,
+                    report_ref,
+                ).summary.to_dict(),
             }
 
     revision = next_source_revision(
@@ -236,17 +322,28 @@ def ingest_source_project(
         DOCUMENT_ID,
         current_source_ref,
     )
-    source_ref = persist_source_document(store, candidate, revision=revision)
+    source_ref = persist_source_document(
+        store,
+        candidate,
+        revision=revision,
+    )
     report = ValidationReport(
-        validated_refs=(LineageRef("source_document", source_ref),),
+        validated_refs=(
+            LineageRef("source_document", source_ref),
+        ),
         findings=_source_findings(candidate, source_ref),
     )
     if report.summary.result is ValidationResult.FAIL:
-        raise StoryIntegrityError("A1 validation failed; SourceDocument cannot become current")
+        raise StoryIntegrityError(
+            "A1 validation failed; SourceDocument cannot become current"
+        )
     report_ref = persist_validation_report(
         store,
         report,
-        artifact_id=source_validation_artifact_id(project_id, DOCUMENT_ID),
+        artifact_id=source_validation_artifact_id(
+            project_id,
+            DOCUMENT_ID,
+        ),
         revision=revision,
     )
     try:
@@ -258,7 +355,8 @@ def ingest_source_project(
         )
     except Exception as exc:
         raise StoryPersistenceError(
-            "failed to publish SourceDocument CURRENT pointer; immutable artifacts remain historical"
+            "failed to publish SourceDocument CURRENT pointer; "
+            "immutable artifacts remain historical"
         ) from exc
 
     return {
@@ -279,27 +377,37 @@ def _validate_persisted_manifest(
     expected_profile: ChunkPlanningProfile | None = None,
 ) -> tuple[ChunkManifest, tuple[SourceChunk, ...]]:
     manifest = load_chunk_manifest(store, manifest_ref)
-    expected_manifest_id = chunk_manifest_artifact_id(
-        manifest.project_id,
-        manifest.document_id,
-        manifest.profile.profile_id,
-    )
-    if manifest_ref.artifact_id != expected_manifest_id:
-        raise StoryIntegrityError("ChunkManifest artifact identity does not match its payload")
+
     if manifest.source_document_ref != source_ref:
-        raise StoryIntegrityError("ChunkManifest does not pin the expected SourceDocument ref")
-    if manifest.project_id != source.project_id or manifest.document_id != source.document_id:
-        raise StoryIntegrityError("ChunkManifest source identity mismatch")
-    if expected_profile is not None and manifest.profile != expected_profile:
-        raise StoryIntegrityError("ChunkManifest profile does not match expected profile")
+        raise StoryIntegrityError(
+            "ChunkManifest does not pin the expected SourceDocument ref"
+        )
+    if (
+        manifest.project_id != source.project_id
+        or manifest.document_id != source.document_id
+    ):
+        raise StoryIntegrityError(
+            "ChunkManifest source identity mismatch"
+        )
+    if (
+        expected_profile is not None
+        and manifest.profile != expected_profile
+    ):
+        raise StoryIntegrityError(
+            "ChunkManifest profile does not match expected profile"
+        )
     if manifest.chunk_count != len(manifest.chunk_refs):
-        raise StoryIntegrityError("ChunkManifest chunk_count/ref count mismatch")
+        raise StoryIntegrityError(
+            "ChunkManifest chunk_count/ref count mismatch"
+        )
 
     chunks: list[SourceChunk] = []
     seen_chunk_ids: set[str] = set()
     for ref in manifest.chunk_refs:
         if ref.revision != manifest_ref.revision:
-            raise StoryIntegrityError("SourceChunk revision must match ChunkManifest revision")
+            raise StoryIntegrityError(
+                "SourceChunk revision must match ChunkManifest revision"
+            )
         chunk = load_source_chunk(store, ref)
         expected_id = source_chunk_artifact_id(
             manifest.project_id,
@@ -309,23 +417,33 @@ def _validate_persisted_manifest(
         )
         if ref.artifact_id != expected_id:
             raise StoryIntegrityError(
-                f"SourceChunk artifact identity does not match chunk_id {chunk.chunk_id}"
+                "SourceChunk artifact identity does not match "
+                f"chunk_id {chunk.chunk_id}"
             )
         if chunk.chunk_id in seen_chunk_ids:
-            raise StoryIntegrityError(f"duplicate persisted chunk_id: {chunk.chunk_id}")
+            raise StoryIntegrityError(
+                f"duplicate persisted chunk_id: {chunk.chunk_id}"
+            )
         seen_chunk_ids.add(chunk.chunk_id)
         chunks.append(chunk)
 
-    actual_chunk_ids = [chunk.chunk_id for chunk in chunks]
+    actual_chunk_ids = [
+        chunk.chunk_id for chunk in chunks
+    ]
     expected_chunk_ids: list[str] = []
     for chapter in source.chapters:
-        count = sum(chunk.chapter_id == chapter.chapter_id for chunk in chunks)
+        count = sum(
+            chunk.chapter_id == chapter.chapter_id
+            for chunk in chunks
+        )
         expected_chunk_ids.extend(
-            f"{chapter.chapter_id}_C{index:03d}" for index in range(1, count + 1)
+            f"{chapter.chapter_id}_C{index:03d}"
+            for index in range(1, count + 1)
         )
     if actual_chunk_ids != expected_chunk_ids:
         raise StoryIntegrityError(
-            "ChunkManifest chunk_refs are not in deterministic chapter/chunk order"
+            "ChunkManifest chunk_refs are not in deterministic "
+            "chapter/chunk order"
         )
 
     coverage = validate_chunks_against_source(
@@ -335,25 +453,64 @@ def _validate_persisted_manifest(
         chunks,
     )
     if coverage != manifest.coverage:
-        raise StoryIntegrityError("ChunkManifest coverage does not match resolved SourceChunks")
+        raise StoryIntegrityError(
+            "ChunkManifest coverage does not match resolved SourceChunks"
+        )
     return manifest, tuple(chunks)
 
 
 def _validate_current_manifest_snapshot(
     store: FileArtifactStore,
     manifest_ref: ArtifactRef,
-) -> tuple[ChunkManifest, SourceDocument]:
-    """Validate a current manifest against the historical source it actually pins."""
-
+    *,
+    project_id: str,
+    document_id: str,
+    profile_id: str,
+) -> tuple[ChunkManifest, SourceDocument, ArtifactRef]:
     manifest = load_chunk_manifest(store, manifest_ref)
-    pinned_source = load_source_document(store, manifest.source_document_ref)
+
+    if (
+        manifest.project_id != project_id
+        or manifest.document_id != document_id
+        or manifest.profile.profile_id != profile_id
+    ):
+        raise StoryIntegrityError(
+            "ChunkManifest CURRENT pointer targets the wrong "
+            "project/document/profile identity"
+        )
+
+    pinned_source = load_source_document(
+        store,
+        manifest.source_document_ref,
+    )
+    _require_source_identity(
+        pinned_source,
+        project_id=project_id,
+        document_id=document_id,
+    )
     validated, _chunks = _validate_persisted_manifest(
         store,
         source=pinned_source,
         source_ref=manifest.source_document_ref,
         manifest_ref=manifest_ref,
     )
-    return validated, pinned_source
+    report_ref = _validation_ref_for_revision(
+        store,
+        artifact_id=chunk_validation_artifact_id(
+            project_id,
+            document_id,
+            profile_id,
+        ),
+        revision=manifest_ref.revision,
+        expected_refs=(
+            LineageRef(
+                "source_document",
+                manifest.source_document_ref,
+            ),
+            LineageRef("chunk_manifest", manifest_ref),
+        ),
+    )
+    return validated, pinned_source, report_ref
 
 
 def plan_chunks_project(
@@ -367,78 +524,113 @@ def plan_chunks_project(
     profile = _load_profile(profile_path)
     store, pointers = _stores(runs_root, project_id)
 
-    source_pointer = source_pointer_id(project_id, DOCUMENT_ID)
-    source_pointer_ref, source_ref = _current_pointer(pointers, source_pointer)
+    source_pointer = source_pointer_id(
+        project_id,
+        DOCUMENT_ID,
+    )
+    source_pointer_ref, source_ref = _current_pointer(
+        pointers,
+        source_pointer,
+    )
     if source_ref is None or source_pointer_ref is None:
         raise StoryIntegrityError(
-            "A1 SourceDocument is not current; run short-drama ingest-source first"
+            "A1 SourceDocument is not current; "
+            "run short-drama ingest-source first"
         )
     source = load_source_document(store, source_ref)
-    _require_current_source_validation(store, source, source_ref)
+    _require_source_identity(
+        source,
+        project_id=project_id,
+        document_id=DOCUMENT_ID,
+    )
+    _require_current_source_validation(
+        store,
+        source,
+        source_ref,
+    )
 
-    manifest_pointer = chunk_pointer_id(project_id, DOCUMENT_ID, profile.profile_id)
-    current_manifest_pointer_ref, current_manifest_ref = _current_pointer(
-        pointers, manifest_pointer
+    manifest_pointer = chunk_pointer_id(
+        project_id,
+        DOCUMENT_ID,
+        profile.profile_id,
+    )
+    (
+        current_manifest_pointer_ref,
+        current_manifest_ref,
+    ) = _current_pointer(
+        pointers,
+        manifest_pointer,
     )
 
     if current_manifest_ref is not None:
-        current_manifest, _pinned_source = _validate_current_manifest_snapshot(
+        (
+            current_manifest,
+            _pinned_source,
+            current_report_ref,
+        ) = _validate_current_manifest_snapshot(
             store,
             current_manifest_ref,
+            project_id=project_id,
+            document_id=DOCUMENT_ID,
+            profile_id=profile.profile_id,
         )
-        if current_manifest.profile.profile_id != profile.profile_id:
-            raise StoryIntegrityError(
-                "ChunkManifest CURRENT pointer targets a different profile_id"
-            )
         if (
             current_manifest.source_document_ref == source_ref
             and current_manifest.profile == profile
-            and current_manifest.planner_version == CHUNK_PLANNER_VERSION
+            and current_manifest.planner_version
+            == CHUNK_PLANNER_VERSION
         ):
-            current_manifest, _chunks = _validate_persisted_manifest(
+            _validate_persisted_manifest(
                 store,
                 source=source,
                 source_ref=source_ref,
                 manifest_ref=current_manifest_ref,
                 expected_profile=profile,
             )
-            report_ref = _validation_ref_for_revision(
-                store,
-                artifact_id=chunk_validation_artifact_id(
-                    project_id,
-                    DOCUMENT_ID,
-                    profile.profile_id,
-                ),
-                revision=current_manifest_ref.revision,
-                expected_refs=(
-                    LineageRef("source_document", source_ref),
-                    LineageRef("chunk_manifest", current_manifest_ref),
-                ),
-            )
-            if pointers.resolve_current(source_pointer).target_ref != source_ref:
+            if (
+                pointers.resolve_current(source_pointer).target_ref
+                != source_ref
+            ):
                 raise StoryPersistenceError(
-                    "SourceDocument CURRENT pointer changed during chunk-plan reuse verification"
+                    "SourceDocument CURRENT pointer changed during "
+                    "chunk-plan reuse verification"
                 )
             if (
-                pointers.resolve_current_pointer_ref(manifest_pointer)
+                pointers.resolve_current_pointer_ref(
+                    manifest_pointer
+                )
                 != current_manifest_pointer_ref
             ):
                 raise StoryPersistenceError(
-                    "ChunkManifest CURRENT pointer changed during reuse verification"
+                    "ChunkManifest CURRENT pointer changed during "
+                    "reuse verification"
                 )
             assert current_manifest_pointer_ref is not None
             return {
                 "source_document_ref": source_ref.to_dict(),
-                "chunk_manifest_ref": current_manifest_ref.to_dict(),
-                "chunk_validation_report_ref": report_ref.to_dict(),
-                "chunk_current_pointer_ref": current_manifest_pointer_ref.to_dict(),
+                "chunk_manifest_ref": (
+                    current_manifest_ref.to_dict()
+                ),
+                "chunk_validation_report_ref": (
+                    current_report_ref.to_dict()
+                ),
+                "chunk_current_pointer_ref": (
+                    current_manifest_pointer_ref.to_dict()
+                ),
                 "chunk_count": current_manifest.chunk_count,
                 "coverage": current_manifest.coverage.to_dict(),
                 "reused": True,
-                "validation": load_validation_report(store, report_ref).summary.to_dict(),
+                "validation": load_validation_report(
+                    store,
+                    current_report_ref,
+                ).summary.to_dict(),
             }
 
-    chunks, coverage = plan_chunks(source, source_ref, profile)
+    chunks, coverage = plan_chunks(
+        source,
+        source_ref,
+        profile,
+    )
     revision = next_plan_revision(
         store,
         project_id=project_id,
@@ -469,7 +661,11 @@ def plan_chunks_project(
         coverage=coverage,
         state="CHUNKING_COMPLETE",
     )
-    manifest_ref = persist_chunk_manifest(store, manifest, revision=revision)
+    manifest_ref = persist_chunk_manifest(
+        store,
+        manifest,
+        revision=revision,
+    )
 
     _validate_persisted_manifest(
         store,
@@ -487,7 +683,9 @@ def plan_chunks_project(
         findings=(),
     )
     if report.summary.result is ValidationResult.FAIL:
-        raise ChunkCoverageError("A2 validation failed; ChunkManifest cannot become current")
+        raise ChunkCoverageError(
+            "A2 validation failed; ChunkManifest cannot become current"
+        )
     report_ref = persist_validation_report(
         store,
         report,
@@ -499,11 +697,14 @@ def plan_chunks_project(
         revision=revision,
     )
 
-    latest_source = pointers.resolve_current(source_pointer)
+    latest_source = pointers.resolve_current(
+        source_pointer
+    )
     if latest_source.target_ref != source_ref:
         raise StoryPersistenceError(
             "SourceDocument CURRENT pointer changed during A2 planning; "
-            "new chunk artifacts remain historical/orphaned and are not published"
+            "new chunk artifacts remain historical/orphaned and are "
+            "not published"
         )
 
     try:
@@ -515,14 +716,17 @@ def plan_chunks_project(
         )
     except Exception as exc:
         raise StoryPersistenceError(
-            "failed to publish ChunkManifest CURRENT pointer; immutable artifacts remain historical"
+            "failed to publish ChunkManifest CURRENT pointer; "
+            "immutable artifacts remain historical"
         ) from exc
 
     return {
         "source_document_ref": source_ref.to_dict(),
         "chunk_manifest_ref": manifest_ref.to_dict(),
         "chunk_validation_report_ref": report_ref.to_dict(),
-        "chunk_current_pointer_ref": manifest_pointer_ref.to_dict(),
+        "chunk_current_pointer_ref": (
+            manifest_pointer_ref.to_dict()
+        ),
         "chunk_count": manifest.chunk_count,
         "coverage": manifest.coverage.to_dict(),
         "reused": False,

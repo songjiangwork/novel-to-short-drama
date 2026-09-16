@@ -1,0 +1,21 @@
+# v1.2 A3A Prompt Registry — a3.chunk-extraction v1 (TRACKED).
+#
+# Versioned extraction prompt loaded by the A-I3 PromptRegistry
+# (base_dir = "prompts/story"). The pinned content_hash is computed over the
+# exact semantic prompt material (system.txt + user.txt + sorted
+# required_variables) via the A-I3 canonical prompt hash helper, NOT over this
+# metadata file. Changing any template text or required_variables under this
+# same version fails closed unless re-versioned.
+#
+# required_variables is EXACTLY the four chunk-context inputs. Their values are
+# deterministic canonical JSON array strings built by Python (A3D). LEFT/RIGHT
+# may be []; OWNERSHIP must be non-empty. No runtime/model/provider fields.
+schema_version: 1
+prompt_id: a3.chunk-extraction
+version: 1
+required_variables:
+  - chunk_id
+  - left_context_json
+  - ownership_json
+  - right_context_json
+content_hash: 118469c47ea401ee35ef9164089f918494d884158df73b02f493aa260ad40a09

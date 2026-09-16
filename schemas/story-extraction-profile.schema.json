@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "story-extraction-profile.schema.json",
+  "title": "v1.2 A3 StoryExtractionProfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "working_language",
+    "prompt_id",
+    "prompt_version",
+    "output_schema_id",
+    "output_schema_version",
+    "max_generation_rounds"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "working_language": {"type": "string", "minLength": 1},
+    "prompt_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "prompt_version": {"type": "integer", "minimum": 1},
+    "output_schema_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "output_schema_version": {"type": "integer", "minimum": 1},
+    "max_generation_rounds": {"const": 2}
+  }
+}

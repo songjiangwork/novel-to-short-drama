@@ -1,0 +1,27 @@
+# v1.2 A3A StoryExtractionProfile — TRACKED.
+#
+# A model-independent orchestration profile for A3 chunk extraction. It carries
+# NO runtime/LLM transport fields (no endpoint, credential, timeout, concrete
+# model, temperature, or reasoning). Those remain A-I3 runtime config /
+# SemanticLLMProfile concerns. This profile's canonical hash (computed over
+# to_dict() via the shared content_hash) is the `extraction_profile_hash` that
+# participates in CandidateExtraction reuse identity.
+schema_version: 1
+
+# Stable semantic identifier for this profile.
+profile_id: story-extraction-v1
+
+# Working language for semantic summaries/descriptions (zh-CN).
+working_language: zh-CN
+
+# Extraction prompt identity pinned for this profile.
+prompt_id: a3.chunk-extraction
+prompt_version: 1
+
+# Structured-output schema identity pinned for this profile.
+output_schema_id: a3-candidate-payload
+output_schema_version: 1
+
+# Bounded semantic generation rounds (first generation + at most one
+# semantic-regeneration round). See A-I4 retry policy.
+max_generation_rounds: 2

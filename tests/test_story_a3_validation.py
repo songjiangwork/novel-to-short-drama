@@ -713,6 +713,219 @@ def test_unresolved_possible_ref_to_forbidden_category_fails():
 
 
 # ---------------------------------------------------------------------------
+# Reference finding path shape (scalar vs array ref fields)
+# ---------------------------------------------------------------------------
+
+
+def _first_finding(result, code: str):
+    return next(finding for finding in result.findings if finding.code == code)
+
+
+def test_relationship_dangling_source_ref_path_is_scalar():
+    # source_ref is a scalar field: its finding path must omit the element index.
+    payload = CandidatePayload(
+        characters=(
+            make_character(candidate_id="cand_char_001"),
+            make_character(candidate_id="cand_char_002", display_name_original="老师"),
+        ),
+        relationships=(
+            make_relationship(source_ref="cand_char_999", target_ref="cand_char_002"),
+        ),
+    )
+    finding = _first_finding(validate(payload), A3_LOCAL_REF_NOT_FOUND)
+    assert finding.path == ("relationships", 0, "source_ref")
+
+
+def test_relationship_dangling_target_ref_path_is_scalar():
+    # target_ref is a scalar field: its finding path must omit the element index.
+    payload = CandidatePayload(
+        characters=(
+            make_character(candidate_id="cand_char_001"),
+            make_character(candidate_id="cand_char_002", display_name_original="老师"),
+        ),
+        relationships=(
+            make_relationship(source_ref="cand_char_001", target_ref="cand_char_999"),
+        ),
+    )
+    finding = _first_finding(validate(payload), A3_LOCAL_REF_NOT_FOUND)
+    assert finding.path == ("relationships", 0, "target_ref")
+
+
+def test_relationship_wrong_type_endpoint_path_is_scalar():
+    # A wrong-type endpoint still yields a scalar (element-index-free) path.
+    payload = CandidatePayload(
+        characters=(
+            make_character(candidate_id="cand_char_001"),
+            make_character(candidate_id="cand_char_002", display_name_original="老师"),
+        ),
+        locations=(make_location(),),
+        relationships=(
+            make_relationship(source_ref="cand_loc_001", target_ref="cand_char_002"),
+        ),
+    )
+    finding = _first_finding(validate(payload), A3_LOCAL_REF_WRONG_TYPE)
+    assert finding.path == ("relationships", 0, "source_ref")
+
+
+def test_array_ref_finding_path_includes_element_index():
+    # participant_refs is array-valued: its finding path must keep the index.
+    payload = CandidatePayload(
+        events=(
+            make_event(participant_refs=("cand_char_999",), location_refs=()),
+        ),
+    )
+    finding = _first_finding(validate(payload), A3_LOCAL_REF_NOT_FOUND)
+    assert finding.path == ("events", 0, "participant_refs", 0)
+
+
+# ---------------------------------------------------------------------------
+# Unresolved-reference type matrix (frozen contract lock-in)
+# ---------------------------------------------------------------------------
+
+
+def _participant_matrix_payload(kind: str) -> CandidatePayload:
+    if kind == "character":
+        characters = (make_character(candidate_id="cand_char_001"),)
+        unresolved = ()
+        ref = "cand_char_001"
+    else:
+        characters = ()
+        unresolved = (
+            make_unresolved(
+                candidate_id="cand_unres_001",
+                mention_kind=kind,
+                possible_candidate_refs=(),
+            ),
+        )
+        ref = "cand_unres_001"
+    return CandidatePayload(
+        characters=characters,
+        unresolved_mentions=unresolved,
+        events=(make_event(participant_refs=(ref,), location_refs=()),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "valid"),
+    [
+        ("character", True),
+        ("person", True),
+        ("unknown", True),
+        ("location", False),
+        ("other", False),
+    ],
+)
+def test_event_participant_refs_type_matrix(kind, valid):
+    result = validate(_participant_matrix_payload(kind))
+    if valid:
+        assert_valid(result)
+    else:
+        assert_invalid(result, A3_LOCAL_REF_WRONG_TYPE)
+
+
+def _location_matrix_payload(kind: str) -> CandidatePayload:
+    if kind == "location_cand":
+        locations = (make_location(candidate_id="cand_loc_001"),)
+        unresolved = ()
+        ref = "cand_loc_001"
+    else:
+        locations = ()
+        unresolved = (
+            make_unresolved(
+                candidate_id="cand_unres_001",
+                mention_kind=kind,
+                possible_candidate_refs=(),
+            ),
+        )
+        ref = "cand_unres_001"
+    return CandidatePayload(
+        locations=locations,
+        unresolved_mentions=unresolved,
+        events=(make_event(participant_refs=(), location_refs=(ref,)),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "valid"),
+    [
+        ("location_cand", True),
+        ("location", True),
+        ("unknown", True),
+        ("person", False),
+        ("other", False),
+    ],
+)
+def test_event_location_refs_type_matrix(kind, valid):
+    result = validate(_location_matrix_payload(kind))
+    if valid:
+        assert_valid(result)
+    else:
+        assert_invalid(result, A3_LOCAL_REF_WRONG_TYPE)
+
+
+def _relationship_endpoint_matrix_payload(kind: str) -> CandidatePayload:
+    unresolved = []
+    if kind == "character":
+        source_ref = "cand_char_001"
+    else:
+        source_ref = "cand_unres_001"
+        unresolved.append(
+            make_unresolved(
+                candidate_id="cand_unres_001",
+                mention_kind=kind,
+                possible_candidate_refs=(),
+            ),
+        )
+    # Keep character numbering continuous (001, 002); target_ref is a fixed
+    # always-valid character so the endpoint under test is source_ref.
+    return CandidatePayload(
+        characters=(
+            make_character(candidate_id="cand_char_001"),
+            make_character(candidate_id="cand_char_002", display_name_original="老师"),
+        ),
+        unresolved_mentions=tuple(unresolved),
+        relationships=(
+            make_relationship(source_ref=source_ref, target_ref="cand_char_002"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "valid"),
+    [
+        ("character", True),
+        ("person", True),
+        ("unknown", True),
+        ("location", False),
+        ("other", False),
+    ],
+)
+def test_relationship_endpoint_refs_type_matrix(kind, valid):
+    result = validate(_relationship_endpoint_matrix_payload(kind))
+    if valid:
+        assert_valid(result)
+    else:
+        assert_invalid(result, A3_LOCAL_REF_WRONG_TYPE)
+
+
+@pytest.mark.parametrize("kind", ["person", "location", "other", "unknown"])
+def test_fact_subject_ref_allows_unresolved_any_kind(kind):
+    # subject_refs/object_refs accept an unresolved mention of ANY mention_kind;
+    # the rule must not be tightened.
+    payload = CandidatePayload(
+        unresolved_mentions=(
+            make_unresolved(
+                candidate_id="cand_unres_001",
+                mention_kind=kind,
+                possible_candidate_refs=(),
+            ),
+        ),
+        facts=(make_fact(subject_refs=("cand_unres_001",), object_refs=()),),
+    )
+    assert_valid(validate(payload))
+
+
+# ---------------------------------------------------------------------------
 # Canonicalization
 # ---------------------------------------------------------------------------
 

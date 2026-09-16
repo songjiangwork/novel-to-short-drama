@@ -280,25 +280,33 @@ def _validate_category_ids(
 # ---------------------------------------------------------------------------
 
 
-def _candidate_ref_fields(candidate: Any) -> list[tuple[str, tuple[str, ...]]]:
-    """Enumerate the reference-bearing fields of a candidate."""
+def _candidate_ref_fields(
+    candidate: Any,
+) -> list[tuple[str, tuple[str, ...], bool]]:
+    """Enumerate the reference-bearing fields of a candidate.
+
+    Returns ``(field_name, ref_values, is_scalar)``. ``is_scalar`` is True for
+    scalar string fields (``source_ref`` / ``target_ref``) whose finding path
+    omits an element index, and False for array-valued reference fields whose
+    finding path includes the element index.
+    """
     if isinstance(candidate, FactCandidate):
         return [
-            ("subject_refs", candidate.subject_refs),
-            ("object_refs", candidate.object_refs),
+            ("subject_refs", candidate.subject_refs, False),
+            ("object_refs", candidate.object_refs, False),
         ]
     if isinstance(candidate, EventCandidate):
         return [
-            ("participant_refs", candidate.participant_refs),
-            ("location_refs", candidate.location_refs),
+            ("participant_refs", candidate.participant_refs, False),
+            ("location_refs", candidate.location_refs, False),
         ]
     if isinstance(candidate, RelationshipCandidate):
         return [
-            ("source_ref", (candidate.source_ref,)),
-            ("target_ref", (candidate.target_ref,)),
+            ("source_ref", (candidate.source_ref,), True),
+            ("target_ref", (candidate.target_ref,), True),
         ]
     if isinstance(candidate, UnresolvedMentionCandidate):
-        return [("possible_candidate_refs", candidate.possible_candidate_refs)]
+        return [("possible_candidate_refs", candidate.possible_candidate_refs, False)]
     return []
 
 
@@ -339,15 +347,18 @@ def _validate_candidate_refs(
 ) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     base = (field_name, index)
-    for ref_field, ref_values in _candidate_ref_fields(candidate):
+    for ref_field, ref_values, is_scalar in _candidate_ref_fields(candidate):
         for ref_position, ref in enumerate(ref_values):
+            # Scalar fields (source_ref / target_ref) carry no element index; the
+            # path points at the field itself. Array fields index the element.
+            ref_path = (*base, ref_field) if is_scalar else (*base, ref_field, ref_position)
             if ref not in id_category:
                 findings.append(
                     _finding(
                         A3_LOCAL_REF_NOT_FOUND,
                         f"{candidate.candidate_id}.{ref_field} references "
                         f"unknown local candidate {ref!r}",
-                        (*base, ref_field, ref_position),
+                        ref_path,
                     )
                 )
                 continue
@@ -359,7 +370,7 @@ def _validate_candidate_refs(
                         _wrong_type_code(ref_field),
                         f"{candidate.candidate_id}.{ref_field} reference "
                         f"{ref!r} has disallowed candidate type {category!r}",
-                        (*base, ref_field, ref_position),
+                        ref_path,
                     )
                 )
     return findings

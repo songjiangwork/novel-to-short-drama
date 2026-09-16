@@ -76,6 +76,7 @@ from .extraction_persistence import (
     load_candidate_extraction,
     next_candidate_extraction_revision,
     persist_candidate_extraction,
+    request_semantic_fields,
     requested_semantic_identity,
 )
 from .persistence import (
@@ -146,6 +147,7 @@ __all__ = [
     "load_candidate_extraction",
     "next_candidate_extraction_revision",
     "persist_candidate_extraction",
+    "request_semantic_fields",
     "requested_semantic_identity",
     "CharacterCandidate",
     "ChunkCoverage",

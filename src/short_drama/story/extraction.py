@@ -49,6 +49,11 @@ from .errors import ExtractionModelError
 # ---------------------------------------------------------------------------
 
 STORY_EXTRACTION_PROFILE_SCHEMA_VERSION = 1
+# Frozen A-I4 v1 ceiling: first generation + at most one semantic-regeneration
+# round. Combined with A-I3's bounded technical attempts (max 3 per
+# generate_structured call) this keeps total provider attempts bounded
+# (2 * 3 = 6). Enforced at the static-contract layer, not by retry logic.
+STORY_EXTRACTION_MAX_GENERATION_ROUNDS_V1 = 2
 CANDIDATE_EXTRACTION_SCHEMA_VERSION = 1
 CANDIDATE_EXTRACTION_ARTIFACT_TYPE = "candidate_extraction"
 
@@ -1017,10 +1022,21 @@ class StoryExtractionProfile:
             self.output_schema_version,
             "StoryExtractionProfile.output_schema_version",
         )
+        # Frozen A-I4 v1 hard ceiling: schema_version 1 requires exactly 2
+        # semantic generation rounds (see STORY_EXTRACTION_MAX_GENERATION_ROUNDS_V1).
         _require_positive_int(
             self.max_generation_rounds,
             "StoryExtractionProfile.max_generation_rounds",
         )
+        if (
+            self.schema_version == STORY_EXTRACTION_PROFILE_SCHEMA_VERSION
+            and self.max_generation_rounds != STORY_EXTRACTION_MAX_GENERATION_ROUNDS_V1
+        ):
+            raise ExtractionModelError(
+                "StoryExtractionProfile.max_generation_rounds must be "
+                f"{STORY_EXTRACTION_MAX_GENERATION_ROUNDS_V1} for schema_version "
+                f"{STORY_EXTRACTION_PROFILE_SCHEMA_VERSION} (frozen A-I4 v1 ceiling)"
+            )
 
     @property
     def profile_hash(self) -> str:

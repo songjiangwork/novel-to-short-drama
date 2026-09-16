@@ -43,6 +43,7 @@ from short_drama.story import (
     FactCandidate,
     LocationCandidate,
     RelationshipCandidate,
+    STORY_EXTRACTION_MAX_GENERATION_ROUNDS_V1,
     StoryExtractionProfile,
     UnresolvedMentionCandidate,
     load_story_extraction_profile,
@@ -52,7 +53,7 @@ PROMPTS_STORY_DIR = REPO_ROOT / "prompts" / "story"
 A3_PROMPT_ID = "a3.chunk-extraction"
 A3_PROMPT_VERSION = 1
 PROMPT_CONTENT_HASH = (
-    "79ba3858926c4691ee3b4286e444ca7b634bc7f78d7207bffa2de7b6977e8ecd"
+    "118469c47ea401ee35ef9164089f918494d884158df73b02f493aa260ad40a09"
 )
 
 
@@ -310,6 +311,34 @@ def test_story_extraction_profile_rejects_runtime_and_bad_shape():
     bad_version["schema_version"] = 2
     with pytest.raises(ExtractionModelError):
         StoryExtractionProfile.from_dict(bad_version)
+
+
+# Frozen A-I4 v1 ceiling: schema_version 1 requires exactly 2 semantic rounds.
+def test_max_generation_rounds_v1_ceiling_accepted():
+    base = load_story_extraction_profile(
+        PROFILES_DIR / "story_extraction_v1.yaml"
+    ).to_dict()
+    assert STORY_EXTRACTION_MAX_GENERATION_ROUNDS_V1 == 2
+    assert base["max_generation_rounds"] == 2
+    # tracked value 2 passes both the Python model and the schema
+    assert StoryExtractionProfile.from_dict(base) == StoryExtractionProfile.from_dict(
+        base
+    )
+    assert _validate(base, _schema("story-extraction-profile.schema.json")) == []
+
+
+@pytest.mark.parametrize("rounds", [1, 3, 100])
+def test_max_generation_rounds_v1_ceiling_rejected(rounds):
+    base = load_story_extraction_profile(
+        PROFILES_DIR / "story_extraction_v1.yaml"
+    ).to_dict()
+    bad = dict(base)
+    bad["max_generation_rounds"] = rounds
+    # Python authoritative validation rejects any value other than 2
+    with pytest.raises(ExtractionModelError):
+        StoryExtractionProfile.from_dict(bad)
+    # the schema enforces the same exact constraint (const: 2)
+    assert _validate(bad, _schema("story-extraction-profile.schema.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +662,10 @@ def test_provider_schema_strict_mode_discipline():
                 f"provider property {prop!r} is not explicitly required"
             )
     # No constructs that require provider-side repair or are disallowed in
-    # strict structured-output mode.
+    # strict structured-output mode. In particular the llama.cpp
+    # JSON-schema-to-grammar path does not support `uniqueItems` (an
+    # unsupported feature may be silently skipped rather than enforced), so it
+    # must NOT appear in the provider-facing schema.
     found: set[str] = set()
     _collect_keywords(schema, found)
     forbidden = {
@@ -653,8 +685,38 @@ def test_provider_schema_strict_mode_discipline():
         "description",
         "definitions",
         "patternProperties",
+        "uniqueItems",
     }
     assert not (found & forbidden), f"provider schema uses strict-incompatible keys: {found & forbidden}"
+
+
+def test_provider_schema_defers_uniqueness_to_authoritative_validation():
+    """Provider constraint < Python/local authoritative validation.
+
+    The provider-facing schema intentionally omits `uniqueItems` because the
+    local llama.cpp provider cannot enforce it. Uniqueness of string-list fields
+    is still enforced authoritatively by the Python domain models (fail closed
+    on duplicates), so dropping the keyword from the provider schema does not
+    weaken the contract. The persisted artifact schema, which is local-only and
+    never sent to the provider, may keep the stronger `uniqueItems` validation.
+    """
+    # provider schema carries no uniqueItems anywhere
+    found: set[str] = set()
+    _collect_keywords(_schema("candidate-payload.schema.json"), found)
+    assert "uniqueItems" not in found
+    # the persisted schema (local-only) retains the stronger uniqueness check
+    found_persisted: set[str] = set()
+    _collect_keywords(_schema("candidate-extraction.schema.json"), found_persisted)
+    assert "uniqueItems" in found_persisted
+    # the Python model remains authoritative: duplicates still fail closed
+    with pytest.raises(ExtractionModelError):
+        make_character(aliases_original=("a", "a"))
+    # and a duplicate string list is rejected by the persisted schema too
+    dup = full_payload().to_dict()
+    dup["characters"][0]["aliases_original"] = ["a", "a"]
+    assert _validate(dup, _schema("candidate-extraction.schema.json"))
+    # while the provider schema (which cannot enforce uniqueness) accepts it
+    assert _validate(dup, _schema("candidate-payload.schema.json")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -727,3 +789,41 @@ def test_prompt_templates_carry_chunk_local_instructions():
     assert "UNRESOLVED IS VALID" in combined
     assert "NO EXTRA DECISIONS" in combined
     assert "JSON object" in combined
+
+
+def test_prompt_is_source_language_neutral():
+    registry = PromptRegistry(PROMPTS_STORY_DIR)
+    spec = registry.load(A3_PROMPT_ID, version=A3_PROMPT_VERSION)
+    system = spec.system_template
+    # The prompt must NOT constrain the source language (the old wording said
+    # "a Chinese novel"). It states the source may be any language, keeps the
+    # working language as zh-CN for summaries, and keeps source text original.
+    assert "Chinese novel" not in system
+    assert "any language" in system
+    assert "WORKING LANGUAGE" in system
+    assert "zh-CN" in system
+    assert "original source form and original language" in system
+
+
+def test_prompt_covers_local_reference_contract():
+    registry = PromptRegistry(PROMPTS_STORY_DIR)
+    spec = registry.load(A3_PROMPT_ID, version=A3_PROMPT_VERSION)
+    system = spec.system_template
+    # The local candidate-reference contract must be stated concisely.
+    assert "LOCAL REFERENCES" in system
+    for prefix in ("cand_char_", "cand_loc_", "cand_fact_", "cand_evt_", "cand_rel_", "cand_unres_"):
+        assert prefix in system
+    for ref_field in (
+        "subject_refs",
+        "object_refs",
+        "participant_refs",
+        "location_refs",
+        "source_ref",
+        "target_ref",
+        "possible_candidate_refs",
+    ):
+        assert ref_field in system
+    assert "same output payload" in system
+    assert "Do not invent canonical" in system
+    # unresolved identity remains valid and must not be forced
+    assert "Do not force a guess" in system

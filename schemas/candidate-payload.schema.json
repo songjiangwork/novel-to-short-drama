@@ -35,7 +35,6 @@
           },
           "aliases_original": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -43,7 +42,6 @@
           },
           "descriptors_zh": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -128,7 +126,6 @@
           },
           "aliases_original": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -136,7 +133,6 @@
           },
           "descriptors_zh": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -234,7 +230,6 @@
           },
           "subject_refs": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -242,7 +237,6 @@
           },
           "object_refs": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -323,7 +317,6 @@
           },
           "participant_refs": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -331,7 +324,6 @@
           },
           "location_refs": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1
@@ -530,7 +522,6 @@
           },
           "possible_candidate_refs": {
             "type": "array",
-            "uniqueItems": true,
             "items": {
               "type": "string",
               "minLength": 1

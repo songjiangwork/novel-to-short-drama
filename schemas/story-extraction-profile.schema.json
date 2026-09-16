@@ -22,6 +22,6 @@
     "prompt_version": {"type": "integer", "minimum": 1},
     "output_schema_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
     "output_schema_version": {"type": "integer", "minimum": 1},
-    "max_generation_rounds": {"type": "integer", "minimum": 1}
+    "max_generation_rounds": {"const": 2}
   }
 }

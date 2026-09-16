@@ -88,6 +88,10 @@ from short_drama.story import (
     persist_source_document,
     request_semantic_fields,
 )
+from short_drama.story.persistence import (
+    source_chunk_artifact_id,
+    source_document_artifact_id,
+)
 from short_drama.story.source import NormalizationInfo
 
 
@@ -504,6 +508,21 @@ def _alt_source_document(h: Harness) -> tuple[SourceDocument, ArtifactRef]:
     return alt_doc, ref
 
 
+def _alt_source_pair(
+    h: Harness,
+) -> tuple[SourceDocument, ArtifactRef, SourceChunk, ArtifactRef]:
+    """A coherent alternate source pair: an alternate SourceDocument revision +
+    an alternate SourceChunk revision that pins exactly that document ref.
+    Coherent lineage is required for a legitimate (non-incoherent) source
+    semantic change."""
+    alt_doc, alt_doc_ref = _alt_source_document(h)
+    alt_chunk = build_source_chunk(alt_doc_ref)
+    alt_chunk_ref = persist_source_chunk(
+        h.store, alt_chunk, profile_id=CHUNK_PROFILE_ID, revision=2
+    )
+    return alt_doc, alt_doc_ref, alt_chunk, alt_chunk_ref
+
+
 # ---------------------------------------------------------------------------
 # Identity helpers
 # ---------------------------------------------------------------------------
@@ -772,19 +791,38 @@ def _publish_then_check_miss(h: Harness, *, request, **overrides):
 
 
 def test_source_document_ref_change_invalidates(tmp_path):
+    """A coherent alternate source pair (real revisions, chunk pins the exact
+    alternate document) is a legitimate source semantic change -> normal miss."""
     h = make_harness(tmp_path)
-    _, alt_doc_ref = _alt_source_document(h)
-    _publish_then_check_miss(h, request=h.request, source_document_ref=alt_doc_ref)
+    _, alt_doc_ref, alt_chunk, alt_chunk_ref = _alt_source_pair(h)
+    _publish_then_check_miss(
+        h,
+        request=h.request,
+        source_document_ref=alt_doc_ref,
+        source_chunk_ref=alt_chunk_ref,
+    )
 
 
 def test_source_chunk_ref_change_invalidates(tmp_path):
     h = make_harness(tmp_path)
-    alt_doc, alt_doc_ref = _alt_source_document(h)
-    alt_chunk = build_source_chunk(alt_doc_ref)
-    alt_chunk_ref = persist_source_chunk(
-        h.store, alt_chunk, profile_id=CHUNK_PROFILE_ID, revision=2
+    _, alt_doc_ref, alt_chunk, alt_chunk_ref = _alt_source_pair(h)
+    _publish_then_check_miss(
+        h,
+        request=h.request,
+        source_document_ref=alt_doc_ref,
+        source_chunk_ref=alt_chunk_ref,
     )
-    _publish_then_check_miss(h, request=h.request, source_chunk_ref=alt_chunk_ref)
+
+
+def test_incoherent_source_pair_fails_closed_not_miss(tmp_path):
+    """Changing only source_document_ref while the SourceChunk still pins the
+    old document is structurally incoherent -> fail closed, not a normal miss."""
+    h = make_harness(tmp_path)
+    _, alt_doc_ref = _alt_source_document(h)
+    # the (base) source chunk still pins the base document, so this pair is
+    # incoherent (chunk.source_document_ref != requested source_document_ref)
+    with pytest.raises(StoryIntegrityError, match="source_document_ref"):
+        reuse(h, request=h.request, source_document_ref=alt_doc_ref)
 
 
 def test_chunk_profile_id_is_part_of_identity():
@@ -1044,8 +1082,16 @@ def _invalid_payload() -> CandidatePayload:
 def test_invalid_candidate_does_not_replace_valid_current(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
+    # a DIFFERENT semantic identity + invalid payload: the publish fails closed
+    # and never replaces the valid CURRENT.
     with pytest.raises(StoryIntegrityError, match="cannot become current"):
-        publish(h, payload=_invalid_payload())
+        publish(
+            h,
+            payload=_invalid_payload(),
+            generation_provenance=provenance_from_request(
+                make_request(model="qwen3-9b")
+            ),
+        )
     assert h.pointers.resolve_current(pointer_id()).target_ref == (
         first.candidate_extraction_ref
     )
@@ -1085,7 +1131,7 @@ def test_forged_source_document_ref_fails_closed(tmp_path):
         h.source_document_ref.revision,
         "9" * 64,  # wrong content hash -> exact resolution must reject
     )
-    with pytest.raises(StoryIntegrityError, match="source_document_ref"):
+    with pytest.raises(StoryIntegrityError, match="failed to resolve SourceDocument"):
         publish(h, source_document_ref=forged)
     with pytest.raises(Exception):
         h.store.get("candidate_extraction", extraction_artifact_id(), 1)
@@ -1101,7 +1147,7 @@ def test_forged_source_chunk_ref_fails_closed(tmp_path):
         h.source_chunk_ref.revision,
         "9" * 64,
     )
-    with pytest.raises(StoryIntegrityError, match="source_chunk_ref"):
+    with pytest.raises(StoryIntegrityError, match="failed to resolve SourceChunk"):
         publish(h, source_chunk_ref=forged)
     with pytest.raises(Exception):
         h.store.get("candidate_extraction", extraction_artifact_id(), 1)
@@ -1264,6 +1310,206 @@ def test_current_wrong_logical_target_changed_identity_fails_closed(tmp_path):
     assert h.pointers.resolve_current(pointer_id()).target_ref == other_ref
     with pytest.raises(Exception):
         h.store.get("candidate_extraction", extraction_artifact_id(), 1)
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1 — publish-time CURRENT re-verification (provider-call TOCTOU)
+#
+# These call ``publish_validated()`` DIRECTLY (without ``try_reuse_current``
+# catching the problem first) to prove the CURRENT integrity invariant is
+# upheld at the actual publication boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_publish_current_missing_report_fails_closed(tmp_path):
+    h = make_harness(tmp_path)
+    first = publish(h)
+    store_path(h.store, "validation_report", validation_artifact_id(), 1).unlink()
+    with pytest.raises(StoryIntegrityError, match="ValidationReport is missing"):
+        publish(h)
+    assert h.pointers.resolve_current(pointer_id()).target_ref == (
+        first.candidate_extraction_ref
+    )
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 2)
+
+
+def test_publish_current_mismatched_report_fails_closed(tmp_path):
+    h = make_harness(tmp_path)
+    first = publish(h)
+    wrong_chunk_ref = ArtifactRef(
+        "source_chunk", h.source_chunk_ref.artifact_id, 1, "9" * 64
+    )
+    bad_report = ValidationReport(
+        validated_refs=(
+            LineageRef("source_document", h.source_document_ref),
+            LineageRef("source_chunk", wrong_chunk_ref),
+            LineageRef("candidate_extraction", first.candidate_extraction_ref),
+        ),
+        findings=(),
+    )
+    _overwrite_report(h, first.candidate_extraction_ref, bad_report)
+    with pytest.raises(StoryIntegrityError, match="ValidationReport"):
+        publish(h)
+    assert h.pointers.resolve_current(pointer_id()).target_ref == (
+        first.candidate_extraction_ref
+    )
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 2)
+
+
+def test_publish_current_non_pass_report_fails_closed(tmp_path):
+    h = make_harness(tmp_path)
+    first = publish(h)
+    bad_report = ValidationReport(
+        validated_refs=(
+            LineageRef("source_document", h.source_document_ref),
+            LineageRef("source_chunk", h.source_chunk_ref),
+            LineageRef("candidate_extraction", first.candidate_extraction_ref),
+        ),
+        findings=(_finding(ValidationSeverity.BLOCKING, "A3_FAIL"),),
+    )
+    _overwrite_report(h, first.candidate_extraction_ref, bad_report)
+    with pytest.raises(StoryIntegrityError):
+        publish(h)
+    assert h.pointers.resolve_current(pointer_id()).target_ref == (
+        first.candidate_extraction_ref
+    )
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 2)
+
+
+def test_publish_current_semantic_invalid_fails_closed(tmp_path):
+    h = make_harness(tmp_path)
+    extraction = make_extraction(h, payload=_invalid_payload())
+    ref = persist_candidate_extraction(h.store, extraction, revision=1)
+    _publish_current(h, extraction, ref)
+    with pytest.raises(StoryIntegrityError):
+        publish(h)
+    assert h.pointers.resolve_current(pointer_id()).target_ref == ref
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 2)
+
+
+def test_publish_current_noncanonical_fails_closed(tmp_path):
+    h = make_harness(tmp_path)
+    extraction = make_extraction(h, payload=noncanonical_payload())
+    ref = persist_candidate_extraction(h.store, extraction, revision=1)
+    _publish_current(h, extraction, ref)
+    with pytest.raises(StoryIntegrityError, match="canonical form"):
+        publish(h)
+    assert h.pointers.resolve_current(pointer_id()).target_ref == ref
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 2)
+
+
+def test_publish_current_wrong_logical_target_fails_closed(tmp_path):
+    h = make_harness(tmp_path)
+    other = replace(make_extraction(h), chunk_id="CH001_C002")
+    other_ref = persist_candidate_extraction(h.store, other, revision=1)
+    h.pointers.compare_and_set(
+        pointer_id=pointer_id(),
+        pointer_kind=PointerKind.CURRENT,
+        expected_pointer_ref=None,
+        target_ref=other_ref,
+    )
+    with pytest.raises(
+        StoryIntegrityError, match="different logical CandidateExtraction"
+    ):
+        publish(h)
+    assert h.pointers.resolve_current(pointer_id()).target_ref == other_ref
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 1)
+
+
+def test_publish_same_identity_race_reuses_not_republishes(tmp_path):
+    """Provider-call same-identity race: worker B already published this exact
+    post-generation semantic identity; worker A's direct ``publish_validated``
+    must reuse the validated CURRENT (no new immutable revision)."""
+    h = make_harness(tmp_path)
+    first = publish(h)  # worker B: rev 1, base identity
+    # worker A: direct publish of the SAME identity (no try_reuse_current)
+    second = publish(h)
+    assert second.reused is True
+    assert second.candidate_extraction_ref == first.candidate_extraction_ref
+    assert second.validation_report_ref == first.validation_report_ref
+    assert second.current_pointer_ref == first.current_pointer_ref
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", extraction_artifact_id(), 2)
+
+
+# ---------------------------------------------------------------------------
+# Blocker 2 — typed A1/A2 loader reuse (no second, weaker source loader)
+# ---------------------------------------------------------------------------
+
+
+def test_a3c_rejects_source_with_unsupported_envelope_schema(tmp_path):
+    """A3C must not accept a source artifact the authoritative A1/A2 typed
+    loader rejects: an immutable envelope with an unsupported
+    ``envelope.schema_version`` but a valid v1 ``payload.schema_version``."""
+    store = FileArtifactStore(tmp_path / "artifacts")
+    pointers = FilePointerStore(tmp_path / "pointers", store)
+    doc = build_source_document()
+    envelope = ImmutableArtifactEnvelope.create(
+        artifact_type="source_document",
+        artifact_id=source_document_artifact_id(PROJECT, DOCUMENT),
+        revision=1,
+        schema_version=999,  # unsupported envelope schema_version
+        payload=doc.to_dict(),  # valid v1 payload
+    )
+    bad_doc_ref = store.put(envelope)
+    chunk = build_source_chunk(bad_doc_ref)
+    chunk_ref = persist_source_chunk(
+        store, chunk, profile_id=CHUNK_PROFILE_ID, revision=1
+    )
+    service = CandidateExtractionService(store, pointers)
+    with pytest.raises(
+        StoryIntegrityError, match="unsupported SourceDocument schema_version"
+    ):
+        service.try_reuse_current(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile_id=CHUNK_PROFILE_ID,
+            chunk_id=CHUNK_ID,
+            source_document_ref=bad_doc_ref,
+            source_chunk_ref=chunk_ref,
+            extraction_profile=make_profile(),
+            structured_request=make_request(),
+        )
+
+
+def test_a3c_rejects_source_chunk_with_unsupported_envelope_schema(tmp_path):
+    """Equivalent for SourceChunk: an immutable envelope with an unsupported
+    ``envelope.schema_version`` is rejected by the A1/A2 typed loader."""
+    store = FileArtifactStore(tmp_path / "artifacts")
+    pointers = FilePointerStore(tmp_path / "pointers", store)
+    doc = build_source_document()
+    doc_ref = persist_source_document(store, doc, revision=1)
+    chunk = build_source_chunk(doc_ref)
+    envelope = ImmutableArtifactEnvelope.create(
+        artifact_type="source_chunk",
+        artifact_id=source_chunk_artifact_id(
+            PROJECT, DOCUMENT, CHUNK_PROFILE_ID, CHUNK_ID
+        ),
+        revision=1,
+        schema_version=999,  # unsupported envelope schema_version
+        payload=chunk.to_dict(),  # valid v1 payload
+    )
+    bad_chunk_ref = store.put(envelope)
+    service = CandidateExtractionService(store, pointers)
+    with pytest.raises(
+        StoryIntegrityError, match="unsupported SourceChunk schema_version"
+    ):
+        service.try_reuse_current(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile_id=CHUNK_PROFILE_ID,
+            chunk_id=CHUNK_ID,
+            source_document_ref=doc_ref,
+            source_chunk_ref=bad_chunk_ref,
+            extraction_profile=make_profile(),
+            structured_request=make_request(),
+        )
 
 
 # ---------------------------------------------------------------------------

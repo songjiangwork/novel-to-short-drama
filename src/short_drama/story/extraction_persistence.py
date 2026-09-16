@@ -86,6 +86,8 @@ from .extraction_validation import (
 )
 from .persistence import (
     _next_free_revision,
+    load_source_chunk,
+    load_source_document,
     source_chunk_artifact_id,
     source_document_artifact_id,
 )
@@ -430,29 +432,39 @@ def requested_semantic_identity(
 # ---------------------------------------------------------------------------
 
 
-def _exact_resolve_source(
+def _validate_source_pair(
     store: FileArtifactStore,
-    ref: ArtifactRef,
-    model_cls: type,
-    label: str,
-) -> Any:
-    """Exact-resolve an immutable artifact ref (id + revision + content hash).
+    *,
+    source_document_ref: ArtifactRef,
+    source_chunk_ref: ArtifactRef,
+    chunk_profile_id: str,
+) -> tuple[SourceDocument, SourceChunk]:
+    """Exact-resolve the requested source refs through the authoritative A1/A2
+    typed loaders and verify their lineage.
 
-    A missing ref, forged content hash, or wrong revision fails closed as a
-    Story integrity error; the exact persisted payload is the authority.
+    The A1/A2 loaders (``load_source_document`` / ``load_source_chunk``) already
+    perform exact id/revision/content-hash resolution (via
+    ``FileArtifactStore.get_ref``) plus the envelope schema_version, typed
+    artifact-identity, and canonical round-trip checks. A missing ref, forged
+    content hash, wrong revision, or an envelope the A1/A2 loader rejects fails
+    closed as a Story integrity error. Returns the resolved (authoritative)
+    source pair.
     """
-    try:
-        envelope = store.get_ref(ref)
-    except ArtifactError as exc:
+    source_document = load_source_document(store, source_document_ref)
+    source_chunk = load_source_chunk(store, source_chunk_ref)
+    _check_extraction_source_refs(
+        source_document=source_document,
+        source_chunk=source_chunk,
+        source_document_ref=source_document_ref,
+        source_chunk_ref=source_chunk_ref,
+        chunk_profile_id=chunk_profile_id,
+    )
+    if source_chunk.source_document_ref != source_document_ref:
         raise StoryIntegrityError(
-            f"{label} does not resolve to an exact immutable artifact"
-        ) from exc
-    try:
-        return model_cls.from_dict(envelope.payload)
-    except Exception as exc:  # noqa: BLE001 - report any typed-model failure
-        raise StoryIntegrityError(
-            f"{label} does not resolve to a valid {model_cls.__name__}"
-        ) from exc
+            "SourceChunk.source_document_ref does not exactly match "
+            "source_document_ref"
+        )
+    return source_document, source_chunk
 
 
 def _check_extraction_source_refs(
@@ -515,16 +527,16 @@ def _resolve_and_check_source_refs(
 ) -> tuple[SourceDocument, SourceChunk]:
     """Prove the supplied refs *exactly* resolve to the supplied source pair.
 
-    The exact persisted artifacts are the authority: the caller-supplied
-    objects must exactly equal them, the chunk's lineage must exactly match the
-    requested document ref, and all identity checks must hold. Returns the
-    authoritative (resolved) source pair.
+    Delegates to :func:`_validate_source_pair` (authoritative A1/A2 typed
+    loaders + exact lineage), then additionally requires the caller-supplied
+    objects to exactly equal the resolved artifacts. Returns the authoritative
+    (resolved) source pair.
     """
-    resolved_document = _exact_resolve_source(
-        store, source_document_ref, SourceDocument, "source_document_ref"
-    )
-    resolved_chunk = _exact_resolve_source(
-        store, source_chunk_ref, SourceChunk, "source_chunk_ref"
+    resolved_document, resolved_chunk = _validate_source_pair(
+        store,
+        source_document_ref=source_document_ref,
+        source_chunk_ref=source_chunk_ref,
+        chunk_profile_id=chunk_profile_id,
     )
     if resolved_document != source_document:
         raise StoryIntegrityError(
@@ -536,18 +548,6 @@ def _resolve_and_check_source_refs(
             "supplied SourceChunk does not exactly match the immutable "
             "artifact behind source_chunk_ref"
         )
-    if resolved_chunk.source_document_ref != source_document_ref:
-        raise StoryIntegrityError(
-            "SourceChunk.source_document_ref does not exactly match "
-            "source_document_ref"
-        )
-    _check_extraction_source_refs(
-        source_document=resolved_document,
-        source_chunk=resolved_chunk,
-        source_document_ref=source_document_ref,
-        source_chunk_ref=source_chunk_ref,
-        chunk_profile_id=chunk_profile_id,
-    )
     return resolved_document, resolved_chunk
 
 
@@ -663,6 +663,12 @@ class CandidateExtractionService:
         raises (fail closed) when the CURRENT is corrupt, missing its exact
         PASS report, non-PASS, noncanonical, semantic-invalid, or targets a
         different logical CandidateExtraction.
+
+        As the pre-provider gate, it also exact-resolves the *requested* source
+        pair through the A1/A2 loaders: a forged/missing/unsupported requested
+        source ref, or an incoherent SourceDocument/SourceChunk pair, fails
+        closed rather than degrading into a normal miss that could trigger an
+        LLM call.
         """
         self._check_source_ref_identity(
             project_id=project_id,
@@ -671,6 +677,14 @@ class CandidateExtractionService:
             chunk_id=chunk_id,
             source_document_ref=source_document_ref,
             source_chunk_ref=source_chunk_ref,
+        )
+        # Pre-generation source integrity: exact-resolve the requested source
+        # pair (A1/A2 loaders + exact lineage) before any reuse/miss decision.
+        _validate_source_pair(
+            self.store,
+            source_document_ref=source_document_ref,
+            source_chunk_ref=source_chunk_ref,
+            chunk_profile_id=chunk_profile_id,
         )
         pointer_id = candidate_extraction_pointer_id(
             project_id,
@@ -769,13 +783,52 @@ class CandidateExtractionService:
         current_pointer_ref, current_extraction_ref = _current_pointer(
             self.pointers, pointer_id
         )
-        # Before supersession, the current pointer (if any) must target exactly
-        # this logical CandidateExtraction (never silently repair a wrong one).
+        # Post-generation requested identity (what a new publication would carry).
+        requested_identity = requested_semantic_identity(
+            source_document_ref=source_document_ref,
+            source_chunk_ref=source_chunk_ref,
+            chunk_profile_id=chunk_profile_id,
+            extraction_profile=extraction_profile,
+            semantic_source=generation_provenance,
+        )
+        # Re-verify the CURRENT at the actual publication boundary: this upholds
+        # the CURRENT integrity invariant even if the caller's earlier
+        # ``try_reuse_current()`` is stale (provider-call TOCTOU window) or this
+        # is a direct caller. A corrupt / missing-report / non-PASS /
+        # noncanonical / semantic-invalid / wrong-logical-target CURRENT fails
+        # closed and never moves CURRENT.
         if current_extraction_ref is not None:
             self._check_current_logical_target(
                 current_extraction_ref, logical_artifact_id
             )
+            current_extraction = load_candidate_extraction(
+                self.store, current_extraction_ref
+            )
+            report_ref = self._verify_current_extraction(
+                current_extraction, current_extraction_ref
+            )
+            # Same-identity race: if the exact post-generation semantic identity
+            # is already current (validated), reuse it instead of creating
+            # another immutable revision for the same identity. The stability
+            # contract is validated-artifact reuse, not fresh-output determinism.
+            if extraction_semantic_identity(current_extraction) == requested_identity:
+                if (
+                    self.pointers.resolve_current_pointer_ref(pointer_id)
+                    != current_pointer_ref
+                ):
+                    raise StoryPersistenceError(
+                        "CandidateExtraction CURRENT pointer changed during "
+                        "publication"
+                    )
+                assert current_pointer_ref is not None
+                return CandidateExtractionPublication(
+                    candidate_extraction_ref=current_extraction_ref,
+                    validation_report_ref=report_ref,
+                    current_pointer_ref=current_pointer_ref,
+                    reused=True,
+                )
 
+        # No current, or a different identity: validate + publish a new revision.
         # Exact source-ref lineage: prove the supplied refs resolve to the
         # supplied source pair; the exact persisted artifacts are the authority.
         resolved_document, resolved_chunk = _resolve_and_check_source_refs(
@@ -936,18 +989,10 @@ class CandidateExtractionService:
         A3B semantic validation, verifies the canonical payload, and compares
         the exact matching PASS ``ValidationReport``.
         """
-        source_document = _exact_resolve_source(
-            self.store,
-            extraction.source_document_ref,
-            SourceDocument,
-            "CandidateExtraction.source_document_ref",
+        source_document = load_source_document(
+            self.store, extraction.source_document_ref
         )
-        source_chunk = _exact_resolve_source(
-            self.store,
-            extraction.source_chunk_ref,
-            SourceChunk,
-            "CandidateExtraction.source_chunk_ref",
-        )
+        source_chunk = load_source_chunk(self.store, extraction.source_chunk_ref)
         if source_chunk.source_document_ref != extraction.source_document_ref:
             raise StoryIntegrityError(
                 "SourceChunk.source_document_ref does not match "

@@ -166,7 +166,13 @@ def build_fixture_chunk(source_document_ref) -> SourceChunk:
 
 
 def query_server_model(base_url: str, credential_env: str | None) -> str | None:
-    """Best-effort query of the served model name (never a smoke gate)."""
+    """Best-effort query of the served model name.
+
+    Returns ``None`` when the endpoint cannot be reached or the model name
+    cannot be determined. In official acceptance mode this query result is a
+    smoke gate (see :func:`acceptance_model_guard`); in diagnostic ``--model``
+    mode it is informational only.
+    """
     url = base_url.rstrip("/") + "/models"
     request = urllib.request.Request(url)
     if credential_env is not None:
@@ -178,7 +184,7 @@ def query_server_model(base_url: str, credential_env: str | None) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001 - a model query failure is not fatal
+    except Exception:  # noqa: BLE001 - a model query failure is not fatal here
         return None
     try:
         models = data.get("data") or data.get("models") or []
@@ -187,6 +193,35 @@ def query_server_model(base_url: str, credential_env: str | None) -> str | None:
         return name if isinstance(name, str) else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def acceptance_model_guard(
+    *,
+    model_override: str | None,
+    tracked_model: str,
+    server_model: str | None,
+) -> str | None:
+    """Return a BLOCKED reason string in official acceptance mode, else ``None``.
+
+    Acceptance mode is when NO ``--model`` override is supplied: the smoke must
+    verify the configured endpoint serves EXACTLY the tracked semantic model, or
+    fail closed before generation. This prevents a false acceptance result on a
+    single-model OpenAI-compatible server that ignores the request ``model``
+    field (which would happily run whatever one model is loaded regardless of
+    the requested name).
+
+    Diagnostic mode (an explicit ``--model`` override IS supplied) bypasses the
+    guard so a different served semantic identity can be deliberately tested.
+    """
+    if model_override is not None:
+        return None
+    if server_model is None or server_model != tracked_model:
+        return (
+            "SMOKE BLOCKED_BY_RUNTIME_ENVIRONMENT: configured endpoint is not "
+            "verified to serve the exact tracked semantic model "
+            f"(tracked={tracked_model}, served={server_model or 'unknown'})"
+        )
+    return None
 
 
 class CountingLLMClient(LLMClient):
@@ -243,6 +278,18 @@ def run_smoke(
     print(f"tracked semantic model:   {tracked_model}")
     print(f"served model (queried):   {server_model or 'unknown'}")
     print(f"effective model (used):   {effective_model}")
+
+    # Official acceptance mode (no --model): fail closed before generation if
+    # the configured endpoint is not verified to serve the exact tracked model.
+    blocked_reason = acceptance_model_guard(
+        model_override=model_override,
+        tracked_model=tracked_model,
+        server_model=server_model,
+    )
+    if blocked_reason is not None:
+        print(blocked_reason)
+        return 2
+
     if server_model is not None and server_model != tracked_model:
         print(
             "NOTE: tracked semantic model differs from the served model; "

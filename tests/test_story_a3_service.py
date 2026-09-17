@@ -47,6 +47,7 @@ from short_drama.llm import (
     LLMClient,
     LLMConfigError,
     LLMRetryExhaustedError,
+    LLMStructuredOutputError,
     LLMTransportError,
     LLMInvocationProvenance,
     OutputSchema,
@@ -58,12 +59,14 @@ from short_drama.llm import (
     StructuredGenerationResult,
     build_provenance,
     build_structured_request,
+    validate_against_output_schema,
 )
 from short_drama.paths import REPO_ROOT, SCHEMAS_DIR
 from short_drama.story import (
     CandidateExtractionPublication,
     ChunkExtractionService,
     DEFAULT_OUTPUT_SCHEMA_PATH,
+    ExtractionModelError,
     ExtractionProvenanceError,
     ExtractionSemanticGenerationError,
     LANGUAGE_DETECTOR_ID,
@@ -207,29 +210,27 @@ def uncertainty_payload() -> CandidatePayload:
 
 
 def typed_reject_payload_dict() -> dict:
-    """A JSON-Schema-valid object the A3 typed model still rejects.
+    """A CandidatePayload JSON-Schema-valid object the A3 typed model rejects.
 
-    The schema allows ``unresolved_mentions[].evidence_strength`` to be
-    explicit/implied/uncertain, but the A3A typed model requires an unresolved
-    mention's ``evidence_strength`` to be exactly ``uncertain``. So this dict
-    passes the provider/local JSON-Schema gate but is rejected by
-    ``CandidatePayload.from_dict`` (a semantic-invalid round with no A3B
-    ValidationFindings).
+    The provider schema for ``characters[].aliases_original`` is
+    ``{"type": "array", "items": {"type": "string", "minLength": 1}}`` with NO
+    ``uniqueItems`` constraint, so ``["小晚", "小晚"]`` passes A-I3 local JSON
+    Schema validation. But the A3A typed model rejects duplicate strings in
+    ``aliases_original`` (``_to_string_tuple(..., unique=True)``), so
+    ``CandidatePayload.from_dict`` raises ``ExtractionModelError``. The other
+    fields are valid, so the ONLY failure is the typed uniqueness rule. No A3B
+    ValidationFindings are produced (semantic validation never runs for a
+    payload that fails typed loading).
     """
     return {
-        "characters": [],
-        "locations": [],
-        "facts": [],
-        "events": [],
-        "relationships": [],
-        "unresolved_mentions": [
+        "characters": [
             {
-                "candidate_id": "cand_unres_001",
-                "mention_original": "他",
-                "mention_kind": "person",
-                "reason_zh": "指代不明。",
-                "possible_candidate_refs": [],
-                "evidence_strength": "explicit",  # schema-valid, typed-model-invalid
+                "candidate_id": "cand_char_001",
+                "display_name_original": "林晚",
+                "aliases_original": ["小晚", "小晚"],  # schema-valid, typed-model-invalid
+                "descriptors_zh": [],
+                "summary_zh": "林晚的简要描述。",
+                "evidence_strength": "explicit",
                 "evidence": [
                     {
                         "paragraph_id": "CH001_P0003",
@@ -240,6 +241,11 @@ def typed_reject_payload_dict() -> dict:
                 ],
             }
         ],
+        "locations": [],
+        "facts": [],
+        "events": [],
+        "relationships": [],
+        "unresolved_mentions": [],
     }
 
 
@@ -340,6 +346,15 @@ class FakeLLMClient(LLMClient):
       * a ``(dict, LLMInvocationProvenance)`` tuple -> a successful result with
         the EXACT given provenance (used to fabricate a provenance mismatch);
       * an ``Exception`` instance -> raised from ``generate_structured``.
+
+    The fake honors the real ``LLMClient.generate_structured()`` trust
+    boundary: every scripted payload that would be returned as a *successful*
+    result is first passed through the existing A-I3
+    :func:`validate_against_output_schema` against the request's output schema.
+    A schema-invalid payload therefore never escapes as a successful result (it
+    raises ``LLMStructuredOutputError``), so a successful result is always
+    JSON-Schema-valid and the only remaining rejection path is the A3 typed
+    domain load.
     """
 
     supported_structured_output_modes = frozenset({"none", "json_object", "json_schema"})
@@ -374,6 +389,9 @@ class FakeLLMClient(LLMClient):
         else:
             parsed = response
             provenance = build_provenance(request, ProviderMeta())
+        # Trust boundary: a successful result must have passed strict local
+        # JSON Schema validation against the request's output schema.
+        validate_against_output_schema(parsed, output_schema)
         return StructuredGenerationResult(
             parsed_json=parsed, provenance=provenance, attempts=1
         )
@@ -861,6 +879,34 @@ def test_previous_valid_current_preserved_on_exhaustion(tmp_path):
     # no new revision was manufactured for the exhausted identity
     with pytest.raises(Exception):
         h.store.get("candidate_extraction", _extraction_artifact_id(), 2)
+
+
+def test_typed_reject_fixture_is_schema_valid_but_typed_invalid(tmp_path):
+    # Directly prove the fixture is genuinely JSON-Schema-valid yet rejected by
+    # the A3A typed model (the ONLY failing case for this round).
+    h = make_harness(tmp_path)
+    schema = h.service._build_output_schema(h.profile)
+    # 1. A-I3 local JSON Schema validation PASSES (no LLMStructuredOutputError).
+    validate_against_output_schema(typed_reject_payload_dict(), schema)
+    # 2. The A3A typed domain model REJECTS it (duplicate aliases_original).
+    with pytest.raises(ExtractionModelError):
+        CandidatePayload.from_dict(typed_reject_payload_dict())
+
+
+def test_fake_client_honors_local_schema_validation(tmp_path):
+    # A payload that FAILS the provider schema must not escape the fake as a
+    # successful result: the fake applies validate_against_output_schema and
+    # raises LLMStructuredOutputError (mirroring the real LLMClient trust
+    # boundary). The schema-invalid payload never reaches A3 typed loading.
+    h = make_harness(tmp_path)
+    bad = _dict(canonical_payload())
+    bad["characters"][0]["evidence_strength"] = "bogus"  # enum violation
+    client = FakeLLMClient([bad])
+    with pytest.raises(LLMStructuredOutputError):
+        run(h, client)
+    assert client.call_count == 1
+    with pytest.raises(Exception):
+        h.store.get("candidate_extraction", _extraction_artifact_id(), 1)
 
 
 def test_typed_domain_rejection_consumes_a_round(tmp_path):

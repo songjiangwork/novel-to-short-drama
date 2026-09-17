@@ -19,11 +19,17 @@ OpenAI-compatible (llama.cpp / Qwen) server:
       -> exact rerun (reused=True, 0 additional provider calls, same ref)
 
 It uses a tiny deterministic single-chunk story fixture. A tiny counting
-wrapper around the provider-neutral ``LLMClient`` proves the exact rerun makes
-no second provider call. It never saves raw provider envelopes or full raw
-assistant text as canonical artifacts (only the typed A3 artifacts are
-persisted). It prints concise evidence and never prints secrets or credential
-values.
+wrapper around the provider-neutral ``LLMClient`` tracks two distinct counters
+and proves the exact rerun makes no additional work:
+
+  * ``semantic_generation_calls`` — A3D ``generate_structured`` calls (one per
+    A3D semantic generation round);
+  * ``provider_attempts`` — actual provider/technical attempts, accumulated
+    from ``result.attempts`` (A-I3 may internally retry up to 3 per call).
+
+It never saves raw provider envelopes or full raw assistant text as canonical
+artifacts (only the typed A3 artifacts are persisted). It prints concise
+evidence and never prints secrets or credential values.
 
 The tracked semantic model is pinned in the semantic profile. If the exact
 server model genuinely differs, the mismatch is REPORTED (and an explicit
@@ -186,21 +192,33 @@ def query_server_model(base_url: str, credential_env: str | None) -> str | None:
 class CountingLLMClient(LLMClient):
     """Tiny counting wrapper around the real provider-neutral LLMClient.
 
-    Exists solely in the smoke to prove no second provider call occurred on the
-    exact rerun. It adds no caching and no retry logic.
+    Exists solely in the smoke to prove the exact rerun makes no additional
+    work. It tracks two DISTINCT counters and adds no caching or retry logic:
+
+      * ``semantic_generation_calls`` — the number of times A3D called
+        ``generate_structured`` (one per A3D semantic generation round);
+      * ``provider_attempts`` — the number of ACTUAL provider/technical
+        attempts, accumulated from ``result.attempts`` (A-I3 may internally
+        retry up to 3 times per ``generate_structured`` call).
+
+    A3D must not inspect provider-specific transport; it only observes
+    ``result.attempts`` reported by the provider-neutral client.
     """
 
     supported_structured_output_modes = frozenset({"none", "json_object", "json_schema"})
 
     def __init__(self, inner: LLMClient) -> None:
         self._inner = inner
-        self.call_count = 0
+        self.semantic_generation_calls = 0
+        self.provider_attempts = 0
 
     def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
-        self.call_count += 1
-        return self._inner.generate_structured(
+        self.semantic_generation_calls += 1
+        result = self._inner.generate_structured(
             rendered_prompt, output_schema, semantic_profile
         )
+        self.provider_attempts += result.attempts
+        return result
 
 
 def run_smoke(
@@ -267,11 +285,14 @@ def run_smoke(
                 llm_client=client,
             )
 
-        calls_before = client.call_count
+        sem_calls_before = client.semantic_generation_calls
+        prov_attempts_before = client.provider_attempts
         first = extract()
-        calls_after_first = client.call_count
+        sem_calls_after_first = client.semantic_generation_calls
+        prov_attempts_after_first = client.provider_attempts
         second = extract()
-        calls_after_second = client.call_count
+        sem_calls_after_second = client.semantic_generation_calls
+        prov_attempts_after_second = client.provider_attempts
 
         loaded = load_candidate_extraction(store, first.candidate_extraction_ref)
         report = load_validation_report(store, first.validation_report_ref)
@@ -289,13 +310,20 @@ def run_smoke(
         }
 
         print()
-        print(f"model:                      {effective_model}")
-        print(f"request_hash:               {loaded.generation_provenance.request_hash}")
-        print(f"semantic rounds (run 1):    {calls_after_first - calls_before}")
-        print(f"provider calls before:      {calls_before}")
-        print(f"provider calls after run 1: {calls_after_first}")
-        print(f"provider calls after rerun: {calls_after_second}")
-        print(f"additional calls on rerun:  {calls_after_second - calls_after_first}")
+        print(f"model:                          {effective_model}")
+        print(f"request_hash:                   {loaded.generation_provenance.request_hash}")
+        print(f"semantic generation calls run1: {sem_calls_after_first - sem_calls_before}")
+        print(f"semantic generation calls before:    {sem_calls_before}")
+        print(f"semantic generation calls after run1:{sem_calls_after_first}")
+        print(f"semantic generation calls after rerun:{sem_calls_after_second}")
+        print(f"provider attempts before:            {prov_attempts_before}")
+        print(f"provider attempts after run 1:       {prov_attempts_after_first}")
+        print(f"provider attempts after rerun:       {prov_attempts_after_second}")
+        print(
+            "additional on rerun (calls/attempts):  "
+            f"{sem_calls_after_second - sem_calls_after_first} / "
+            f"{prov_attempts_after_second - prov_attempts_after_first}"
+        )
         print(
             "CandidateExtraction ref:    "
             f"{first.candidate_extraction_ref.artifact_id}:"
@@ -329,13 +357,18 @@ def run_smoke(
         print()
 
         # Explicit success criteria (not `assert`, stripped under `python -O`).
+        # On the exact rerun BOTH counters must be unchanged (pre-provider A3C
+        # reuse short-circuits before any provider work).
         ok = (
             report.summary.result is ValidationResult.PASS
             and not blocking_codes
             and first.reused is False
             and second.reused is True
-            and calls_after_first - calls_before >= 1
-            and calls_after_second - calls_after_first == 0
+            and sem_calls_before == 0
+            and sem_calls_after_first - sem_calls_before >= 1
+            and prov_attempts_after_first - prov_attempts_before >= 1
+            and sem_calls_after_second == sem_calls_after_first
+            and prov_attempts_after_second == prov_attempts_after_first
             and second.candidate_extraction_ref == first.candidate_extraction_ref
         )
         if not ok:

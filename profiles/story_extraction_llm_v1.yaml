@@ -21,7 +21,9 @@ profile_id: story-extraction-llm-v1
 temperature: 0.0
 
 # Output token budget for a single structured generation.
-max_output_tokens: 4096
+# 8192 accommodates backends that emit reasoning/thinking tokens alongside
+# the structured output (e.g. Qwen3 uncensored variants).
+max_output_tokens: 8192
 
 # Structured-output generation constraint (a generation constraint only; local
 # JSON Schema validation remains the authority).

@@ -63,20 +63,24 @@ from typing import Any
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore
 from short_drama.foundation import FilePointerStore
-from short_drama.llm import LLMClient, SemanticLLMProfile
+from short_drama.llm import LLMClient, SemanticLLMProfile, load_semantic_profile
 
 from .chunking import ChunkManifest, ChunkPlanningProfile
 from .errors import StoryIntegrityError
-from .extraction import StoryExtractionProfile
+from .extraction import StoryExtractionProfile, load_story_extraction_profile
 from .extraction_service import (
     DEFAULT_OUTPUT_SCHEMA_PATH,
     ChunkExtractionService,
 )
 from .persistence import chunk_pointer_id, load_source_document, source_pointer_id
 from .service import (
+    DOCUMENT_ID,
     _current_pointer,
+    _load_profile,
+    _load_project,
     _require_current_source_validation,
     _require_source_identity,
+    _stores,
     _validate_current_manifest_snapshot,
 )
 
@@ -107,6 +111,25 @@ class ChunkExtractionBatchSummary:
     chunks_failed: int
     candidate_extraction_refs: tuple[ArtifactRef, ...]
     validation_report_refs: tuple[ArtifactRef, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-compatible reporting view of this (non-persisted) summary.
+
+        Artifact refs are emitted in their existing canonical ``to_dict()``
+        representation, in deterministic manifest order. Reporting data only.
+        """
+        return {
+            "chunks_total": self.chunks_total,
+            "chunks_reused": self.chunks_reused,
+            "chunks_generated": self.chunks_generated,
+            "chunks_failed": self.chunks_failed,
+            "candidate_extraction_refs": [
+                ref.to_dict() for ref in self.candidate_extraction_refs
+            ],
+            "validation_report_refs": [
+                ref.to_dict() for ref in self.validation_report_refs
+            ],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +307,60 @@ class ChunkExtractionBatchService:
         )
 
 
+# ---------------------------------------------------------------------------
+# A3E-B project-level composition (provider-neutral)
+# ---------------------------------------------------------------------------
+
+
+def extract_chunks_project(
+    project_path: str | Path,
+    *,
+    runs_root: str | Path = "runs",
+    chunk_profile_path: str | Path,
+    extraction_profile_path: str | Path,
+    semantic_profile_path: str | Path,
+    llm_client: LLMClient,
+) -> ChunkExtractionBatchSummary:
+    """A3E-B provider-neutral project-level composition for ``extract-chunks``.
+
+    This small application-level wrapper is what the CLI calls. It reuses the
+    existing authorities and does NOT duplicate any A3E-A orchestration / reuse /
+    persistence logic:
+
+      * loads + validates the project (reusing the A1 project loader) and reads
+        its ``project_id``;
+      * loads the requested ``ChunkPlanningProfile``, ``StoryExtractionProfile``,
+        and ``SemanticLLMProfile`` (reusing the existing loaders);
+      * initializes the project's story artifact/pointer stores (reusing the
+        existing store-creation helper);
+      * uses the existing fixed A1 ``SourceDocument`` identity (``DOCUMENT_ID``);
+      * instantiates the merged A3E-A :class:`ChunkExtractionBatchService` and
+        invokes :meth:`ChunkExtractionBatchService.extract_chunks`.
+
+    Provider/runtime composition is deliberately NOT done here: the caller passes
+    an already-created, provider-neutral ``LLMClient``. This helper never touches
+    ``base_url``, HTTP, credentials, or a concrete provider client, so it remains
+    safe to reuse offline and in tests.
+    """
+    _project_file, project = _load_project(project_path)
+    project_id = project["project_id"]
+    chunk_profile = _load_profile(chunk_profile_path)
+    extraction_profile = load_story_extraction_profile(extraction_profile_path)
+    semantic_profile = load_semantic_profile(semantic_profile_path)
+    store, pointers = _stores(runs_root, project_id)
+    service = ChunkExtractionBatchService(store, pointers)
+    return service.extract_chunks(
+        project_id=project_id,
+        document_id=DOCUMENT_ID,
+        chunk_profile=chunk_profile,
+        extraction_profile=extraction_profile,
+        semantic_profile=semantic_profile,
+        llm_client=llm_client,
+    )
+
+
 __all__ = [
     "ChunkExtractionBatchService",
     "ChunkExtractionBatchSummary",
+    "extract_chunks_project",
 ]

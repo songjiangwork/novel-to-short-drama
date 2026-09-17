@@ -52,6 +52,7 @@ from .extraction import (
 from .extraction_batch import (
     ChunkExtractionBatchService,
     ChunkExtractionBatchSummary,
+    extract_chunks_project,
 )
 from .extraction_validation import (
     A3_EVIDENCE_EXCERPT_MISMATCH,
@@ -167,6 +168,7 @@ __all__ = [
     "candidate_extraction_artifact_id",
     "candidate_extraction_pointer_id",
     "candidate_extraction_validation_artifact_id",
+    "extract_chunks_project",
     "extraction_semantic_identity",
     "load_candidate_extraction",
     "next_candidate_extraction_revision",

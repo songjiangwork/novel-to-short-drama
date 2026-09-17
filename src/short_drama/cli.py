@@ -7,14 +7,29 @@ from .comfyui.adapter import generate_with_comfyui
 from .comfyui.api_workflow import REQUIRED_NODE_CLASSES, build_api_workflow
 from .comfyui.client import ComfyUIClient
 from .io import dump_json, load_json, load_yaml
+from .llm import LLMError, OpenAICompatibleLLMClient, load_runtime_config
+from .paths import REPO_ROOT
 from .prompting.builder import build_prompt
 from .qc.state import record_qc_result
-from .story import StoryError, ingest_source_project, plan_chunks_project
+from .story import (
+    StoryError,
+    extract_chunks_project,
+    ingest_source_project,
+    plan_chunks_project,
+)
 from .validation import validate_file, validate_shot
 from .workflows.request import build_generation_request
 from .workflows.retry import build_gated_retry
 
 def out(x): print(json.dumps(x, ensure_ascii=False, indent=2))
+
+# A3E-B extract-chunks: repo-root-safe tracked defaults for the extraction / runtime /
+# semantic-LLM profiles. The chunk profile is always explicit (--chunk-profile required).
+DEFAULT_EXTRACT_PROFILES = {
+    "extraction_profile": REPO_ROOT / "profiles" / "story_extraction_v1.yaml",
+    "runtime_config": REPO_ROOT / "profiles" / "llm_local.yaml",
+    "llm_profile": REPO_ROOT / "profiles" / "story_llm_qwen_v1.yaml",
+}
 
 def main():
     p=argparse.ArgumentParser(prog="short-drama"); s=p.add_subparsers(dest="cmd",required=True)
@@ -30,6 +45,7 @@ def main():
     a=s.add_parser("assemble"); a.add_argument("timeline"); a.add_argument("--concat-file",default="concat.txt")
     a=s.add_parser("ingest-source"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--encoding")
     a=s.add_parser("plan-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--profile",required=True)
+    a=s.add_parser("extract-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_EXTRACT_PROFILES["extraction_profile"]); a.add_argument("--runtime-config",default=DEFAULT_EXTRACT_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_EXTRACT_PROFILES["llm_profile"])
     x=p.parse_args()
     if x.cmd=="validate":
         e=validate_shot(x.path) if x.kind=="shot" else validate_file(x.path,x.kind); out({"valid":not e,"errors":e}); return 0 if not e else 2
@@ -59,5 +75,20 @@ def main():
         try: q=plan_chunks_project(x.project,runs_root=x.runs_root,profile_path=x.profile)
         except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
         out(q); return 0
+    if x.cmd=="extract-chunks":
+        try:
+            runtime_config=load_runtime_config(x.runtime_config)
+            llm_client=OpenAICompatibleLLMClient(runtime_config)
+            summary=extract_chunks_project(
+                x.project,
+                runs_root=x.runs_root,
+                chunk_profile_path=x.chunk_profile,
+                extraction_profile_path=x.extraction_profile,
+                semantic_profile_path=x.llm_profile,
+                llm_client=llm_client,
+            )
+        except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
+        except LLMError as exc: out({"valid":False,"error":str(exc)}); return 2
+        out(summary.to_dict()); return 0
     if x.cmd=="assemble": q=build_concat_plan(x.timeline); render_concat_file(q,x.concat_file); out({"concat_file":x.concat_file,"clips":len(q["clips"])}); return 0
     return 1

@@ -566,8 +566,11 @@ def test_upstream_a1_integrity_failure_causes_zero_provider_calls(tmp_path):
 
 def test_stale_a2_manifest_not_pinning_current_source_fails_closed(tmp_path):
     store, pointers, source_ref, manifest, chunks = setup_a1_a2(tmp_path)
-    # Publish a NEWER A1 SourceDocument (revision 2) and move the A1 CURRENT
-    # pointer to it, leaving the A2 manifest pinning the stale source.
+    # Publish a NEWER A1 SourceDocument (revision 2) AND its exact valid A1
+    # ValidationReport, then move the A1 CURRENT pointer to revision 2, leaving
+    # the A2 manifest pinning the (now stale) source revision 1. This proves the
+    # stale-A2 guard fires (not an earlier A1 validation failure):
+    #   valid current A1 rev2 + valid-but-stale A2 manifest pinning rev1 -> fail.
     current_source = load_source_document(store, source_ref)
     newer = SourceDocument(
         schema_version=1,
@@ -582,6 +585,15 @@ def test_stale_a2_manifest_not_pinning_current_source_fails_closed(tmp_path):
         chapters=current_source.chapters,
     )
     newer_ref = persist_source_document(store, newer, revision=2)
+    persist_validation_report(
+        store,
+        ValidationReport(
+            validated_refs=(LineageRef("source_document", newer_ref),),
+            findings=(),
+        ),
+        artifact_id=source_validation_artifact_id(PROJECT, DOCUMENT),
+        revision=newer_ref.revision,
+    )
     pointers.compare_and_set(
         pointer_id=source_pointer_id(PROJECT, DOCUMENT),
         pointer_kind=PointerKind.CURRENT,
@@ -592,8 +604,11 @@ def test_stale_a2_manifest_not_pinning_current_source_fails_closed(tmp_path):
     )
 
     client = BatchFakeLLMClient([valid_payload_for(chunk) for chunk in chunks])
-    with pytest.raises(StoryIntegrityError):
+    with pytest.raises(StoryIntegrityError) as exc_info:
         run_batch(make_batch_service(store, pointers), client)
+    # The failure is the stale-A2 guard (manifest pins the old source), reached
+    # only after A1 rev2 resolves as current and valid.
+    assert "stale relative to the current source" in str(exc_info.value)
     assert client.call_count == 0
 
 

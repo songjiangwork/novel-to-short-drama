@@ -320,7 +320,7 @@ def make_semantic_profile(**overrides) -> SemanticLLMProfile:
     # A semantic profile carries NO backend identity (no provider_family and no
     # model); the backend is supplied by the RuntimeConfig / build_provenance.
     values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,

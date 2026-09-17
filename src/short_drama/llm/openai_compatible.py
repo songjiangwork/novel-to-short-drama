@@ -262,10 +262,12 @@ def build_provenance(
 ) -> LLMInvocationProvenance:
     """Build the exact invocation provenance for one provider call.
 
-    The backend runtime identity (``provider_family`` / ``model``) is supplied
-    explicitly from the ``RuntimeConfig`` in effect for the call (via
-    ``provider_family`` / ``request_model``), NOT from the semantic profile. The
-    semantic identity fields are sourced from the request.
+    The declared backend routing metadata (``provider_family`` / ``model``) is
+    supplied explicitly from the ``RuntimeConfig`` in effect for the call (via
+    ``provider_family`` / ``request_model``), NOT from the semantic profile. It is
+    the operator's declared routing identity, not an independently verified
+    statement of the actual backend that served the request. The semantic identity
+    fields are sourced from the request.
     """
 
     profile = request.semantic_profile
@@ -402,9 +404,10 @@ class OpenAICompatibleLLMClient(LLMClient):
         self, request: StructuredGenerationRequest
     ) -> tuple[str, dict[str, str], bytes]:
         profile = request.semantic_profile
-        # The concrete backend model is a runtime/routing identity carried by
-        # the RuntimeConfig, NOT part of the semantic request: business code and
-        # the semantic/reuse identity never name the model.
+        # The requested routing model is declared runtime/routing metadata carried
+        # by the RuntimeConfig (not independently verified as the actual serving
+        # backend), and is NOT part of the semantic request: business code and the
+        # semantic/reuse identity never name the model.
         body: dict[str, Any] = {
             "model": self._runtime.request_model,
             "messages": list(request.messages),

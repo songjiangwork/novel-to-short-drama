@@ -3,16 +3,16 @@
 # Describes result-affecting generation semantics ONLY. It carries no endpoint,
 # timeout, credential, or hostname, so its hash is a stable semantic identity
 # that is not invalidated by runtime transport changes. It also carries NO
-# backend runtime identity: there is no `provider_family` and no concrete
-# `model`. The backend family and the exact model identifier that will actually
-# be requested are transport details that belong to the runtime transport config
+# backend routing identity: there is no `provider_family` and no concrete
+# `model`. The configured backend family and the requested model identifier are
+# *declared runtime routing metadata* that belong to the runtime transport config
 # (see profiles/llm_local.example.yaml: `provider_family` / `request_model`).
 #
 # Because the backend model is NOT part of this semantic identity, switching the
 # backend (e.g. Qwen -> Gemma) does NOT change this profile's hash and does NOT
 # invalidate downstream CandidateExtraction reuse; it only changes the model the
-# transport requests and the backend identity recorded in the provenance.
-schema_version: 1
+# transport requests and the declared routing metadata recorded in the provenance.
+schema_version: 2
 
 # Stable semantic identifier for this profile (part of the semantic identity).
 profile_id: story-extraction-llm-v1

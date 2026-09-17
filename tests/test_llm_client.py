@@ -117,7 +117,7 @@ def make_profile(**overrides) -> SemanticLLMProfile:
     # A semantic profile carries NO backend identity (no provider_family and
     # no model); the backend is supplied by the RuntimeConfig instead.
     values = dict(
-        schema_version=1,
+        schema_version=2,
         profile_id="story-extraction-llm-v1",
         temperature=0.0,
         max_output_tokens=256,
@@ -168,7 +168,7 @@ def make_client(
     **runtime_overrides,
 ) -> OpenAICompatibleLLMClient:
     values = dict(
-        schema_version=1,
+        schema_version=2,
         transport_id="llm-local",
         base_url="http://127.0.0.1:8080/v1",
         request_model="qwen",
@@ -371,7 +371,7 @@ def test_capability_unsupported_mode_fails_before_request():
 
     transport = FakeTransport()
     client = _NoSchemaClient(
-        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
+        RuntimeConfig(2, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
         transport=transport,
         sleeper=lambda d: None,
     )
@@ -602,7 +602,7 @@ def test_max_attempts_three_is_the_ceiling_and_works():
     for _ in range(3):
         transport.queue(TransportResponse(500, b"e"))
     client = OpenAICompatibleLLMClient(
-        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
+        RuntimeConfig(2, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
         transport=transport,
         sleeper=sleeper,
         max_attempts=3,
@@ -618,7 +618,7 @@ def test_max_attempts_above_three_rejected():
     # request is sent.
     with pytest.raises(LLMConfigError):
         OpenAICompatibleLLMClient(
-            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
+            RuntimeConfig(2, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
             transport=FakeTransport(),
             sleeper=lambda d: None,
             max_attempts=4,
@@ -628,7 +628,7 @@ def test_max_attempts_above_three_rejected():
 def test_invalid_max_attempts_rejected():
     with pytest.raises(LLMConfigError):
         OpenAICompatibleLLMClient(
-            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
+            RuntimeConfig(2, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
             transport=FakeTransport(),
             sleeper=lambda d: None,
             max_attempts=0,

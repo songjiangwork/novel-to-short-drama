@@ -12,7 +12,7 @@ from short_drama.io import load_yaml
 from .errors import LLMConfigError
 from .models import SemanticLLMProfile, require_storage_id
 
-RUNTIME_CONFIG_SCHEMA_VERSION = 1
+RUNTIME_CONFIG_SCHEMA_VERSION = 2
 _TRANSPORT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -102,18 +102,21 @@ class RuntimeConfig:
     """Runtime transport configuration.
 
     Describes connection/runtime details: which endpoint to reach, which
-    environment variable holds the credential, the timeout, and the backend
-    identity of the model actually served at that endpoint.
+    environment variable holds the credential, the timeout, and the *declared
+    routing identity* of the model requested at that endpoint.
 
-    ``request_model`` is the concrete backend model name sent in the provider
-    request body's ``model`` field (e.g. ``"qwen3-27b"`` or
-    ``"ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"``). ``provider_family`` is the backend
-    family label (e.g. ``"qwen"``) recorded in the invocation provenance.
-    Together they are the *backend runtime identity* of the transport. They are
-    NOT part of the A-I3 semantic identity: changing them (e.g. Qwen -> Gemma)
-    changes what is requested and what is recorded, but it never invalidates the
-    semantic/reuse identity, which lives in ``SemanticLLMProfile`` and the
-    prompt/output-schema material.
+    ``request_model`` is the model identifier sent in the provider request
+    body's ``model`` field (e.g. ``"qwen3-27b"`` or
+    ``"ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"``). ``provider_family`` is the
+    configured provider-family label (e.g. ``"qwen"``) recorded in the invocation
+    provenance. Together they are the *declared backend routing metadata* of the
+    transport: the operator's declaration of which backend to route to, supplied
+    by configuration. They are NOT independently observed or verified to be the
+    actual backend implementation that served a request, and they are NOT part of
+    the A-I3 semantic identity: changing them (e.g. Qwen -> Gemma) changes what
+    is requested and what is recorded, but it never invalidates the semantic/reuse
+    identity, which lives in ``SemanticLLMProfile`` and the prompt/output-schema
+    material.
     """
 
     schema_version: int

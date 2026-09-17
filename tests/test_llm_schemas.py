@@ -54,7 +54,7 @@ def test_runtime_config_rejects_semantic_field_via_schema():
 
 def _runtime_config_with_base_url(base_url: str) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "transport_id": "llm-local",
         "base_url": base_url,
         "request_model": "qwen",
@@ -147,7 +147,7 @@ def test_prompt_spec_schema_rejects_bad_metadata(tmp_path):
 
 def _profile_with_reasoning(reasoning: dict) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,

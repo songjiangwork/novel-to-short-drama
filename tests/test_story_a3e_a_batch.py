@@ -157,7 +157,7 @@ def make_semantic_profile(**overrides) -> SemanticLLMProfile:
     from short_drama.llm import ReasoningSettings
 
     values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,

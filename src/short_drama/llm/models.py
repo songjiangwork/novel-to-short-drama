@@ -25,10 +25,15 @@ _STRUCTURED_OUTPUT_MODES = frozenset({"none", "json_object", "json_schema"})
 SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
 REASONING_DISABLED_EFFORT = "none"
 
-SEMANTIC_PROFILE_SCHEMA_VERSION = 1
+# Schema version constants (bumped explicitly on material change).
+# The A-I3 backend/runtime split (request_model / provider_family moved to the
+# runtime config and dropped from the semantic profile, the structured request,
+# and the request fingerprint) is a material v2 change: the old v1 shapes must
+# fail closed. PROMPT_SPEC_SCHEMA_VERSION is unchanged (it was not part of it).
+SEMANTIC_PROFILE_SCHEMA_VERSION = 2
 PROMPT_SPEC_SCHEMA_VERSION = 1
-LLM_REQUEST_SCHEMA_VERSION = 1
-FINGERPRINT_SCHEMA_VERSION = 1
+LLM_REQUEST_SCHEMA_VERSION = 2
+FINGERPRINT_SCHEMA_VERSION = 2
 
 
 def _require_text(value: Any, field_name: str, error_type: type) -> str:
@@ -216,9 +221,9 @@ class SemanticLLMProfile:
     carries no endpoint, timeout, credential, or hostname, so its hash is a
     stable semantic identity that is not invalidated by connection changes.
 
-    It is ALSO deliberately separate from the backend runtime identity: it
+    It is ALSO deliberately separate from the backend routing identity: it
     carries no ``provider_family`` and no concrete ``model`` name. Those are the
-    backend of a specific request (served by the transport, supplied via
+    *requested routing backend* (declared by the operator and supplied via
     ``RuntimeConfig.provider_family`` / ``RuntimeConfig.request_model``), not the
     result-affecting generation semantics, so changing the backend (e.g. Qwen ->
     Gemma) must NOT invalidate this semantic identity or any downstream
@@ -618,9 +623,9 @@ class StructuredGenerationRequest:
     """Provider-neutral semantic request.
 
     Carries no endpoint, timeout, credential, or hostname; only result-affecting
-    semantics. It also carries NO backend runtime identity: the concrete model
-    that will actually be requested lives in ``RuntimeConfig.request_model`` and
-    is supplied by the transport adapter, not by this request. That keeps
+    semantics. It also carries NO backend routing identity: the *requested
+    routing model* lives in ``RuntimeConfig.request_model`` and is supplied by the
+    transport adapter, not by this request. That keeps
     ``request_hash`` (the canonical semantic request identity) independent of the
     backend in use, so changing the backend does not invalidate reuse.
     """
@@ -723,9 +728,9 @@ class LLMRequestFingerprint:
 
     Identifies the semantic request only; it does NOT guarantee byte-identical
     model output on re-invocation. Runtime transport details must never change
-    it, and the concrete backend model does NOT participate in it either: that
-    is backend routing identity (``RuntimeConfig.request_model`` / the invocation
-    provenance), not the semantic request identity.
+    it, and the declared backend routing model does NOT participate in it either:
+    that is backend routing identity (``RuntimeConfig.request_model`` / the
+    invocation provenance), not the semantic request identity.
     """
 
     schema_version: int
@@ -792,12 +797,14 @@ class LLMRequestFingerprint:
 class LLMInvocationProvenance:
     """Exact provenance of one provider call (A-I3).
 
-    ``provider_family`` and ``model`` record the *backend runtime identity* that
-    served the call. They are sourced from the ``RuntimeConfig`` in effect when
-    the call was made (``provider_family`` / ``request_model``), NOT from the
-    semantic profile. They are recorded metadata, not part of the semantic/reuse
-    identity (see :func:`request_semantic_fields`), so changing the backend
-    changes what is recorded without invalidating reuse.
+    ``provider_family`` and ``model`` record the *declared backend routing
+    metadata* for the call, NOT an independently observed or verified statement
+    of the actual backend implementation that served the request. They are
+    sourced from the ``RuntimeConfig`` in effect when the call was made
+    (``provider_family`` / ``request_model``), NOT from the semantic profile.
+    They are recorded metadata, not part of the semantic/reuse identity (see
+    :func:`request_semantic_fields`), so changing the backend changes what is
+    recorded without invalidating reuse.
     """
 
     provider_family: str

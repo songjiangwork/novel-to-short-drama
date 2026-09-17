@@ -87,7 +87,7 @@ def _write_chunk_profile(path: Path) -> Path:
 
 def _write_runtime_config(path: Path) -> Path:
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "transport_id": "llm-local",
         "base_url": "http://127.0.0.1:8080/v1",
         "request_model": "qwen3-27b",

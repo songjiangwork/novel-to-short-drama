@@ -21,7 +21,7 @@ PROV_FAMILY = "qwen"
 
 def _write_runtime_config(path, **overrides) -> None:
     values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "transport_id": "llm-local",
         "base_url": "http://127.0.0.1:8080/v1",
         "request_model": REQ_MODEL,
@@ -37,7 +37,7 @@ def _write_profile(path, **overrides) -> None:
     # A semantic profile carries NO backend identity (no provider_family and no
     # model); it is result-affecting generation semantics only.
     values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,
@@ -50,7 +50,7 @@ def _write_profile(path, **overrides) -> None:
 
 def _runtime(**overrides) -> RuntimeConfig:
     values = dict(
-        schema_version=1,
+        schema_version=2,
         transport_id="t",
         base_url="http://127.0.0.1:8080/v1",
         request_model=REQ_MODEL,
@@ -64,7 +64,7 @@ def _runtime(**overrides) -> RuntimeConfig:
 
 def _profile(**overrides) -> SemanticLLMProfile:
     values = dict(
-        schema_version=1,
+        schema_version=2,
         profile_id="p",
         temperature=0.0,
         max_output_tokens=512,
@@ -97,9 +97,11 @@ def test_runtime_config_missing_file(tmp_path):
         load_runtime_config(tmp_path / "nope.yaml")
 
 
-def test_runtime_config_rejects_wrong_schema_version(tmp_path):
+def test_runtime_config_rejects_old_v1_form(tmp_path):
+    # The A-I3 backend/runtime split is a v2 schema change: a v1 config (no
+    # request_model / provider_family, old schema_version) must fail closed.
     path = tmp_path / "llm.yaml"
-    _write_runtime_config(path, schema_version=2)
+    _write_runtime_config(path, schema_version=1)
     with pytest.raises(LLMConfigError):
         load_runtime_config(path)
 
@@ -125,7 +127,7 @@ def test_runtime_config_rejects_semantic_fields(tmp_path):
     for field in ("temperature", "prompt_version", "max_output_tokens", "reasoning"):
         path = tmp_path / "llm.yaml"
         values = {
-            "schema_version": 1,
+            "schema_version": 2,
             "transport_id": "llm-local",
             "base_url": "http://127.0.0.1:8080/v1",
             "request_model": REQ_MODEL,
@@ -450,7 +452,7 @@ def test_semantic_profile_rejects_backend_fields(tmp_path):
     # model) is rejected: those are runtime fields, not semantic fields.
     path = tmp_path / "p.yaml"
     values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": "p",
         "provider_family": "qwen",
         "model": "qwen",
@@ -467,11 +469,31 @@ def test_semantic_profile_rejects_backend_fields(tmp_path):
 def test_semantic_profile_missing_field(tmp_path):
     path = tmp_path / "p.yaml"
     values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": "p",
         "temperature": 0.0,
         "max_output_tokens": 128,
         "structured_output_mode": "none",
+    }
+    path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
+    with pytest.raises(LLMConfigError):
+        load_semantic_profile(path)
+
+
+def test_semantic_profile_rejects_old_v1_form(tmp_path):
+    # The A-I3 backend/runtime split is a v2 schema change: a v1 semantic
+    # profile (old schema_version, still carrying backend identity) must fail
+    # closed -- there is no backward-compat v1 loader.
+    path = tmp_path / "p.yaml"
+    values = {
+        "schema_version": 1,
+        "profile_id": "p",
+        "provider_family": "qwen",
+        "model": "qwen",
+        "temperature": 0.0,
+        "max_output_tokens": 128,
+        "structured_output_mode": "json_schema",
+        "reasoning": {"enabled": False, "effort": None},
     }
     path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
     with pytest.raises(LLMConfigError):

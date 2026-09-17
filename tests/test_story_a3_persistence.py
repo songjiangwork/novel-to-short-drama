@@ -195,7 +195,7 @@ def make_request(
     derived hash (as a real semantic change would).
     """
     semantic_profile = SemanticLLMProfile(
-        schema_version=1,
+        schema_version=2,
         profile_id=semantic_profile_id,
         temperature=temperature,
         max_output_tokens=max_output_tokens,

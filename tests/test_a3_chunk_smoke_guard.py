@@ -35,7 +35,7 @@ def smoke():
 def _write_runtime_config(tmp_path: Path) -> str:
     path = tmp_path / "runtime.yaml"
     path.write_text(
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "transport_id: llm-local\n"
         "base_url: http://127.0.0.1:8080/v1\n"
         "request_model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M\n"

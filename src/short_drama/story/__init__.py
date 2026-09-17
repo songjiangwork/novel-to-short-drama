@@ -49,6 +49,10 @@ from .extraction import (
     UnresolvedMentionCandidate,
     load_story_extraction_profile,
 )
+from .extraction_batch import (
+    ChunkExtractionBatchService,
+    ChunkExtractionBatchSummary,
+)
 from .extraction_validation import (
     A3_EVIDENCE_EXCERPT_MISMATCH,
     A3_EVIDENCE_OUTSIDE_CONTEXT,
@@ -139,6 +143,8 @@ __all__ = [
     "canonicalize_candidate_payload",
     "validate_candidate_payload",
     "ChunkContext",
+    "ChunkExtractionBatchService",
+    "ChunkExtractionBatchSummary",
     "ChunkExtractionService",
     "DEFAULT_OUTPUT_SCHEMA_PATH",
     "DEFAULT_PROMPT_BASE_DIR",

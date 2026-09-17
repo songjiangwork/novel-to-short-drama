@@ -254,14 +254,28 @@ def parse_and_validate_response(
 
 
 def build_provenance(
-    request: StructuredGenerationRequest, meta: ProviderMeta
+    request: StructuredGenerationRequest,
+    meta: ProviderMeta,
+    *,
+    request_model: str,
+    provider_family: str,
 ) -> LLMInvocationProvenance:
+    """Build the exact invocation provenance for one provider call.
+
+    The declared backend routing metadata (``provider_family`` / ``model``) is
+    supplied explicitly from the ``RuntimeConfig`` in effect for the call (via
+    ``provider_family`` / ``request_model``), NOT from the semantic profile. It is
+    the operator's declared routing identity, not an independently verified
+    statement of the actual backend that served the request. The semantic identity
+    fields are sourced from the request.
+    """
+
     profile = request.semantic_profile
     rendered = request.rendered_prompt
     schema = request.output_schema
     return LLMInvocationProvenance(
-        provider_family=profile.provider_family,
-        model=request.model,
+        provider_family=provider_family,
+        model=request_model,
         semantic_profile_id=profile.profile_id,
         semantic_profile_hash=profile.semantic_profile_hash,
         prompt_id=rendered.prompt_id,
@@ -374,7 +388,12 @@ class OpenAICompatibleLLMClient(LLMClient):
             timeout_seconds=self._runtime.timeout_seconds,
         )
         parsed, meta = parse_and_validate_response(response, request.output_schema)
-        provenance = build_provenance(request, meta)
+        provenance = build_provenance(
+            request,
+            meta,
+            request_model=self._runtime.request_model,
+            provider_family=self._runtime.provider_family,
+        )
         return StructuredGenerationResult(
             parsed_json=parsed,
             provenance=provenance,
@@ -385,8 +404,12 @@ class OpenAICompatibleLLMClient(LLMClient):
         self, request: StructuredGenerationRequest
     ) -> tuple[str, dict[str, str], bytes]:
         profile = request.semantic_profile
+        # The requested routing model is declared runtime/routing metadata carried
+        # by the RuntimeConfig (not independently verified as the actual serving
+        # backend), and is NOT part of the semantic request: business code and the
+        # semantic/reuse identity never name the model.
         body: dict[str, Any] = {
-            "model": request.model,
+            "model": self._runtime.request_model,
             "messages": list(request.messages),
             "temperature": profile.temperature,
             "max_tokens": profile.max_output_tokens,

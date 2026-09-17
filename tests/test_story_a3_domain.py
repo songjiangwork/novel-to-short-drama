@@ -200,7 +200,7 @@ def make_provenance(**overrides) -> LLMInvocationProvenance:
     values = {
         "provider_family": "qwen",
         "model": "qwen",
-        "semantic_profile_id": "story-llm-qwen-v1",
+        "semantic_profile_id": "story-extraction-llm-v1",
         "semantic_profile_hash": "a" * 64,
         "prompt_id": A3_PROMPT_ID,
         "prompt_version": 1,

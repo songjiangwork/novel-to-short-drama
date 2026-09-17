@@ -31,15 +31,16 @@ It never saves raw provider envelopes or full raw assistant text as canonical
 artifacts (only the typed A3 artifacts are persisted). It prints concise
 evidence and never prints secrets or credential values.
 
-The tracked semantic model is pinned in the semantic profile. If the exact
-server model genuinely differs, the mismatch is REPORTED (and an explicit
-``--model`` override may be supplied); the tracked semantic identity is not
-silently changed.
+The tracked backend model is pinned in the runtime config (``request_model``).
+If the exact server model genuinely differs, the mismatch is REPORTED (and an
+explicit ``--model`` override may be supplied); the tracked backend identity is
+not silently changed. The backend model is runtime routing identity, NOT part
+of the A-I3 semantic identity, so overriding it does not invalidate reuse.
 
 Usage:
     python scripts/a3_chunk_smoke.py \
         --runtime-config profiles/llm_local.yaml \
-        --profile profiles/story_llm_qwen_v1.yaml \
+        --profile profiles/story_extraction_llm_v1.yaml \
         --extraction-profile profiles/story_extraction_v1.yaml \
         [--model <exact-server-model-name>]
 
@@ -267,7 +268,7 @@ def run_smoke(
     semantic_profile = load_semantic_profile(profile_path)
     extraction_profile = load_story_extraction_profile(extraction_profile_path)
 
-    tracked_model = semantic_profile.model
+    tracked_model = runtime_config.request_model
     server_model = query_server_model(
         runtime_config.base_url, runtime_config.credential_environment_name
     )
@@ -303,10 +304,13 @@ def run_smoke(
             "provider request may be rejected."
         )
 
-    # Apply the (explicit or default) model to the semantic profile for this
-    # run only. The tracked profile file on disk is never modified.
+    # Apply the (explicit or default) model to the runtime config for this run
+    # only. The tracked profile file on disk is never modified, and the backend
+    # model is runtime identity (request_model), not the semantic profile.
     if effective_model != tracked_model:
-        semantic_profile = dataclasses.replace(semantic_profile, model=effective_model)
+        runtime_config = dataclasses.replace(
+            runtime_config, request_model=effective_model
+        )
 
     with tempfile.TemporaryDirectory(prefix="a3d_smoke_") as workdir:
         store = FileArtifactStore(Path(workdir) / "artifacts")

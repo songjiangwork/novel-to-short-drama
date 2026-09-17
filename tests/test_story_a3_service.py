@@ -317,11 +317,11 @@ def make_extraction_profile(**overrides) -> StoryExtractionProfile:
 
 
 def make_semantic_profile(**overrides) -> SemanticLLMProfile:
+    # A semantic profile carries NO backend identity (no provider_family and no
+    # model); the backend is supplied by the RuntimeConfig / build_provenance.
     values = {
-        "schema_version": 1,
-        "profile_id": "story-llm-qwen-v1",
-        "provider_family": "qwen",
-        "model": "qwen3-27b",
+        "schema_version": 2,
+        "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,
         "structured_output_mode": "json_schema",
@@ -388,7 +388,9 @@ class FakeLLMClient(LLMClient):
             parsed, provenance = response
         else:
             parsed = response
-            provenance = build_provenance(request, ProviderMeta())
+            provenance = build_provenance(
+                request, ProviderMeta(), request_model="qwen3-27b", provider_family="qwen"
+            )
         # Trust boundary: a successful result must have passed strict local
         # JSON Schema validation against the request's output schema.
         validate_against_output_schema(parsed, output_schema)
@@ -1032,7 +1034,9 @@ def _mismatched_provenance_result(h: Harness, parsed: dict):
     request = build_structured_request(
         rendered_prompt=rendered, output_schema=schema, semantic_profile=h.semantic_profile
     )
-    provenance = build_provenance(request, ProviderMeta())
+    provenance = build_provenance(
+        request, ProviderMeta(), request_model="qwen3-27b", provider_family="qwen"
+    )
     return (parsed, dataclasses.replace(provenance, request_hash="0" * 64))
 
 
@@ -1054,7 +1058,9 @@ def test_publish_time_same_identity_reuses_no_extra_revision(tmp_path):
             source_chunk_ref=h.source_chunk_ref,
             chunk_profile_id=CHUNK_PROFILE_ID,
             extraction_profile=h.profile,
-            generation_provenance=build_provenance(request, ProviderMeta()),
+            generation_provenance=build_provenance(
+                request, ProviderMeta(), request_model="qwen3-27b", provider_family="qwen"
+            ),
             payload=canonical_payload(),
         )
 

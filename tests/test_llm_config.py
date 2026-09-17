@@ -13,12 +13,19 @@ from short_drama.llm import (
     resolve_auth_header,
 )
 
+# Backend runtime identity carried by the runtime config (NOT the semantic
+# profile). These values are arbitrary for config-loading tests.
+REQ_MODEL = "qwen3-27b"
+PROV_FAMILY = "qwen"
+
 
 def _write_runtime_config(path, **overrides) -> None:
     values = {
         "schema_version": 1,
         "transport_id": "llm-local",
         "base_url": "http://127.0.0.1:8080/v1",
+        "request_model": REQ_MODEL,
+        "provider_family": PROV_FAMILY,
         "credential_environment_name": None,
         "timeout_seconds": 30,
     }
@@ -27,11 +34,11 @@ def _write_runtime_config(path, **overrides) -> None:
 
 
 def _write_profile(path, **overrides) -> None:
+    # A semantic profile carries NO backend identity (no provider_family and no
+    # model); it is result-affecting generation semantics only.
     values = {
         "schema_version": 1,
-        "profile_id": "story-llm-qwen-v1",
-        "provider_family": "qwen",
-        "model": "qwen",
+        "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,
         "structured_output_mode": "json_schema",
@@ -39,6 +46,33 @@ def _write_profile(path, **overrides) -> None:
     }
     values.update(overrides)
     path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
+
+
+def _runtime(**overrides) -> RuntimeConfig:
+    values = dict(
+        schema_version=1,
+        transport_id="t",
+        base_url="http://127.0.0.1:8080/v1",
+        request_model=REQ_MODEL,
+        provider_family=PROV_FAMILY,
+        credential_environment_name=None,
+        timeout_seconds=30,
+    )
+    values.update(overrides)
+    return RuntimeConfig(**values)
+
+
+def _profile(**overrides) -> SemanticLLMProfile:
+    values = dict(
+        schema_version=1,
+        profile_id="p",
+        temperature=0.0,
+        max_output_tokens=512,
+        structured_output_mode="json_schema",
+        reasoning=ReasoningSettings(False),
+    )
+    values.update(overrides)
+    return SemanticLLMProfile(**values)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +86,8 @@ def test_runtime_config_loads_valid(tmp_path):
     config = load_runtime_config(path)
     assert config.transport_id == "llm-local"
     assert config.base_url == "http://127.0.0.1:8080/v1"
+    assert config.request_model == REQ_MODEL
+    assert config.provider_family == PROV_FAMILY
     assert config.credential_environment_name is None
     assert config.timeout_seconds == 30.0
 
@@ -84,14 +120,16 @@ def test_runtime_config_rejects_credentials_in_url(tmp_path):
 
 
 def test_runtime_config_rejects_semantic_fields(tmp_path):
-    # The exact-key contract rejects any unknown field, including semantic
-    # generation decisions that belong to the semantic profile.
-    for field in ("temperature", "model", "prompt_version", "max_output_tokens"):
+    # The exact-key contract rejects any unknown field, including result-
+    # affecting generation semantics that belong to the semantic profile.
+    for field in ("temperature", "prompt_version", "max_output_tokens", "reasoning"):
         path = tmp_path / "llm.yaml"
         values = {
             "schema_version": 1,
             "transport_id": "llm-local",
-            "base_url": "http://127.0.0.1:8080",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "request_model": REQ_MODEL,
+            "provider_family": PROV_FAMILY,
             "credential_environment_name": None,
             "timeout_seconds": 30,
             field: "x",
@@ -113,6 +151,20 @@ def test_runtime_config_rejects_bad_env_name(tmp_path):
     path = tmp_path / "llm.yaml"
     _write_runtime_config(path, credential_environment_name="not a name!")
     with pytest.raises(LLMConfigError):
+        load_runtime_config(path)
+
+
+def test_runtime_config_rejects_empty_request_model(tmp_path):
+    path = tmp_path / "llm.yaml"
+    _write_runtime_config(path, request_model="")
+    with pytest.raises(LLMConfigError, match="request_model"):
+        load_runtime_config(path)
+
+
+def test_runtime_config_rejects_empty_provider_family(tmp_path):
+    path = tmp_path / "llm.yaml"
+    _write_runtime_config(path, provider_family="")
+    with pytest.raises(LLMConfigError, match="provider_family"):
         load_runtime_config(path)
 
 
@@ -221,13 +273,7 @@ def test_runtime_config_base_url_error_is_non_retryable():
         "http://127.0.0.1 /v1",  # whitespace/control char
     ):
         with pytest.raises(LLMConfigError):
-            RuntimeConfig(
-                schema_version=1,
-                transport_id="t",
-                base_url=bad_url,
-                credential_environment_name=None,
-                timeout_seconds=30,
-            )
+            _runtime(base_url=bad_url)
 
 
 # ---------------------------------------------------------------------------
@@ -236,25 +282,13 @@ def test_runtime_config_base_url_error_is_non_retryable():
 
 
 def test_credential_resolution_none_when_null():
-    config = RuntimeConfig(
-        schema_version=1,
-        transport_id="t",
-        base_url="http://127.0.0.1:8080/v1",
-        credential_environment_name=None,
-        timeout_seconds=30,
-    )
+    config = _runtime(credential_environment_name=None)
     assert resolve_auth_header(config) is None
 
 
 def test_credential_resolution_from_env(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "hunter2")
-    config = RuntimeConfig(
-        schema_version=1,
-        transport_id="t",
-        base_url="http://127.0.0.1:8080/v1",
-        credential_environment_name="LLM_API_KEY",
-        timeout_seconds=30,
-    )
+    config = _runtime(credential_environment_name="LLM_API_KEY")
     assert resolve_auth_header(config) == "Bearer hunter2"
 
 
@@ -262,13 +296,7 @@ def test_credential_missing_env_fails_closed(monkeypatch):
     # A configured credential variable that is missing must fail closed before
     # any request (never silently send unauthenticated traffic).
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    config = RuntimeConfig(
-        schema_version=1,
-        transport_id="t",
-        base_url="http://127.0.0.1:8080/v1",
-        credential_environment_name="LLM_API_KEY",
-        timeout_seconds=30,
-    )
+    config = _runtime(credential_environment_name="LLM_API_KEY")
     with pytest.raises(LLMConfigError, match="LLM_API_KEY"):
         resolve_auth_header(config)
 
@@ -276,29 +304,22 @@ def test_credential_missing_env_fails_closed(monkeypatch):
 def test_credential_empty_env_fails_closed(monkeypatch):
     # An EMPTY credential variable is also treated as missing -> fail closed.
     monkeypatch.setenv("LLM_API_KEY", "")
-    config = RuntimeConfig(
-        schema_version=1,
-        transport_id="t",
-        base_url="http://127.0.0.1:8080/v1",
-        credential_environment_name="LLM_API_KEY",
-        timeout_seconds=30,
-    )
+    config = _runtime(credential_environment_name="LLM_API_KEY")
     with pytest.raises(LLMConfigError, match="LLM_API_KEY"):
         resolve_auth_header(config)
 
 
 def test_credential_value_not_in_config_dict():
-    config = RuntimeConfig(
-        schema_version=1,
-        transport_id="t",
-        base_url="http://127.0.0.1:8080/v1",
-        credential_environment_name="SOME_SECRET",
-        timeout_seconds=30,
-    )
+    config = _runtime(credential_environment_name="SOME_SECRET")
     as_text = str(config.to_dict())
     assert "SOME_SECRET" in as_text  # the NAME is present
     # but no resolved value can ever appear (there is no value to leak)
     assert "Bearer" not in as_text
+
+
+def test_runtime_config_roundtrip():
+    config = _runtime(credential_environment_name="SOME_SECRET")
+    assert RuntimeConfig.from_dict(config.to_dict()) == config
 
 
 # ---------------------------------------------------------------------------
@@ -310,25 +331,16 @@ def test_semantic_profile_loads_valid(tmp_path):
     path = tmp_path / "profile.yaml"
     _write_profile(path)
     profile = load_semantic_profile(path)
-    assert profile.profile_id == "story-llm-qwen-v1"
-    assert profile.model == "qwen"
+    assert profile.profile_id == "story-extraction-llm-v1"
+    assert not hasattr(profile, "model")
+    assert not hasattr(profile, "provider_family")
     assert profile.structured_output_mode == "json_schema"
     assert isinstance(profile.reasoning, ReasoningSettings)
 
 
 def test_semantic_profile_hash_stable():
-    kwargs = dict(
-        schema_version=1,
-        profile_id="p",
-        provider_family="qwen",
-        model="qwen",
-        temperature=0.0,
-        max_output_tokens=512,
-        structured_output_mode="json_schema",
-        reasoning=ReasoningSettings(False),
-    )
-    a = SemanticLLMProfile(**kwargs).semantic_profile_hash
-    b = SemanticLLMProfile(**kwargs).semantic_profile_hash
+    a = _profile().semantic_profile_hash
+    b = _profile().semantic_profile_hash
     assert a == b
     assert len(a) == 64
 
@@ -340,8 +352,6 @@ def test_semantic_profile_hash_changes_on_semantic_field(tmp_path):
     for field, value in (
         ("temperature", 0.7),
         ("max_output_tokens", 1024),
-        ("model", "other-model"),
-        ("provider_family", "gpt"),
         ("structured_output_mode", "json_object"),
     ):
         alt = tmp_path / f"alt-{field}.yaml"
@@ -351,39 +361,58 @@ def test_semantic_profile_hash_changes_on_semantic_field(tmp_path):
         ), field
 
 
+def test_semantic_profile_hash_independent_of_backend():
+    """The backend model / provider family is NOT part of the semantic profile.
+
+    Switching the backend (Qwen -> Gemma) is a runtime-config change; it must
+    not change the semantic profile hash or the request fingerprint hash.
+    """
+
+    # The semantic profile carries no backend identity at all, so two requests
+    # built from the same profile are semantically identical regardless of the
+    # backend in effect.
+    profile = _profile()
+    from short_drama.llm import build_structured_request, OutputSchema, RenderedPrompt
+    from short_drama.llm.models import compute_rendered_prompt_hash
+
+    rendered = RenderedPrompt(
+        prompt_id="p",
+        prompt_version=1,
+        prompt_content_hash="b" * 64,
+        variables_hash="2" * 64,
+        system_text="s",
+        user_text="u",
+        rendered_prompt_hash=compute_rendered_prompt_hash(
+            prompt_id="p",
+            prompt_version=1,
+            prompt_content_hash="b" * 64,
+            variables_hash="2" * 64,
+            system_text="s",
+            user_text="u",
+        ),
+    )
+    schema = OutputSchema.create(
+        schema_id="s", schema_version=1, schema={"type": "object"}
+    )
+    req_a = build_structured_request(
+        rendered_prompt=rendered, output_schema=schema, semantic_profile=profile
+    )
+    # A different backend (Qwen -> Gemma) only changes the runtime config.
+    _ = _runtime(request_model="qwen3-27b", provider_family="qwen")
+    _ = _runtime(request_model="gemma-27b", provider_family="gemma")
+    req_b = build_structured_request(
+        rendered_prompt=rendered, output_schema=schema, semantic_profile=profile
+    )
+    assert req_a.request_hash == req_b.request_hash
+    assert req_a.fingerprint == req_b.fingerprint
+
+
 def test_semantic_profile_hash_changes_on_reasoning():
     # Reasoning is result-affecting semantic identity: flipping it (or its
     # effort) must change the semantic profile hash.
-    base = SemanticLLMProfile(
-        schema_version=1,
-        profile_id="p",
-        provider_family="qwen",
-        model="m",
-        temperature=0.0,
-        max_output_tokens=512,
-        structured_output_mode="json_schema",
-        reasoning=ReasoningSettings(False),
-    )
-    enabled = SemanticLLMProfile(
-        schema_version=1,
-        profile_id="p",
-        provider_family="qwen",
-        model="m",
-        temperature=0.0,
-        max_output_tokens=512,
-        structured_output_mode="json_schema",
-        reasoning=ReasoningSettings(True, "low"),
-    )
-    enabled_high = SemanticLLMProfile(
-        schema_version=1,
-        profile_id="p",
-        provider_family="qwen",
-        model="m",
-        temperature=0.0,
-        max_output_tokens=512,
-        structured_output_mode="json_schema",
-        reasoning=ReasoningSettings(True, "high"),
-    )
+    base = _profile()
+    enabled = _profile(reasoning=ReasoningSettings(True, "low"))
+    enabled_high = _profile(reasoning=ReasoningSettings(True, "high"))
     assert base.semantic_profile_hash != enabled.semantic_profile_hash
     assert enabled.semantic_profile_hash != enabled_high.semantic_profile_hash
 
@@ -399,16 +428,7 @@ def test_reasoning_settings_rejects_incoherent_combos():
 def test_semantic_profile_requires_reasoning_settings_type():
     # A raw dict is not accepted where a ReasoningSettings instance is required.
     with pytest.raises(LLMConfigError):
-        SemanticLLMProfile(
-            schema_version=1,
-            profile_id="p",
-            provider_family="qwen",
-            model="m",
-            temperature=0.0,
-            max_output_tokens=512,
-            structured_output_mode="json_schema",
-            reasoning={"enabled": True, "effort": "low"},
-        )
+        _profile(reasoning={"enabled": True, "effort": "low"})
 
 
 def test_semantic_profile_rejects_bad_mode(tmp_path):
@@ -425,13 +445,30 @@ def test_semantic_profile_rejects_bad_temperature(tmp_path):
         load_semantic_profile(path)
 
 
-def test_semantic_profile_missing_field(tmp_path):
+def test_semantic_profile_rejects_backend_fields(tmp_path):
+    # A legacy profile that still carries backend identity (provider_family /
+    # model) is rejected: those are runtime fields, not semantic fields.
     path = tmp_path / "p.yaml"
     values = {
         "schema_version": 1,
         "profile_id": "p",
         "provider_family": "qwen",
         "model": "qwen",
+        "temperature": 0.0,
+        "max_output_tokens": 128,
+        "structured_output_mode": "json_schema",
+        "reasoning": {"enabled": False, "effort": None},
+    }
+    path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
+    with pytest.raises(LLMConfigError, match="exactly"):
+        load_semantic_profile(path)
+
+
+def test_semantic_profile_missing_field(tmp_path):
+    path = tmp_path / "p.yaml"
+    values = {
+        "schema_version": 1,
+        "profile_id": "p",
         "temperature": 0.0,
         "max_output_tokens": 128,
         "structured_output_mode": "none",
@@ -448,32 +485,14 @@ def test_endpoint_change_does_not_affect_semantic_hash():
     cannot invalidate downstream semantic identity.
     """
 
-    profile_a = SemanticLLMProfile(
-        schema_version=1,
-        profile_id="p",
-        provider_family="qwen",
-        model="qwen",
-        temperature=0.0,
-        max_output_tokens=128,
-        structured_output_mode="json_schema",
-        reasoning=ReasoningSettings(False),
-    )
-    # A different runtime endpoint/timeout/credential does not appear in the profile at all.
-    _ = RuntimeConfig(
-        schema_version=1,
+    profile_a = _profile()
+    # A different runtime endpoint/timeout/credential does not appear in the
+    # profile at all.
+    _ = _runtime(
         transport_id="other",
         base_url="http://10.0.0.9:9999/v1",
         credential_environment_name="SOME_SECRET",
         timeout_seconds=1,
     )
-    profile_b = SemanticLLMProfile(
-        schema_version=1,
-        profile_id="p",
-        provider_family="qwen",
-        model="qwen",
-        temperature=0.0,
-        max_output_tokens=128,
-        structured_output_mode="json_schema",
-        reasoning=ReasoningSettings(False),
-    )
+    profile_b = _profile()
     assert profile_a.semantic_profile_hash == profile_b.semantic_profile_hash

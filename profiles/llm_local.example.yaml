@@ -4,9 +4,15 @@
 # base_url / credential for your local machine. profiles/llm_local.yaml must
 # NEVER be committed; it is machine-specific.
 #
-# This file describes connection/runtime details ONLY. It must not contain
-# temperature, reasoning, prompt version, output-token budget, or model —
-# those belong to the semantic profile (see profiles/story_llm_qwen_v1.yaml).
+# This file describes connection/runtime details AND the backend runtime
+# identity (provider_family / request_model). It must not contain
+# temperature, reasoning, prompt version, or output-token budget — those
+# belong to the semantic profile (see profiles/story_extraction_llm_v1.yaml).
+#
+# NOTE: request_model is the backend model the transport requests (and the
+# model recorded in the invocation provenance). It is deliberately NOT part of
+# the A-I3 semantic/reuse identity, so changing it (e.g. Qwen -> Gemma) does not
+# invalidate CandidateExtraction reuse.
 schema_version: 1
 
 # Stable identifier for this transport endpoint (not a secret).
@@ -17,6 +23,14 @@ transport_id: llm-local
 # prefix is /v1 -> http://127.0.0.1:8080/v1/chat/completions. Must not embed
 # credentials (no user:pass@).
 base_url: http://127.0.0.1:8080/v1
+
+# Exact model identifier (backend runtime identity) served at base_url, sent in
+# the provider request body's "model" field and recorded in the invocation
+# provenance. Adjust to the exact model your server serves.
+request_model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
+
+# Backend family label (e.g. "qwen") recorded in the invocation provenance.
+provider_family: qwen
 
 # Name of the environment variable holding the credential, or null for no
 # auth. The credential value is only ever read from the environment at request

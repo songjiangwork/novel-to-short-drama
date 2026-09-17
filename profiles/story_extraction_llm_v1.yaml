@@ -2,24 +2,20 @@
 #
 # Describes result-affecting generation semantics ONLY. It carries no endpoint,
 # timeout, credential, or hostname, so its hash is a stable semantic identity
-# that is not invalidated by runtime transport changes.
+# that is not invalidated by runtime transport changes. It also carries NO
+# backend runtime identity: there is no `provider_family` and no concrete
+# `model`. The backend family and the exact model identifier that will actually
+# be requested are transport details that belong to the runtime transport config
+# (see profiles/llm_local.example.yaml: `provider_family` / `request_model`).
 #
-# `model` is semantic identity (it participates in the semantic profile hash
-# and request fingerprint), NOT machine-specific runtime configuration. It is
-# pinned to the exact model identifier that the local-Qwen structured-output
-# smoke successfully executed against, so this tracked profile is directly
-# executable by the smoke without a model override.
+# Because the backend model is NOT part of this semantic identity, switching the
+# backend (e.g. Qwen -> Gemma) does NOT change this profile's hash and does NOT
+# invalidate downstream CandidateExtraction reuse; it only changes the model the
+# transport requests and the backend identity recorded in the provenance.
 schema_version: 1
 
 # Stable semantic identifier for this profile (part of the semantic identity).
-profile_id: story-llm-qwen-v1
-
-# Provider family (semantic, not a transport detail).
-provider_family: qwen
-
-# Exact model identifier (semantic identity) served by the OpenAI-compatible
-# endpoint. Pinned to the model the local-Qwen smoke validated against.
-model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
+profile_id: story-extraction-llm-v1
 
 # Deterministic generation for extraction.
 temperature: 0.0

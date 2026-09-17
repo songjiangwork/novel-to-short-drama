@@ -1,13 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "v1.2 A-I3 LLM Runtime Transport Config",
-  "description": "Connection/runtime details only: which endpoint to reach, which environment variable holds the credential (or null), and the timeout. Must not contain result-affecting generation semantics (temperature, reasoning, prompt version, output-token budget, model). Never includes the credential value itself.",
+  "description": "Connection/runtime details and the backend runtime identity: which endpoint to reach, which environment variable holds the credential (or null), the timeout, and the backend model actually requested (request_model) plus its provider_family. Must not contain result-affecting generation semantics (temperature, reasoning, prompt version, output-token budget). request_model / provider_family are backend routing + provenance identity, NOT the A-I3 semantic/reuse identity, so changing them does not invalidate reuse. Never includes the credential value itself.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "transport_id",
     "base_url",
+    "request_model",
+    "provider_family",
     "credential_environment_name",
     "timeout_seconds"
   ],
@@ -16,6 +18,16 @@
     "transport_id": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "request_model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact backend model identifier sent in the provider request body's model field and recorded in the invocation provenance. Backend routing identity, not part of the semantic/reuse identity."
+    },
+    "provider_family": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Backend family label recorded in the invocation provenance (e.g. qwen). Backend runtime identity, not part of the semantic/reuse identity."
     },
     "base_url": {
       "type": "string",

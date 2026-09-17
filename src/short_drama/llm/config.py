@@ -101,14 +101,26 @@ def _validate_base_url(value: Any) -> str:
 class RuntimeConfig:
     """Runtime transport configuration.
 
-    Describes connection/runtime details only: which endpoint to reach, which
-    environment variable holds the credential, and the timeout. It never
-    participates in downstream semantic identity.
+    Describes connection/runtime details: which endpoint to reach, which
+    environment variable holds the credential, the timeout, and the backend
+    identity of the model actually served at that endpoint.
+
+    ``request_model`` is the concrete backend model name sent in the provider
+    request body's ``model`` field (e.g. ``"qwen3-27b"`` or
+    ``"ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"``). ``provider_family`` is the backend
+    family label (e.g. ``"qwen"``) recorded in the invocation provenance.
+    Together they are the *backend runtime identity* of the transport. They are
+    NOT part of the A-I3 semantic identity: changing them (e.g. Qwen -> Gemma)
+    changes what is requested and what is recorded, but it never invalidates the
+    semantic/reuse identity, which lives in ``SemanticLLMProfile`` and the
+    prompt/output-schema material.
     """
 
     schema_version: int
     transport_id: str
     base_url: str
+    request_model: str
+    provider_family: str
     credential_environment_name: str | None
     timeout_seconds: float
 
@@ -120,6 +132,8 @@ class RuntimeConfig:
             )
         require_storage_id(self.transport_id, "transport_id", LLMConfigError)
         _validate_base_url(self.base_url)
+        _require_text(self.request_model, "request_model")
+        _require_text(self.provider_family, "provider_family")
         if self.credential_environment_name is not None:
             _require_text(self.credential_environment_name, "credential_environment_name")
             if _ENV_NAME_RE.fullmatch(self.credential_environment_name) is None:
@@ -140,6 +154,8 @@ class RuntimeConfig:
             "schema_version": self.schema_version,
             "transport_id": self.transport_id,
             "base_url": self.base_url,
+            "request_model": self.request_model,
+            "provider_family": self.provider_family,
             "credential_environment_name": self.credential_environment_name,
             "timeout_seconds": self.timeout_seconds,
         }
@@ -150,6 +166,8 @@ class RuntimeConfig:
             "schema_version",
             "transport_id",
             "base_url",
+            "request_model",
+            "provider_family",
             "credential_environment_name",
             "timeout_seconds",
         }

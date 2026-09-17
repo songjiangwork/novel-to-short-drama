@@ -174,9 +174,7 @@ def _default_output_schema() -> OutputSchema:
 
 def make_request(
     *,
-    provider_family: str = "qwen",
-    model: str = "qwen3-27b",
-    semantic_profile_id: str = "story-llm-qwen-v1",
+    semantic_profile_id: str = "story-extraction-llm-v1",
     temperature: float = 0.1,
     max_output_tokens: int = 20000,
     prompt_id: str = "a3.chunk-extraction",
@@ -186,7 +184,11 @@ def make_request(
     user_text: str = "Chunk: 林晚走进教室。",
     output_schema: OutputSchema | None = None,
 ) -> StructuredGenerationRequest:
-    """A provider-neutral A-I3 request whose semantic fields are controllable.
+    """A provider-neutral A-I3 request whose SEMANTIC fields are controllable.
+
+    The backend identity (``provider_family`` / ``model``) is deliberately NOT
+    part of the request: it is runtime identity carried by the RuntimeConfig, so
+    it does not affect ``semantic_profile_hash`` / ``request_hash``.
 
     ``semantic_profile_hash`` / ``rendered_prompt_hash`` / ``request_hash`` are
     derived from the underlying material, so changing the material changes the
@@ -195,8 +197,6 @@ def make_request(
     semantic_profile = SemanticLLMProfile(
         schema_version=1,
         profile_id=semantic_profile_id,
-        provider_family=provider_family,
-        model=model,
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         structured_output_mode="json_schema",
@@ -227,12 +227,21 @@ def make_request(
 
 
 def provenance_from_request(
-    request: StructuredGenerationRequest, **overrides
+    request: StructuredGenerationRequest,
+    *,
+    provider_family: str = "qwen",
+    model: str = "qwen3-27b",
+    **overrides,
 ) -> LLMInvocationProvenance:
-    """A provenance whose ten A-I3 semantic fields exactly match the request."""
+    """A provenance whose ten A-I3 semantic fields exactly match the request.
+
+    The backend identity (``provider_family`` / ``model``) is supplied
+    explicitly: it is runtime identity recorded as metadata, not part of the
+    semantic request.
+    """
     values = dict(
-        provider_family=request.semantic_profile.provider_family,
-        model=request.model,
+        provider_family=provider_family,
+        model=model,
         semantic_profile_id=request.semantic_profile.profile_id,
         semantic_profile_hash=request.semantic_profile.semantic_profile_hash,
         prompt_id=request.rendered_prompt.prompt_id,
@@ -879,7 +888,7 @@ def test_extraction_profile_hash_change_invalidates(tmp_path):
 def test_semantic_profile_id_change_invalidates(tmp_path):
     h = make_harness(tmp_path)
     _publish_then_check_miss(
-        h, request=make_request(semantic_profile_id="story-llm-qwen-v2")
+        h, request=make_request(semantic_profile_id="story-extraction-llm-v2")
     )
 
 
@@ -939,8 +948,39 @@ def test_output_schema_hash_change_invalidates(tmp_path):
 
 def test_request_hash_change_invalidates(tmp_path):
     h = make_harness(tmp_path)
-    # changing the model changes request_hash (and semantic_profile_hash)
-    _publish_then_check_miss(h, request=make_request(model="qwen3-9b"))
+    # changing a semantic field changes request_hash (and semantic_profile_hash)
+    alt = make_request(temperature=0.9)
+    assert alt.request_hash != h.request.request_hash
+    _publish_then_check_miss(h, request=alt)
+
+
+def test_backend_switch_does_not_change_reuse_identity(tmp_path):
+    """Switching the backend (Qwen -> Gemma) does NOT change the reuse identity.
+
+    ``provider_family`` / ``model`` are runtime identity carried by the
+    RuntimeConfig, not part of the A-I3 semantic fields. Existing Qwen
+    artifacts therefore stay reusable after switching to a Gemma backend.
+    """
+    h = make_harness(tmp_path)
+    # Publish under a Qwen backend.
+    first = publish(
+        h,
+        generation_provenance=provenance_from_request(
+            h.request, provider_family="qwen", model="qwen3-27b"
+        ),
+    )
+    assert first.reused is False
+    # The same chunk re-extracted under a (different) Gemma backend: the
+    # pre-generation request is semantically identical (the backend is not in
+    # the request), so the current Qwen artifact is reused, not re-published.
+    result = reuse(h, request=make_request())
+    assert result is not None
+    assert result.reused is True
+    assert result.candidate_extraction_ref == first.candidate_extraction_ref
+    # The stored provenance still records the original Qwen backend.
+    stored = load_candidate_extraction(h.store, first.candidate_extraction_ref)
+    assert stored.generation_provenance.provider_family == "qwen"
+    assert stored.generation_provenance.model == "qwen3-27b"
 
 
 def test_non_semantic_provider_metadata_change_does_not_invalidate(tmp_path):
@@ -985,7 +1025,7 @@ def test_request_semantic_fields_exclude_non_semantic_metadata():
 def test_stale_identity_creates_new_revision_same_artifact_id(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
-    second = run(h, request=make_request(model="qwen3-9b"))
+    second = run(h, request=make_request(temperature=0.9))
     assert first.candidate_extraction_ref.revision == 1
     assert second.candidate_extraction_ref.revision == 2
     assert (
@@ -1042,7 +1082,7 @@ def test_source_semantic_change_supersedes_with_real_alternates(tmp_path):
 def test_no_historical_auto_resurrection(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
-    run(h, request=make_request(model="qwen3-9b"))  # -> revision 2
+    run(h, request=make_request(temperature=0.9))  # -> revision 2
     # Request the OLD (historical) identity again: it publishes a NEW revision,
     # it does not resurrect the historical revision 1.
     result = run(h, request=h.request)
@@ -1089,7 +1129,7 @@ def test_invalid_candidate_does_not_replace_valid_current(tmp_path):
             h,
             payload=_invalid_payload(),
             generation_provenance=provenance_from_request(
-                make_request(model="qwen3-9b")
+                make_request(temperature=0.9)
             ),
         )
     assert h.pointers.resolve_current(pointer_id()).target_ref == (
@@ -1203,7 +1243,7 @@ def test_in_memory_source_chunk_mismatch_fails_closed(tmp_path):
 
 def _changed_request() -> StructuredGenerationRequest:
     """A request whose semantic identity deliberately differs from the base."""
-    return make_request(model="qwen3-9b")
+    return make_request(temperature=0.9)
 
 
 def test_current_missing_report_changed_identity_fails_closed(tmp_path):
@@ -1540,7 +1580,7 @@ def test_pre_generation_reuse_miss_on_changed_request(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
     # a changed request identity is a normal miss (no historical scan)
-    result = reuse(h, request=make_request(model="qwen3-9b"))
+    result = reuse(h, request=make_request(temperature=0.9))
     assert result is None
     assert h.pointers.resolve_current(pointer_id()).target_ref == (
         first.candidate_extraction_ref

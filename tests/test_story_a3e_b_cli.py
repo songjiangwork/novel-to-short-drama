@@ -90,6 +90,8 @@ def _write_runtime_config(path: Path) -> Path:
         "schema_version": 1,
         "transport_id": "llm-local",
         "base_url": "http://127.0.0.1:8080/v1",
+        "request_model": "qwen3-27b",
+        "provider_family": "qwen",
         "credential_environment_name": None,
         "timeout_seconds": 120,
     }
@@ -144,7 +146,7 @@ def test_extract_chunks_profile_defaults_resolve_to_repo_root():
         REPO_ROOT / "profiles" / "llm_local.yaml"
     )
     assert cli.DEFAULT_EXTRACT_PROFILES["llm_profile"] == (
-        REPO_ROOT / "profiles" / "story_llm_qwen_v1.yaml"
+        REPO_ROOT / "profiles" / "story_extraction_llm_v1.yaml"
     )
     # The chunk profile is always explicit (no default).
     assert "chunk_profile" not in cli.DEFAULT_EXTRACT_PROFILES

@@ -158,9 +158,7 @@ def make_semantic_profile(**overrides) -> SemanticLLMProfile:
 
     values = {
         "schema_version": 1,
-        "profile_id": "story-llm-qwen-v1",
-        "provider_family": "qwen",
-        "model": "qwen3-27b",
+        "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,
         "structured_output_mode": "json_schema",
@@ -379,7 +377,9 @@ class BatchFakeLLMClient(LLMClient):
         )
         return StructuredGenerationResult(
             parsed_json=parsed,
-            provenance=build_provenance(request, ProviderMeta()),
+            provenance=build_provenance(
+                request, ProviderMeta(), request_model="qwen3-27b", provider_family="qwen"
+            ),
             attempts=1,
         )
 

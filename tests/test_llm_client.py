@@ -114,11 +114,11 @@ class RecordingSleeper:
 
 
 def make_profile(**overrides) -> SemanticLLMProfile:
+    # A semantic profile carries NO backend identity (no provider_family and
+    # no model); the backend is supplied by the RuntimeConfig instead.
     values = dict(
         schema_version=1,
-        profile_id="story-llm-qwen-v1",
-        provider_family="qwen",
-        model="qwen",
+        profile_id="story-extraction-llm-v1",
         temperature=0.0,
         max_output_tokens=256,
         structured_output_mode="json_schema",
@@ -171,6 +171,8 @@ def make_client(
         schema_version=1,
         transport_id="llm-local",
         base_url="http://127.0.0.1:8080/v1",
+        request_model="qwen",
+        provider_family="qwen",
         credential_environment_name=None,
         timeout_seconds=30,
     )
@@ -300,6 +302,24 @@ def test_build_request_body_reflects_reasoning():
     assert body["model"] == "qwen"
 
 
+def test_request_body_and_provenance_use_runtime_config_model():
+    """The provider request body's model and the provenance backend identity
+    come from the RuntimeConfig (request_model / provider_family), NOT from the
+    semantic profile."""
+
+    transport = FakeTransport()
+    transport.queue(ok_response(json.dumps({"a": "hello"})))
+    client = make_client(
+        transport, request_model="ggml-org/Gemma-27B:Q8_0", provider_family="gemma"
+    )
+    result = client.generate_structured(make_rendered(), make_schema(), make_profile())
+    # The provider request body uses the runtime-config model.
+    assert transport.calls[0].body["model"] == "ggml-org/Gemma-27B:Q8_0"
+    # The provenance records the backend family + model from the runtime config.
+    assert result.provenance.provider_family == "gemma"
+    assert result.provenance.model == "ggml-org/Gemma-27B:Q8_0"
+
+
 # ---------------------------------------------------------------------------
 # Finding 4: a provider length truncation is invalid structured output.
 # ---------------------------------------------------------------------------
@@ -351,7 +371,7 @@ def test_capability_unsupported_mode_fails_before_request():
 
     transport = FakeTransport()
     client = _NoSchemaClient(
-        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
+        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
         transport=transport,
         sleeper=lambda d: None,
     )
@@ -582,7 +602,7 @@ def test_max_attempts_three_is_the_ceiling_and_works():
     for _ in range(3):
         transport.queue(TransportResponse(500, b"e"))
     client = OpenAICompatibleLLMClient(
-        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
+        RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
         transport=transport,
         sleeper=sleeper,
         max_attempts=3,
@@ -598,7 +618,7 @@ def test_max_attempts_above_three_rejected():
     # request is sent.
     with pytest.raises(LLMConfigError):
         OpenAICompatibleLLMClient(
-            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
+            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
             transport=FakeTransport(),
             sleeper=lambda d: None,
             max_attempts=4,
@@ -608,7 +628,7 @@ def test_max_attempts_above_three_rejected():
 def test_invalid_max_attempts_rejected():
     with pytest.raises(LLMConfigError):
         OpenAICompatibleLLMClient(
-            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", None, 30),
+            RuntimeConfig(1, "t", "http://127.0.0.1:8080/v1", "qwen", "qwen", None, 30),
             transport=FakeTransport(),
             sleeper=lambda d: None,
             max_attempts=0,
@@ -713,11 +733,38 @@ def test_fingerprint_schema_change_alters_it():
     assert base.request_hash != alt.request_hash
 
 
-def test_fingerprint_model_change_alters_it():
-    base = request_for().fingerprint
-    alt = request_for(profile=make_profile(model="other-model")).fingerprint
-    assert base.model != alt.model
-    assert base.request_hash != alt.request_hash
+def test_backend_model_change_does_not_alter_request_hash():
+    """Changing the backend model does NOT change the A-I3 request hash.
+
+    The concrete backend model is runtime identity (RuntimeConfig.request_model),
+    not part of the semantic request. Switching Qwen -> Gemma keeps the
+    request_hash / semantic_profile_hash identical; only the recorded backend
+    identity (provider_family / model) in the provenance differs.
+    """
+
+    qwen_transport = FakeTransport()
+    qwen_transport.queue(ok_response(json.dumps({"a": "hello"})))
+    qwen_result = make_client(qwen_transport).generate_structured(
+        make_rendered(), make_schema(), make_profile()
+    )
+
+    gemma_transport = FakeTransport()
+    gemma_transport.queue(ok_response(json.dumps({"a": "hello"})))
+    gemma_result = make_client(
+        gemma_transport, request_model="gemma-27b", provider_family="gemma"
+    ).generate_structured(make_rendered(), make_schema(), make_profile())
+
+    # The semantic request identity is backend-independent.
+    assert qwen_result.provenance.request_hash == gemma_result.provenance.request_hash
+    assert (
+        qwen_result.provenance.semantic_profile_hash
+        == gemma_result.provenance.semantic_profile_hash
+    )
+    # Only the recorded backend identity differs.
+    assert qwen_result.provenance.provider_family == "qwen"
+    assert qwen_result.provenance.model == "qwen"
+    assert gemma_result.provenance.provider_family == "gemma"
+    assert gemma_result.provenance.model == "gemma-27b"
 
 
 def test_fingerprint_profile_change_alters_it():
@@ -761,7 +808,7 @@ def test_provenance_population():
     prov = result.provenance
     assert prov.provider_family == "qwen"
     assert prov.model == "qwen"
-    assert prov.semantic_profile_id == "story-llm-qwen-v1"
+    assert prov.semantic_profile_id == "story-extraction-llm-v1"
     assert prov.prompt_id == "synthetic-echo"
     assert prov.prompt_version == 1
     assert prov.output_schema_id == "candidate-extraction"

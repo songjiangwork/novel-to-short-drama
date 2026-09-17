@@ -215,12 +215,18 @@ class SemanticLLMProfile:
     This is deliberately separate from runtime transport configuration: it
     carries no endpoint, timeout, credential, or hostname, so its hash is a
     stable semantic identity that is not invalidated by connection changes.
+
+    It is ALSO deliberately separate from the backend runtime identity: it
+    carries no ``provider_family`` and no concrete ``model`` name. Those are the
+    backend of a specific request (served by the transport, supplied via
+    ``RuntimeConfig.provider_family`` / ``RuntimeConfig.request_model``), not the
+    result-affecting generation semantics, so changing the backend (e.g. Qwen ->
+    Gemma) must NOT invalidate this semantic identity or any downstream
+    CandidateExtraction reuse identity.
     """
 
     schema_version: int
     profile_id: str
-    provider_family: str
-    model: str
     temperature: float
     max_output_tokens: int
     structured_output_mode: str
@@ -233,8 +239,6 @@ class SemanticLLMProfile:
                 f"{SEMANTIC_PROFILE_SCHEMA_VERSION}"
             )
         require_storage_id(self.profile_id, "profile_id", LLMConfigError)
-        _require_text(self.provider_family, "provider_family", LLMConfigError)
-        _require_text(self.model, "model", LLMConfigError)
         if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
             raise LLMConfigError("temperature must be a number")
         temperature = float(self.temperature)
@@ -258,8 +262,6 @@ class SemanticLLMProfile:
         return {
             "schema_version": self.schema_version,
             "profile_id": self.profile_id,
-            "provider_family": self.provider_family,
-            "model": self.model,
             "temperature": self.temperature,
             "max_output_tokens": self.max_output_tokens,
             "structured_output_mode": self.structured_output_mode,
@@ -271,8 +273,6 @@ class SemanticLLMProfile:
         expected = {
             "schema_version",
             "profile_id",
-            "provider_family",
-            "model",
             "temperature",
             "max_output_tokens",
             "structured_output_mode",
@@ -288,8 +288,6 @@ class SemanticLLMProfile:
         return cls(
             schema_version=value["schema_version"],
             profile_id=value["profile_id"],
-            provider_family=value["provider_family"],
-            model=value["model"],
             temperature=value["temperature"],
             max_output_tokens=value["max_output_tokens"],
             structured_output_mode=value["structured_output_mode"],
@@ -620,11 +618,14 @@ class StructuredGenerationRequest:
     """Provider-neutral semantic request.
 
     Carries no endpoint, timeout, credential, or hostname; only result-affecting
-    semantics. ``request_hash`` is the canonical semantic request identity.
+    semantics. It also carries NO backend runtime identity: the concrete model
+    that will actually be requested lives in ``RuntimeConfig.request_model`` and
+    is supplied by the transport adapter, not by this request. That keeps
+    ``request_hash`` (the canonical semantic request identity) independent of the
+    backend in use, so changing the backend does not invalidate reuse.
     """
 
     schema_version: int
-    model: str
     output_schema: OutputSchema
     semantic_profile: SemanticLLMProfile
     rendered_prompt: RenderedPrompt
@@ -635,15 +636,12 @@ class StructuredGenerationRequest:
                 "StructuredGenerationRequest.schema_version must be "
                 f"{LLM_REQUEST_SCHEMA_VERSION}"
             )
-        _require_text(self.model, "model", LLMConfigError)
         if not isinstance(self.output_schema, OutputSchema):
             raise LLMConfigError("output_schema must be OutputSchema")
         if not isinstance(self.semantic_profile, SemanticLLMProfile):
             raise LLMConfigError("semantic_profile must be SemanticLLMProfile")
         if not isinstance(self.rendered_prompt, RenderedPrompt):
             raise LLMPromptError("rendered_prompt must be RenderedPrompt")
-        if self.model != self.semantic_profile.model:
-            raise LLMConfigError("request model must match semantic_profile.model")
 
     @property
     def messages(self) -> tuple[dict[str, str], ...]:
@@ -660,7 +658,6 @@ class StructuredGenerationRequest:
 
         return {
             "request_schema_version": LLM_REQUEST_SCHEMA_VERSION,
-            "model": self.model,
             "semantic_profile": self.semantic_profile.to_dict(),
             "rendered_prompt": self.rendered_prompt.to_dict(),
             "output_schema": {
@@ -680,7 +677,6 @@ class StructuredGenerationRequest:
         rendered = self.rendered_prompt
         return LLMRequestFingerprint(
             schema_version=FINGERPRINT_SCHEMA_VERSION,
-            model=self.model,
             semantic_profile_hash=self.semantic_profile.semantic_profile_hash,
             prompt_id=rendered.prompt_id,
             prompt_version=rendered.prompt_version,
@@ -693,7 +689,6 @@ class StructuredGenerationRequest:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "model": self.model,
             "messages": list(self.messages),
             "output_schema": self.output_schema.to_dict(),
             "semantic_profile": self.semantic_profile.to_dict(),
@@ -716,7 +711,6 @@ def build_structured_request(
         raise LLMConfigError("semantic_profile must be a SemanticLLMProfile")
     return StructuredGenerationRequest(
         schema_version=LLM_REQUEST_SCHEMA_VERSION,
-        model=semantic_profile.model,
         output_schema=output_schema,
         semantic_profile=semantic_profile,
         rendered_prompt=rendered_prompt,
@@ -729,11 +723,12 @@ class LLMRequestFingerprint:
 
     Identifies the semantic request only; it does NOT guarantee byte-identical
     model output on re-invocation. Runtime transport details must never change
-    it.
+    it, and the concrete backend model does NOT participate in it either: that
+    is backend routing identity (``RuntimeConfig.request_model`` / the invocation
+    provenance), not the semantic request identity.
     """
 
     schema_version: int
-    model: str
     semantic_profile_hash: str
     prompt_id: str
     prompt_version: int
@@ -748,7 +743,6 @@ class LLMRequestFingerprint:
                 "LLMRequestFingerprint.schema_version must be "
                 f"{FINGERPRINT_SCHEMA_VERSION}"
             )
-        _require_text(self.model, "model", LLMConfigError)
         _require_hash(self.semantic_profile_hash, "semantic_profile_hash", LLMConfigError)
         _require_text(self.prompt_id, "prompt_id", LLMConfigError)
         _require_positive_int(self.prompt_version, "prompt_version", LLMConfigError)
@@ -760,7 +754,6 @@ class LLMRequestFingerprint:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "model": self.model,
             "semantic_profile_hash": self.semantic_profile_hash,
             "prompt_id": self.prompt_id,
             "prompt_version": self.prompt_version,
@@ -774,7 +767,6 @@ class LLMRequestFingerprint:
     def from_dict(cls, value: dict[str, Any]) -> "LLMRequestFingerprint":
         expected = {
             "schema_version",
-            "model",
             "semantic_profile_hash",
             "prompt_id",
             "prompt_version",
@@ -798,6 +790,16 @@ class LLMRequestFingerprint:
 
 @dataclass(frozen=True, slots=True)
 class LLMInvocationProvenance:
+    """Exact provenance of one provider call (A-I3).
+
+    ``provider_family`` and ``model`` record the *backend runtime identity* that
+    served the call. They are sourced from the ``RuntimeConfig`` in effect when
+    the call was made (``provider_family`` / ``request_model``), NOT from the
+    semantic profile. They are recorded metadata, not part of the semantic/reuse
+    identity (see :func:`request_semantic_fields`), so changing the backend
+    changes what is recorded without invalidating reuse.
+    """
+
     provider_family: str
     model: str
     semantic_profile_id: str

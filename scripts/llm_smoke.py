@@ -18,7 +18,7 @@ a live server.
 Usage:
     python scripts/llm_smoke.py \
         --runtime-config profiles/llm_local.yaml \
-        --profile profiles/story_llm_qwen_v1.yaml \
+        --profile profiles/story_extraction_llm_v1.yaml \
         [--model <exact-model-name>]
 
 Exit code 0 on success, 2 on failure.
@@ -81,8 +81,13 @@ def run_smoke(
 ) -> int:
     runtime_config = load_runtime_config(runtime_config_path)
     semantic_profile = load_semantic_profile(profile_path)
+    # The concrete backend model is a runtime/routing identity carried by the
+    # RuntimeConfig (request_model), not by the semantic profile, so a --model
+    # override retargets the runtime config, not the semantic identity.
     if model_override is not None:
-        semantic_profile = dataclasses.replace(semantic_profile, model=model_override)
+        runtime_config = dataclasses.replace(
+            runtime_config, request_model=model_override
+        )
 
     rendered = _build_synthetic_rendered()
     output_schema = _build_artificial_schema()
@@ -110,8 +115,8 @@ def run_smoke(
     print(f"base_url:            {runtime_config.base_url}")
     print(f"credential_env:      {runtime_config.credential_environment_name}")
     print(f"profile_id:          {semantic_profile.profile_id}")
-    print(f"provider_family:     {semantic_profile.provider_family}")
-    print(f"model:               {semantic_profile.model}")
+    print(f"provider_family:     {runtime_config.provider_family}")
+    print(f"model:               {runtime_config.request_model}")
     print(f"structured_output:   {semantic_profile.structured_output_mode}")
     print(f"reasoning_effort:    {reasoning_effort}")
     print()

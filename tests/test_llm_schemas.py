@@ -40,7 +40,7 @@ def test_example_runtime_config_matches_schema():
 
 
 def test_example_semantic_profile_matches_schema():
-    data = load_yaml(PROFILES_DIR / "story_llm_qwen_v1.yaml")
+    data = load_yaml(PROFILES_DIR / "story_extraction_llm_v1.yaml")
     errors = _validate(data, _schema("llm-semantic-profile.schema.json"))
     assert errors == []
 
@@ -57,6 +57,8 @@ def _runtime_config_with_base_url(base_url: str) -> dict:
         "schema_version": 1,
         "transport_id": "llm-local",
         "base_url": base_url,
+        "request_model": "qwen",
+        "provider_family": "qwen",
         "credential_environment_name": None,
         "timeout_seconds": 30,
     }
@@ -92,7 +94,7 @@ def test_runtime_config_schema_accepts_v1_base_url():
 
 
 def test_semantic_profile_rejects_unknown_field_via_schema():
-    data = load_yaml(PROFILES_DIR / "story_llm_qwen_v1.yaml")
+    data = load_yaml(PROFILES_DIR / "story_extraction_llm_v1.yaml")
     data["base_url"] = "http://127.0.0.1:8080"
     errors = _validate(data, _schema("llm-semantic-profile.schema.json"))
     assert errors
@@ -146,9 +148,7 @@ def test_prompt_spec_schema_rejects_bad_metadata(tmp_path):
 def _profile_with_reasoning(reasoning: dict) -> dict:
     return {
         "schema_version": 1,
-        "profile_id": "story-llm-qwen-v1",
-        "provider_family": "qwen",
-        "model": "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M",
+        "profile_id": "story-extraction-llm-v1",
         "temperature": 0.0,
         "max_output_tokens": 4096,
         "structured_output_mode": "json_schema",

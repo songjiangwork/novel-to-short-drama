@@ -38,6 +38,8 @@ def _write_runtime_config(tmp_path: Path) -> str:
         "schema_version: 1\n"
         "transport_id: llm-local\n"
         "base_url: http://127.0.0.1:8080/v1\n"
+        "request_model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M\n"
+        "provider_family: qwen\n"
         "credential_environment_name: null\n"
         "timeout_seconds: 120\n",
         encoding="utf-8",
@@ -121,7 +123,7 @@ def _run_smoke_acceptance(smoke, tmp_path, served_model) -> tuple[int, str]:
     with contextlib.redirect_stdout(buffer):
         rc = smoke.run_smoke(
             runtime_config_path=runtime_path,
-            profile_path=str(profiles / "story_llm_qwen_v1.yaml"),
+            profile_path=str(profiles / "story_extraction_llm_v1.yaml"),
             extraction_profile_path=str(profiles / "story_extraction_v1.yaml"),
             model_override=None,
         )
@@ -195,7 +197,10 @@ def test_run_smoke_acceptance_mode_proceeds_when_exact_tracked_served(
             return llm_mod.StructuredGenerationResult(
                 parsed_json=parsed,
                 provenance=llm_mod.build_provenance(
-                    request, llm_mod.ProviderMeta()
+                    request,
+                    llm_mod.ProviderMeta(),
+                    request_model="qwen3-27b",
+                    provider_family="qwen",
                 ),
                 attempts=1,
             )
@@ -210,7 +215,7 @@ def test_run_smoke_acceptance_mode_proceeds_when_exact_tracked_served(
     with contextlib.redirect_stdout(buffer):
         rc = smoke.run_smoke(
             runtime_config_path=runtime_path,
-            profile_path=str(profiles / "story_llm_qwen_v1.yaml"),
+            profile_path=str(profiles / "story_extraction_llm_v1.yaml"),
             extraction_profile_path=str(profiles / "story_extraction_v1.yaml"),
             model_override=None,
         )

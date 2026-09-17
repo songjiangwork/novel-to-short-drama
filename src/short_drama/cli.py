@@ -28,7 +28,7 @@ def out(x): print(json.dumps(x, ensure_ascii=False, indent=2))
 DEFAULT_EXTRACT_PROFILES = {
     "extraction_profile": REPO_ROOT / "profiles" / "story_extraction_v1.yaml",
     "runtime_config": REPO_ROOT / "profiles" / "llm_local.yaml",
-    "llm_profile": REPO_ROOT / "profiles" / "story_llm_qwen_v1.yaml",
+    "llm_profile": REPO_ROOT / "profiles" / "story_extraction_llm_v1.yaml",
 }
 
 def main():

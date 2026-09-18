@@ -15,4 +15,4 @@ required_variables:
   - left_context_json
   - ownership_json
   - right_context_json
-content_hash: 1bce8cb7c6feab6b41a1739c614de840bef07f941ca95b23c9032a49db417081
+content_hash: 614e6bbb866b497b550cee1feb0dd9d955ec37ad97b209a2b7bd50a19ee0df06

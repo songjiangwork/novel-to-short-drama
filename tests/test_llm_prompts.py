@@ -368,7 +368,7 @@ def test_a3_chunk_extraction_v2_loads_with_correct_hash():
     reg = PromptRegistry(PROMPTS_DIR)
     spec = reg.load("a3.chunk-extraction", version=2)
     assert spec.version == 2
-    assert spec.content_hash == "1bce8cb7c6feab6b41a1739c614de840bef07f941ca95b23c9032a49db417081"
+    assert spec.content_hash == "614e6bbb866b497b550cee1feb0dd9d955ec37ad97b209a2b7bd50a19ee0df06"
     assert spec.required_variables == (
         "chunk_id",
         "left_context_json",
@@ -409,7 +409,7 @@ def test_a3_chunk_extraction_v2_contains_self_check():
     spec = reg.load("a3.chunk-extraction", version=2)
     assert "SELF-CHECK" in spec.system_template
     assert "character-for-character" in spec.system_template
-    assert "set excerpt to null" in spec.system_template
+    assert "set the excerpt to null instead" in spec.system_template
 
 
 def test_a3_chunk_extraction_v2_preserves_v1_rules():

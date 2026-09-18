@@ -63,6 +63,17 @@ class ExtractionModelError(StoryError):
     """
 
 
+class ReconciliationModelError(StoryError):
+    """A4 entity-reconciliation domain/profile contract is structurally invalid.
+
+    This is the static, object-level domain error for A4A. It is deliberately
+    distinct from the A3A extraction model error, from A-I3 LLM errors
+    (transport/config/provenance), and from the later A4B-A4E reconciliation
+    validation findings (coverage / graph / persistence), which belong to later
+    slices.
+    """
+
+
 class ExtractionProvenanceError(StoryError):
     """A successful structured-generation result's provenance does not
     correspond to the exact semantic request that produced it.

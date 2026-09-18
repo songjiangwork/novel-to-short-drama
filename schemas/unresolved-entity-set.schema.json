@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/unresolved-entity-set.schema.json",
+  "title": "UnresolvedEntitySet (v1.2 A4 persisted)",
+  "description": "Persisted contract for explicit unresolved entities (A3 cand_unres_* passthrough + A4 uncertain ambiguity groups). A4A owns the shape; A4D computes unresolved groups.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entities"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entity" }
+    }
+  },
+  "$defs": {
+    "global_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unresolved_id",
+        "entity_kind",
+        "candidate_refs",
+        "decision_refs",
+        "possible_candidate_refs",
+        "first_appearance_candidate_ref"
+      ],
+      "properties": {
+        "unresolved_id": { "type": "string", "pattern": "^unres_[0-9]{4,}$" },
+        "entity_kind": {
+          "enum": ["character", "location", "person", "other", "unknown"]
+        },
+        "candidate_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/global_candidate_ref" }
+        },
+        "decision_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "possible_candidate_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/global_candidate_ref" }
+        },
+        "first_appearance_candidate_ref": {
+          "$ref": "#/$defs/global_candidate_ref"
+        }
+      }
+    }
+  }
+}

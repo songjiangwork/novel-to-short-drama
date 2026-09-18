@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/reconciliation-decision-set.schema.json",
+  "title": "ReconciliationDecisionSet (v1.2 A4 persisted)",
+  "description": "Persisted contract for the A4 identity-decision set. A4A owns the shape (canonical pair ordering, closed enums, method/provenance consistency); A4B/A4C/A4D fill and enforce coverage/uniqueness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "decisions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/decision" }
+    }
+  },
+  "$defs": {
+    "global_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph_id", "role", "strength", "excerpt"],
+      "properties": {
+        "paragraph_id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "enum": ["primary", "supporting"] },
+        "strength": {
+          "type": "string",
+          "enum": ["explicit", "implied", "uncertain"]
+        },
+        "excerpt": { "type": ["string", "null"] }
+      }
+    },
+    "llm_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_family",
+        "model",
+        "semantic_profile_id",
+        "semantic_profile_hash",
+        "prompt_id",
+        "prompt_version",
+        "prompt_content_hash",
+        "rendered_prompt_hash",
+        "output_schema_id",
+        "output_schema_version",
+        "output_schema_hash",
+        "request_hash",
+        "provider_response_id",
+        "finish_reason",
+        "usage"
+      ],
+      "properties": {
+        "provider_family": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "semantic_profile_id": { "type": "string", "minLength": 1 },
+        "semantic_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_id": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "integer", "minimum": 1 },
+        "prompt_content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rendered_prompt_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "output_schema_id": { "type": "string", "minLength": 1 },
+        "output_schema_version": { "type": "integer", "minimum": 1 },
+        "output_schema_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "request_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "provider_response_id": { "type": ["string", "null"] },
+        "finish_reason": { "type": ["string", "null"] },
+        "usage": { "type": "object" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "left_candidate_ref",
+        "right_candidate_ref",
+        "decision",
+        "method",
+        "reason_code",
+        "reason_zh",
+        "evidence_refs",
+        "prompt_id",
+        "prompt_version",
+        "generation_provenance"
+      ],
+      "properties": {
+        "decision_id": { "type": "string", "minLength": 1 },
+        "left_candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
+        "right_candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
+        "decision": {
+          "enum": ["same_entity", "different_entity", "uncertain"]
+        },
+        "method": { "enum": ["deterministic", "llm", "manual"] },
+        "reason_code": { "type": "string", "minLength": 1 },
+        "reason_zh": { "type": "string", "minLength": 1 },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "prompt_id": { "type": ["string", "null"], "minLength": 1 },
+        "prompt_version": { "type": ["integer", "null"], "minimum": 1 },
+        "generation_provenance": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/llm_provenance" }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+# v1.2 A4A EntityReconciliationProfile — TRACKED.
+#
+# A model-independent orchestration profile for A4 entity reconciliation. It
+# carries NO runtime/LLM transport fields (no endpoint, credential, timeout,
+# concrete model, temperature, or reasoning) and NO backend routing identity
+# (no provider_family / request_model). Those remain A-I3 runtime config /
+# SemanticLLMProfile concerns (see profiles/entity_reconciliation_llm_v1.yaml).
+#
+# This profile's canonical hash (computed over to_dict() via the shared
+# content_hash) is the `reconciliation_profile_hash` that participates in A4
+# reuse identity. Changing any semantic field below changes that hash.
+schema_version: 1
+
+# Stable semantic identifier for this profile.
+profile_id: entity-reconciliation-v1
+
+# Working language for zh-CN reason text (reason_zh).
+working_language: zh-CN
+
+# A4 matching/blocking policy identities (deterministic, versioned). The
+# policies themselves are implemented in A4B; A4A only pins their identities.
+# Changing a policy's semantics MUST change its identity.
+name_normalization_policy_id: a4-name-normalization-v1
+blocking_policy_id: a4-blocking-v1
+canonicalization_policy_id: a4-canonicalization-v1
+
+# Reconciliation prompt identity pinned for this profile.
+prompt_id: a4.entity-reconciliation
+prompt_version: 1
+
+# Structured-output schema identity pinned for this profile.
+output_schema_id: a4-reconciliation-decision-payload
+output_schema_version: 1
+
+# Bounded semantic generation rounds (first generation + at most one
+# semantic-regeneration round). Frozen A-I5 v1 ceiling.
+max_generation_rounds: 2

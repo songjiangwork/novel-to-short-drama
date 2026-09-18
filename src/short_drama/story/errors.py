@@ -74,6 +74,16 @@ class ReconciliationModelError(StoryError):
     """
 
 
+class ReconciliationPlanningError(StoryError):
+    """A4B deterministic reconciliation planning failed.
+
+    This is the object-level error for A4B: snapshot coherence violation,
+    coverage audit failure, or pair-planning structural invariant breach.
+    It is deliberately distinct from A4A model errors and from the later
+    A4C-A4E semantic/graph/persistence findings.
+    """
+
+
 class ExtractionProvenanceError(StoryError):
     """A successful structured-generation result's provenance does not
     correspond to the exact semantic request that produced it.

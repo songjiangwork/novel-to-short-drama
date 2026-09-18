@@ -54,6 +54,7 @@ from short_drama.story import (
     EntityReconciliationProfile,
     GLOBAL_CANDIDATE_REF_PATTERN,
     GlobalCandidateRef,
+    MERGE_GRAPH_CANDIDATE_REF_PATTERN,
     RECONCILIATION_MAX_GENERATION_ROUNDS_V1,
     ReconciliationDecision,
     ReconciliationDecisionItem,
@@ -400,6 +401,66 @@ class TestReconciliationProfile:
         with pytest.raises(ReconciliationModelError):
             load_entity_reconciliation_profile(tmp_path / "nope.yaml")
 
+    def test_tracked_profile_passes_profile_schema(self) -> None:
+        profile = load_entity_reconciliation_profile(RECON_PROFILE_PATH)
+        assert (
+            _validate(
+                profile.to_dict(),
+                _schema("entity-reconciliation-profile.schema.json"),
+            )
+            == []
+        )
+
+    def test_profile_schema_rejects_extra_field(self) -> None:
+        data = load_entity_reconciliation_profile(RECON_PROFILE_PATH).to_dict()
+        data["endpoint"] = "http://localhost:8080"
+        assert (
+            _validate(
+                data, _schema("entity-reconciliation-profile.schema.json")
+            )
+            != []
+        )
+
+    def test_profile_schema_rejects_missing_field(self) -> None:
+        data = load_entity_reconciliation_profile(RECON_PROFILE_PATH).to_dict()
+        del data["blocking_policy_id"]
+        assert (
+            _validate(
+                data, _schema("entity-reconciliation-profile.schema.json")
+            )
+            != []
+        )
+
+    def test_profile_schema_rejects_wrong_schema_version(self) -> None:
+        data = load_entity_reconciliation_profile(RECON_PROFILE_PATH).to_dict()
+        data["schema_version"] = 2
+        assert (
+            _validate(
+                data, _schema("entity-reconciliation-profile.schema.json")
+            )
+            != []
+        )
+
+    def test_profile_schema_rejects_wrong_max_generation_rounds(self) -> None:
+        data = load_entity_reconciliation_profile(RECON_PROFILE_PATH).to_dict()
+        data["max_generation_rounds"] = 3
+        assert (
+            _validate(
+                data, _schema("entity-reconciliation-profile.schema.json")
+            )
+            != []
+        )
+
+    def test_profile_schema_rejects_non_positive_version(self) -> None:
+        data = load_entity_reconciliation_profile(RECON_PROFILE_PATH).to_dict()
+        data["prompt_version"] = 0
+        assert (
+            _validate(
+                data, _schema("entity-reconciliation-profile.schema.json")
+            )
+            != []
+        )
+
 
 # ---------------------------------------------------------------------------
 # CandidateEntityIndex
@@ -713,6 +774,153 @@ class TestSchemaParity:
         # valid EntityMap can carry it; the schema additionally rejects it.
         with pytest.raises(ReconciliationModelError):
             make_entry(canonical_id="char_0001", unresolved_id="unres_0001")
+
+
+# ---------------------------------------------------------------------------
+# Persisted ReconciliationDecision schema <-> Python parity
+# ---------------------------------------------------------------------------
+
+
+def _validate_raw_decision_set(decisions: list[dict]) -> list[str]:
+    # Validate a raw persisted decision-set dict against the schema (bypassing
+    # the Python model) to prove the schema enforces the same method/provenance
+    # consistency as the Python model.
+    return _validate(
+        {"schema_version": 1, "decisions": decisions},
+        _schema("reconciliation-decision-set.schema.json"),
+    )
+
+
+class TestDecisionSchemaParity:
+    def test_accepts_llm_decision(self) -> None:
+        decision_set = ReconciliationDecisionSet(
+            schema_version=1, decisions=(make_decision(),)
+        )
+        assert (
+            _validate(
+                decision_set.to_dict(),
+                _schema("reconciliation-decision-set.schema.json"),
+            )
+            == []
+        )
+
+    def test_accepts_deterministic_decision(self) -> None:
+        decision = make_decision(
+            method="deterministic",
+            reason_code="same_exact_alias",
+            prompt_id=None,
+            prompt_version=None,
+            generation_provenance=None,
+        )
+        decision_set = ReconciliationDecisionSet(schema_version=1, decisions=(decision,))
+        assert (
+            _validate(
+                decision_set.to_dict(),
+                _schema("reconciliation-decision-set.schema.json"),
+            )
+            == []
+        )
+
+    def test_accepts_manual_decision(self) -> None:
+        decision = make_decision(
+            method="manual",
+            reason_code="manual_review",
+            prompt_id=None,
+            prompt_version=None,
+            generation_provenance=None,
+        )
+        decision_set = ReconciliationDecisionSet(schema_version=1, decisions=(decision,))
+        assert (
+            _validate(
+                decision_set.to_dict(),
+                _schema("reconciliation-decision-set.schema.json"),
+            )
+            == []
+        )
+
+    def test_rejects_llm_with_null_provenance(self) -> None:
+        base = make_decision().to_dict()
+        base["generation_provenance"] = None
+        assert _validate_raw_decision_set([base]) != []
+
+    def test_rejects_llm_with_null_prompt_id(self) -> None:
+        base = make_decision().to_dict()
+        base["prompt_id"] = None
+        assert _validate_raw_decision_set([base]) != []
+
+    def test_rejects_llm_with_null_prompt_version(self) -> None:
+        base = make_decision().to_dict()
+        base["prompt_version"] = None
+        assert _validate_raw_decision_set([base]) != []
+
+    def test_rejects_deterministic_with_llm_provenance(self) -> None:
+        base = make_decision().to_dict()
+        base["method"] = "deterministic"
+        # method is deterministic but prompt identity + provenance are present.
+        assert _validate_raw_decision_set([base]) != []
+
+    def test_rejects_manual_with_llm_provenance(self) -> None:
+        base = make_decision().to_dict()
+        base["method"] = "manual"
+        assert _validate_raw_decision_set([base]) != []
+
+
+# ---------------------------------------------------------------------------
+# Merge-graph pair-ref hardening (char/loc only; cand_unres_* excluded)
+# ---------------------------------------------------------------------------
+
+UNRES_PAIR_REF = "CH001_C001:cand_unres_001"
+
+
+class TestMergeGraphPairRefs:
+    def test_merge_graph_pattern_accepts_char_and_loc(self) -> None:
+        import re
+
+        rx = re.compile(MERGE_GRAPH_CANDIDATE_REF_PATTERN)
+        assert rx.fullmatch("CH001_C001:cand_char_001") is not None
+        assert rx.fullmatch("CH001_C001:cand_loc_001") is not None
+        assert rx.fullmatch(UNRES_PAIR_REF) is None
+
+    def test_global_ref_still_accepts_unres(self) -> None:
+        # The coverage-universe global ref (and GlobalCandidateRef) still accept
+        # cand_unres_*; only the merge-graph pair refs exclude it.
+        assert GlobalCandidateRef.parse(UNRES_PAIR_REF).namespace == "unresolved"
+
+    def test_provider_item_rejects_unres_pair_ref(self) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_decision_item(left_candidate_ref=UNRES_PAIR_REF)
+
+    def test_provider_item_rejects_unres_right_ref(self) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_decision_item(right_candidate_ref=UNRES_PAIR_REF)
+
+    def test_persisted_decision_rejects_unres_pair_ref(self) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_decision(left_candidate_ref=UNRES_PAIR_REF)
+
+    def test_provider_schema_rejects_unres_pair_ref(self) -> None:
+        payload = {
+            "decisions": [
+                {
+                    "left_candidate_ref": UNRES_PAIR_REF,
+                    "right_candidate_ref": RIGHT_REF,
+                    "decision": "uncertain",
+                    "reason_zh": "x",
+                    "evidence_refs": [],
+                }
+            ]
+        }
+        assert (
+            _validate(
+                payload, _schema("reconciliation-decision-payload.schema.json")
+            )
+            != []
+        )
+
+    def test_persisted_schema_rejects_unres_pair_ref(self) -> None:
+        base = make_decision().to_dict()
+        base["left_candidate_ref"] = UNRES_PAIR_REF
+        assert _validate_raw_decision_set([base]) != []
 
 
 # ---------------------------------------------------------------------------

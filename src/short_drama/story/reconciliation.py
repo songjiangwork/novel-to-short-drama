@@ -152,6 +152,18 @@ GLOBAL_CANDIDATE_REF_PATTERN = (
 )
 _GLOBAL_CANDIDATE_REF_RE = re.compile(GLOBAL_CANDIDATE_REF_PATTERN)
 
+# Persisted canonical form of an A4 identity merge-graph candidate reference.
+# The A4 identity merge graph contains ONLY character + location candidates:
+# A3 ``cand_unres_*`` are explicit unresolved passthrough and never participate
+# in identity merging. This is a strict subset of the coverage-universe global
+# ref (all three namespaces) and is what a reconciliation pair (left/right) may
+# reference. (This is a structural domain tightening only; it does not plan or
+# resolve pairs -- that is A4B/A4C.)
+MERGE_GRAPH_CANDIDATE_REF_PATTERN = (
+    r"^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc)_[0-9]{3,}$"
+)
+_MERGE_GRAPH_CANDIDATE_REF_RE = re.compile(MERGE_GRAPH_CANDIDATE_REF_PATTERN)
+
 # Canonical entity id namespaces (section 23): char_0001 / loc_0001 / unres_0001.
 _CANONICAL_ID_PATTERNS = {
     "character": re.compile(r"^char_[0-9]{4,}$"),
@@ -267,6 +279,25 @@ def _require_global_candidate_ref(value: Any, field_name: str) -> str:
     """
     ref = GlobalCandidateRef.parse(value)
     return ref.to_string()
+
+
+def _require_merge_graph_candidate_ref(value: Any, field_name: str) -> str:
+    """Validate an identity merge-graph candidate reference and return its
+    canonical form.
+
+    A reconciliation pair member must be a character or location candidate
+    reference. A3 ``cand_unres_*`` are explicit unresolved passthrough and never
+    participate in the A4 identity merge graph, so they are rejected here even
+    though they are valid coverage-universe (global) candidate references.
+    """
+    if not isinstance(value, str) or _MERGE_GRAPH_CANDIDATE_REF_RE.fullmatch(value) is None:
+        raise ReconciliationModelError(
+            f"{field_name} must be a character/location merge-graph candidate "
+            f"reference ({MERGE_GRAPH_CANDIDATE_REF_PATTERN!r}): {value!r}"
+        )
+    # The merge-graph pattern is a strict subset of the global candidate ref,
+    # so the global parse/round-trip canonicalization always succeeds here.
+    return GlobalCandidateRef.parse(value).to_string()
 
 
 def _require_canonical_id(value: Any, entity_type: str, field_name: str) -> str:
@@ -682,7 +713,10 @@ class ReconciliationDecisionItem:
     :class:`ReconciliationDecision` (adding ``decision_id``, ``method``,
     ``reason_code``, prompt identity, and generation provenance). A4A validates
     only the structural shape: canonical pair ordering, the closed decision
-    enum, and the exact key set.
+    enum, and the exact key set. The pair members (``left_candidate_ref`` /
+    ``right_candidate_ref``) are identity merge-graph references -- character or
+    location candidates only -- because A3 ``cand_unres_*`` never participate in
+    the A4 identity merge graph.
     """
 
     left_candidate_ref: str
@@ -695,7 +729,7 @@ class ReconciliationDecisionItem:
         object.__setattr__(
             self,
             "left_candidate_ref",
-            _require_global_candidate_ref(
+            _require_merge_graph_candidate_ref(
                 self.left_candidate_ref,
                 "ReconciliationDecisionItem.left_candidate_ref",
             ),
@@ -703,7 +737,7 @@ class ReconciliationDecisionItem:
         object.__setattr__(
             self,
             "right_candidate_ref",
-            _require_global_candidate_ref(
+            _require_merge_graph_candidate_ref(
                 self.right_candidate_ref,
                 "ReconciliationDecisionItem.right_candidate_ref",
             ),
@@ -844,7 +878,7 @@ class ReconciliationDecision:
         object.__setattr__(
             self,
             "left_candidate_ref",
-            _require_global_candidate_ref(
+            _require_merge_graph_candidate_ref(
                 self.left_candidate_ref,
                 "ReconciliationDecision.left_candidate_ref",
             ),
@@ -852,7 +886,7 @@ class ReconciliationDecision:
         object.__setattr__(
             self,
             "right_candidate_ref",
-            _require_global_candidate_ref(
+            _require_merge_graph_candidate_ref(
                 self.right_candidate_ref,
                 "ReconciliationDecision.right_candidate_ref",
             ),

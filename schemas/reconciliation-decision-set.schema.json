@@ -14,9 +14,9 @@
     }
   },
   "$defs": {
-    "global_candidate_ref": {
+    "candidate_ref": {
       "type": "string",
-      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc)_[0-9]{3,}$"
     },
     "evidence_ref": {
       "type": "object",
@@ -84,43 +84,78 @@
     },
     "decision": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "decision_id",
-        "left_candidate_ref",
-        "right_candidate_ref",
-        "decision",
-        "method",
-        "reason_code",
-        "reason_zh",
-        "evidence_refs",
-        "prompt_id",
-        "prompt_version",
-        "generation_provenance"
-      ],
-      "properties": {
-        "decision_id": { "type": "string", "minLength": 1 },
-        "left_candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
-        "right_candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
-        "decision": {
-          "enum": ["same_entity", "different_entity", "uncertain"]
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id",
+            "left_candidate_ref",
+            "right_candidate_ref",
+            "decision",
+            "method",
+            "reason_code",
+            "reason_zh",
+            "evidence_refs",
+            "prompt_id",
+            "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "type": "string", "minLength": 1 },
+            "left_candidate_ref": { "$ref": "#/$defs/candidate_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/candidate_ref" },
+            "decision": {
+              "enum": ["same_entity", "different_entity", "uncertain"]
+            },
+            "method": { "const": "llm" },
+            "reason_code": { "type": "string", "minLength": 1 },
+            "reason_zh": { "type": "string", "minLength": 1 },
+            "evidence_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/evidence_ref" }
+            },
+            "prompt_id": { "type": "string", "minLength": 1 },
+            "prompt_version": { "type": "integer", "minimum": 1 },
+            "generation_provenance": { "$ref": "#/$defs/llm_provenance" }
+          }
         },
-        "method": { "enum": ["deterministic", "llm", "manual"] },
-        "reason_code": { "type": "string", "minLength": 1 },
-        "reason_zh": { "type": "string", "minLength": 1 },
-        "evidence_refs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/evidence_ref" }
-        },
-        "prompt_id": { "type": ["string", "null"], "minLength": 1 },
-        "prompt_version": { "type": ["integer", "null"], "minimum": 1 },
-        "generation_provenance": {
-          "anyOf": [
-            { "type": "null" },
-            { "$ref": "#/$defs/llm_provenance" }
-          ]
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id",
+            "left_candidate_ref",
+            "right_candidate_ref",
+            "decision",
+            "method",
+            "reason_code",
+            "reason_zh",
+            "evidence_refs",
+            "prompt_id",
+            "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "type": "string", "minLength": 1 },
+            "left_candidate_ref": { "$ref": "#/$defs/candidate_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/candidate_ref" },
+            "decision": {
+              "enum": ["same_entity", "different_entity", "uncertain"]
+            },
+            "method": { "enum": ["deterministic", "manual"] },
+            "reason_code": { "type": "string", "minLength": 1 },
+            "reason_zh": { "type": "string", "minLength": 1 },
+            "evidence_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/evidence_ref" }
+            },
+            "prompt_id": { "type": "null" },
+            "prompt_version": { "type": "null" },
+            "generation_provenance": { "type": "null" }
+          }
         }
-      }
+      ]
     }
   }
 }

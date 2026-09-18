@@ -18,11 +18,11 @@
         "properties": {
           "left_candidate_ref": {
             "type": "string",
-            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc)_[0-9]{3,}$"
           },
           "right_candidate_ref": {
             "type": "string",
-            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc)_[0-9]{3,}$"
           },
           "decision": {
             "type": "string",

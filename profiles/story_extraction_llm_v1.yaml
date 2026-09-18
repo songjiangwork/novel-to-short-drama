@@ -21,9 +21,12 @@ profile_id: story-extraction-llm-v1
 temperature: 0.0
 
 # Output token budget for a single structured generation.
-# Provides sufficient headroom for structured story extraction across
-# compatible backends while remaining a bounded semantic generation budget.
-max_output_tokens: 8192
+# A3 CandidatePayload can legitimately expand well beyond input size because
+# it contains characters, locations, facts, events, relationships, unresolved
+# mentions, semantic summaries, cross-references, and evidence. This budget
+# provides sufficient structured-output headroom across compatible backends
+# while remaining a bounded semantic generation ceiling.
+max_output_tokens: 16384
 
 # Structured-output generation constraint (a generation constraint only; local
 # JSON Schema validation remains the authority).

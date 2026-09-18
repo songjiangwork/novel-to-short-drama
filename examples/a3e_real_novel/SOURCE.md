@@ -33,7 +33,7 @@ Markdown-style underscore emphasis markers removed (content unchanged).
 ## SHA-256
 
 ```
-468d63d7d35c0fd32709e1db4781da4cc6ec03e95d47a7e3c3ec97a432fbf11f
+11c2f3f7566398ca964a19c258291b6a28989339711266d23f991a825ed4f907
 ```
 
 ## Public-Domain Provenance Note

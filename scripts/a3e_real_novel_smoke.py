@@ -10,7 +10,7 @@ with 3 consecutive chunks selected from the production A2 chunk profile:
       -> A3B semantic validation (PASS required)
       -> CandidateExtraction published
       -> exact rerun (reused=True, 0 additional provider calls)
-      -> semantic identity invalidation probe
+      -> semantic identity invalidation probe (max_output_tokens + 1)
 
 The acceptance validates pipeline capability + output contract, NOT backend
 identity. Any OpenAI-compatible backend that satisfies the A-I3 v2 contract
@@ -428,14 +428,16 @@ def run_smoke(
         )
 
         # 8. Semantic identity invalidation probe.
-        #    Change temperature (a true semantic contract property).
+        #    Change max_output_tokens by +1 (a genuine semantic-profile
+        #    change that does not alter output stochasticity).
         modified_profile = dataclasses.replace(
-            semantic_profile, temperature=0.5
+            semantic_profile,
+            max_output_tokens=semantic_profile.max_output_tokens + 1,
         )
         print()
-        print(f"invalidation field:       temperature "
-              f"{semantic_profile.temperature} -> "
-              f"{modified_profile.temperature}")
+        print(f"invalidation field:       max_output_tokens "
+              f"{semantic_profile.max_output_tokens} -> "
+              f"{modified_profile.max_output_tokens}")
         print(f"old semantic_profile_hash:  "
               f"{semantic_profile.semantic_profile_hash}")
         print(f"new semantic_profile_hash:  "

@@ -252,3 +252,20 @@ class TestValidationGate:
         )
         assert len(failures) == 1
         assert "c2" in failures[0]
+
+
+# ---------------------------------------------------------------------------
+# 5. Invalidation probe uses max_output_tokens (not temperature)
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidationProbeField:
+    def test_uses_max_output_tokens_not_temperature(self) -> None:
+        """The smoke script's invalidation probe changes max_output_tokens,
+        not temperature."""
+        import inspect
+        source = inspect.getsource(smoke)
+        # The probe must use max_output_tokens in the dataclasses.replace call
+        assert "max_output_tokens=semantic_profile.max_output_tokens + 1" in source
+        # The probe must NOT use temperature in the dataclasses.replace call
+        assert "temperature=0.5" not in source

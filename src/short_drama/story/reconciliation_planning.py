@@ -47,6 +47,13 @@ from short_drama.story.extraction import (
     LocationCandidate,
     UnresolvedMentionCandidate,
 )
+from short_drama.story.extraction_persistence import (
+    candidate_extraction_artifact_id,
+)
+from short_drama.story.persistence import (
+    source_chunk_artifact_id,
+    source_document_artifact_id,
+)
 from short_drama.story.reconciliation import (
     CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
     CandidateEntityIndex,
@@ -135,7 +142,7 @@ _WEAK_GENERIC_KEYS: frozenset[str] = frozenset(
 
 _CJK_UNIFIED_RE = re.compile(r"[\u4e00-\u9fff]")
 # Alphanumeric run for token extraction: Unicode alphanumeric code points
-_ALNUM_RUN_RE = re.compile(r"[^\w]+", re.UNICODE)
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +166,7 @@ def normalize_name(text: str) -> str:
     result = result.casefold()
     result = result.strip()
     # Collapse all Unicode whitespace runs to a single ASCII space
-    result = re.sub(r"\s+", " ", result)
+    result = _WHITESPACE_RE.sub(" ", result)
     return result
 
 
@@ -196,7 +203,8 @@ def extract_blocking_tokens(identity_keys: tuple[str, ...]) -> tuple[str, ...]:
     """Extract deterministic blocking tokens from normalized identity keys.
 
     Rules:
-      * split on non-alphanumeric boundaries;
+      * split on non-alphanumeric boundaries (true Unicode alphanumeric
+        via ``str.isalnum()``);
       * drop empty tokens;
       * token must be at least 2 Unicode code points;
       * pure numeric tokens are excluded;
@@ -205,14 +213,21 @@ def extract_blocking_tokens(identity_keys: tuple[str, ...]) -> tuple[str, ...]:
     tokens: set[str] = set()
     for key in identity_keys:
         # key is already normalized (NFKC + casefold + strip + collapse)
-        runs = _ALNUM_RUN_RE.split(key)
-        for run in runs:
-            if len(run) < 2:
-                continue
-            # Skip pure numeric tokens
-            if run.isdigit():
-                continue
-            tokens.add(run)
+        # Scan for Unicode alphanumeric runs
+        run: list[str] = []
+        for ch in key:
+            if ch.isalnum():
+                run.append(ch)
+            else:
+                if run:
+                    token = "".join(run)
+                    run = []
+                    if len(token) >= 2 and not token.isdigit():
+                        tokens.add(token)
+        if run:
+            token = "".join(run)
+            if len(token) >= 2 and not token.isdigit():
+                tokens.add(token)
     return tuple(sorted(tokens))
 
 
@@ -485,8 +500,8 @@ def _compute_decision_id(
 def _validate_snapshot(snapshot: ReconciliationInputSnapshot) -> None:
     """Fail-closed snapshot coherence validation.
 
-    Verifies exact positional alignment and identity consistency. Does NOT
-    re-run A3 semantic validation.
+    Verifies exact positional alignment and identity consistency using the
+    production artifact-id authorities. Does NOT re-run A3 semantic validation.
     """
     doc = snapshot.source_document
     manifest = snapshot.chunk_manifest
@@ -495,6 +510,7 @@ def _validate_snapshot(snapshot: ReconciliationInputSnapshot) -> None:
     extractions = snapshot.candidate_extractions
     extraction_refs = snapshot.candidate_extraction_refs
     report_refs = snapshot.a3_validation_report_refs
+    profile_id = manifest.profile.profile_id
 
     # Source project/document identity
     if manifest.project_id != doc.project_id:
@@ -549,23 +565,35 @@ def _validate_snapshot(snapshot: ReconciliationInputSnapshot) -> None:
             f"len(candidate_extractions) {len(extractions)}"
         )
 
-    # Each SourceChunk identity must match the corresponding chunk ref / manifest
+    # Each SourceChunk: positional identity via production artifact-id authority
     for i, (chunk, chunk_ref) in enumerate(zip(chunks, chunk_refs)):
-        if chunk.chunk_id != _extract_chunk_id_from_ref(chunk_ref):
+        if chunk_ref.artifact_type != "source_chunk":
             raise ReconciliationPlanningError(
-                f"source_chunks[{i}].chunk_id {chunk.chunk_id!r} does not "
-                f"match the chunk_ref artifact_id "
-                f"{chunk_ref.artifact_id!r}"
+                f"source_chunk_refs[{i}].artifact_type "
+                f"{chunk_ref.artifact_type!r} != 'source_chunk'"
             )
-        if chunk.project_id != doc.project_id:
+        expected_chunk_artifact_id = source_chunk_artifact_id(
+            manifest.project_id,
+            manifest.document_id,
+            profile_id,
+            chunk.chunk_id,
+        )
+        if chunk_ref.artifact_id != expected_chunk_artifact_id:
+            raise ReconciliationPlanningError(
+                f"source_chunk_refs[{i}].artifact_id "
+                f"{chunk_ref.artifact_id!r} != expected "
+                f"{expected_chunk_artifact_id!r} "
+                f"(chunk_id={chunk.chunk_id!r})"
+            )
+        if chunk.project_id != manifest.project_id:
             raise ReconciliationPlanningError(
                 f"source_chunks[{i}].project_id {chunk.project_id!r} != "
-                f"source_document project_id {doc.project_id!r}"
+                f"manifest.project_id {manifest.project_id!r}"
             )
-        if chunk.document_id != doc.document_id:
+        if chunk.document_id != manifest.document_id:
             raise ReconciliationPlanningError(
                 f"source_chunks[{i}].document_id {chunk.document_id!r} != "
-                f"source_document document_id {doc.document_id!r}"
+                f"manifest.document_id {manifest.document_id!r}"
             )
         if chunk.source_document_ref != snapshot.source_document_ref:
             raise ReconciliationPlanningError(
@@ -573,9 +601,9 @@ def _validate_snapshot(snapshot: ReconciliationInputSnapshot) -> None:
                 "snapshot.source_document_ref"
             )
 
-    # Each CandidateExtraction: identity + profile consistency
-    profile_id: str | None = None
-    profile_hash: str | None = None
+    # Each CandidateExtraction: positional identity + profile consistency
+    extraction_profile_id: str | None = None
+    extraction_profile_hash: str | None = None
     for i, (ext, ext_ref) in enumerate(zip(extractions, extraction_refs)):
         if ext.project_id != doc.project_id:
             raise ReconciliationPlanningError(
@@ -587,17 +615,20 @@ def _validate_snapshot(snapshot: ReconciliationInputSnapshot) -> None:
                 f"candidate_extractions[{i}].document_id {ext.document_id!r} "
                 f"!= source_document document_id {doc.document_id!r}"
             )
-        # chunk_profile_id must match the source chunk's profile
-        if i < len(chunks):
-            if ext.chunk_profile_id != chunks[i].chunk_id:
-                # chunk_profile_id is actually the profile id, not chunk_id.
-                # Let's check against the manifest profile
-                pass
+        # chunk_profile_id must match the manifest's chunk-planning profile
+        if ext.chunk_profile_id != profile_id:
+            raise ReconciliationPlanningError(
+                f"candidate_extractions[{i}].chunk_profile_id "
+                f"{ext.chunk_profile_id!r} != manifest.profile.profile_id "
+                f"{profile_id!r}"
+            )
+        # Positional chunk_id alignment
         if ext.chunk_id != chunks[i].chunk_id:
             raise ReconciliationPlanningError(
                 f"candidate_extractions[{i}].chunk_id {ext.chunk_id!r} != "
                 f"source_chunks[{i}].chunk_id {chunks[i].chunk_id!r}"
             )
+        # Source refs
         if ext.source_document_ref != snapshot.source_document_ref:
             raise ReconciliationPlanningError(
                 f"candidate_extractions[{i}].source_document_ref does not "
@@ -608,39 +639,40 @@ def _validate_snapshot(snapshot: ReconciliationInputSnapshot) -> None:
                 f"candidate_extractions[{i}].source_chunk_ref does not "
                 f"match source_chunk_refs[{i}]"
             )
-        # Profile consistency across all extractions
-        if profile_id is None:
-            profile_id = ext.extraction_profile_id
-            profile_hash = ext.extraction_profile_hash
-        elif ext.extraction_profile_id != profile_id:
-            raise ReconciliationPlanningError(
-                f"candidate_extractions[{i}].extraction_profile_id "
-                f"{ext.extraction_profile_id!r} != first extraction's "
-                f"{profile_id!r}"
-            )
-        elif ext.extraction_profile_hash != profile_hash:
-            raise ReconciliationPlanningError(
-                f"candidate_extractions[{i}].extraction_profile_hash != "
-                f"first extraction's hash"
-            )
-
-    # CandidateExtraction ref must match position
-    for i, (ext, ext_ref) in enumerate(zip(extractions, extraction_refs)):
+        # CandidateExtraction ArtifactRef identity via production authority
         if ext_ref.artifact_type != "candidate_extraction":
             raise ReconciliationPlanningError(
                 f"candidate_extraction_refs[{i}].artifact_type "
                 f"{ext_ref.artifact_type!r} != 'candidate_extraction'"
             )
-
-
-def _extract_chunk_id_from_ref(ref: ArtifactRef) -> str:
-    """Extract chunk_id from a source_chunk ArtifactRef.
-
-    The artifact_id encodes the chunk_id in a deterministic way.
-    We check if artifact_id ends with the chunk_id pattern or contains it.
-    Actually, for A2, the artifact_id IS the chunk_id.
-    """
-    return ref.artifact_id
+        expected_ext_artifact_id = candidate_extraction_artifact_id(
+            ext.project_id,
+            ext.document_id,
+            ext.chunk_profile_id,
+            ext.chunk_id,
+            ext.extraction_profile_id,
+        )
+        if ext_ref.artifact_id != expected_ext_artifact_id:
+            raise ReconciliationPlanningError(
+                f"candidate_extraction_refs[{i}].artifact_id "
+                f"{ext_ref.artifact_id!r} != expected "
+                f"{expected_ext_artifact_id!r}"
+            )
+        # Profile consistency across all extractions
+        if extraction_profile_id is None:
+            extraction_profile_id = ext.extraction_profile_id
+            extraction_profile_hash = ext.extraction_profile_hash
+        elif ext.extraction_profile_id != extraction_profile_id:
+            raise ReconciliationPlanningError(
+                f"candidate_extractions[{i}].extraction_profile_id "
+                f"{ext.extraction_profile_id!r} != first extraction's "
+                f"{extraction_profile_id!r}"
+            )
+        elif ext.extraction_profile_hash != extraction_profile_hash:
+            raise ReconciliationPlanningError(
+                f"candidate_extractions[{i}].extraction_profile_hash != "
+                f"first extraction's hash"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +984,7 @@ def _generate_blocked_pairs(
                     shared_tokens=(token,),
                 )
 
-    # --- Adjacent chunk windows ---
+    # --- Adjacent chunk windows (exact frozen policy) ---
     # (entity_type, chunk_ordinal) → ordered candidate refs
     chunk_buckets: dict[tuple[str, int], list[str]] = {}
     for entry in merge_entries:
@@ -965,29 +997,33 @@ def _generate_blocked_pairs(
             chunk_buckets[bucket_key] = []
         chunk_buckets[bucket_key].append(entry.candidate_ref)
 
+    # Same chunk: generate combinations inside each bucket
     for (entity_type, ordinal), refs in chunk_buckets.items():
-        # Connect same chunk + adjacent chunk
-        neighbor_ordinals = [ordinal - 1, ordinal, ordinal + 1]
-        neighbor_refs: list[str] = []
-        for n_ord in neighbor_ordinals:
-            if (entity_type, n_ord) in chunk_buckets:
-                for ref in chunk_buckets[(entity_type, n_ord)]:
-                    if ref not in neighbor_refs:
-                        neighbor_refs.append(ref)
-        for i in range(len(neighbor_refs)):
-            for j in range(i + 1, len(neighbor_refs)):
-                # Same chunk counts as adjacent/local-window blocking
+        if len(refs) < 2:
+            continue
+        for i in range(len(refs)):
+            for j in range(i + 1, len(refs)):
                 _add_pair(
-                    neighbor_refs[i], neighbor_refs[j],
+                    refs[i], refs[j],
                     SIGNAL_ADJACENT_CHUNK,
                 )
 
-    # --- Hard must-not-merge constraints ---
+    # Adjacent chunks: cross-product ordinal × (ordinal+1) only.
+    # Canonical iteration ensures each boundary is generated exactly once.
+    for (entity_type, ordinal), refs in chunk_buckets.items():
+        next_refs = chunk_buckets.get((entity_type, ordinal + 1))
+        if next_refs is None:
+            continue
+        for ref_a in refs:
+            for ref_b in next_refs:
+                _add_pair(
+                    ref_a, ref_b,
+                    SIGNAL_ADJACENT_CHUNK,
+                )
+
+    # --- Hard must-not-merge constraints (already canonicalized at boundary) ---
     for (left, right) in must_not_merge:
-        if left < right:
-            _add_pair(left, right, SIGNAL_HARD_MUST_NOT_MERGE)
-        else:
-            _add_pair(right, left, SIGNAL_HARD_MUST_NOT_MERGE)
+        _add_pair(left, right, SIGNAL_HARD_MUST_NOT_MERGE)
 
     return pairs
 
@@ -1112,9 +1148,20 @@ def plan_reconciliation(
                     chunk_ordinal_map[entry.candidate_ref] = i + 1
                     break
 
-    # Step 6: Derive must-not-merge constraints
+    # Step 6: Derive must-not-merge constraints (canonicalized at boundary)
     if must_not_merge is not None:
-        hard_constraints = must_not_merge
+        hard_constraints: frozenset[tuple[str, str]] = frozenset()
+        for pair in must_not_merge:
+            if len(pair) != 2:
+                raise ReconciliationPlanningError(
+                    f"must_not_merge pair must have exactly 2 elements: {pair!r}"
+                )
+            a, b = pair
+            if a == b:
+                raise ReconciliationPlanningError(
+                    f"must_not_merge pair must reference distinct candidates: {pair!r}"
+                )
+            hard_constraints = hard_constraints | frozenset({(min(a, b), max(a, b))})
     else:
         hard_constraints = derive_must_not_merge_constraints(candidate_index)
 

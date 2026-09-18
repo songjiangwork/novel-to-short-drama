@@ -2,14 +2,14 @@
 
 Covers the frozen A4B contract:
 
-  * snapshot/lineage coherence (exact order, fail closed)
+  * snapshot/lineage coherence (exact order, fail closed, real artifact IDs)
   * candidate index (coverage, globalized refs, source_order_key)
   * name normalization v1 (NFKC, casefold, strip, whitespace collapse, idempotent)
   * strong/weak identity keys
   * blocking (exact key, token overlap, adjacent chunk, distant no-signal absent)
   * pair state (auto_same, must_not_merge, needs_semantic_decision)
-  * must-not-merge v1 (production empty set, synthetic override)
-  * no whole-document N²
+  * must-not-merge v1 (production empty set, synthetic override, canonicalization)
+  * no whole-document N² (exact pair count)
   * plan hash determinism
   * coverage audit
 """
@@ -17,7 +17,6 @@ Covers the frozen A4B contract:
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -64,10 +63,18 @@ from short_drama.story.chunking import (
     CHUNK_PLANNER_VERSION,
     TOKEN_COUNTER_ID,
 )
+from short_drama.story.extraction_persistence import (
+    candidate_extraction_artifact_id,
+    candidate_extraction_validation_artifact_id,
+)
+from short_drama.story.persistence import (
+    source_chunk_artifact_id,
+    source_document_artifact_id,
+)
 from short_drama.story.source import NormalizationInfo
 
 # ---------------------------------------------------------------------------
-# Constants / helpers
+# Constants
 # ---------------------------------------------------------------------------
 
 H = "a" * 64
@@ -76,26 +83,84 @@ H3 = "c" * 64
 H4 = "d" * 64
 H5 = "e" * 64
 
+PROJECT_ID = "proj1"
+DOCUMENT_ID = "doc1"
+PROFILE_ID = "a2-default"
+EXTRACTION_PROFILE_ID = "a3-extraction-v1"
 
-def _make_artifact_ref(
-    artifact_type: str = "source_document",
-    artifact_id: str = "doc1",
-    revision: int = 1,
-    content_hash: str = H,
-) -> ArtifactRef:
+
+# ---------------------------------------------------------------------------
+# Production-realistic ArtifactRef builders
+# ---------------------------------------------------------------------------
+
+
+def make_source_document_ref() -> ArtifactRef:
     return ArtifactRef(
-        artifact_type=artifact_type,
-        artifact_id=artifact_id,
-        revision=revision,
-        content_hash=content_hash,
+        artifact_type="source_document",
+        artifact_id=source_document_artifact_id(PROJECT_ID, DOCUMENT_ID),
+        revision=1,
+        content_hash=H,
     )
 
 
-def _make_provenance() -> LLMInvocationProvenance:
+def make_source_chunk_ref(chunk_id: str) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_type="source_chunk",
+        artifact_id=source_chunk_artifact_id(
+            PROJECT_ID, DOCUMENT_ID, PROFILE_ID, chunk_id
+        ),
+        revision=1,
+        content_hash=H2,
+    )
+
+
+def make_extraction_ref(chunk_id: str) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_type="candidate_extraction",
+        artifact_id=candidate_extraction_artifact_id(
+            PROJECT_ID, DOCUMENT_ID, PROFILE_ID, chunk_id, EXTRACTION_PROFILE_ID
+        ),
+        revision=1,
+        content_hash=H3,
+    )
+
+
+def make_validation_report_ref(chunk_id: str) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_type="validation_report",
+        artifact_id=candidate_extraction_validation_artifact_id(
+            candidate_extraction_artifact_id(
+                PROJECT_ID, DOCUMENT_ID, PROFILE_ID, chunk_id, EXTRACTION_PROFILE_ID
+            )
+        ),
+        revision=1,
+        content_hash=H4,
+    )
+
+
+def make_fake_artifact_ref(
+    artifact_type: str = "source_chunk",
+    artifact_id: str = "CH001_C001",
+) -> ArtifactRef:
+    """Create a ref with a non-production artifact_id (for negative tests)."""
+    return ArtifactRef(
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        revision=1,
+        content_hash=H2,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Domain object builders
+# ---------------------------------------------------------------------------
+
+
+def make_provenance() -> LLMInvocationProvenance:
     return LLMInvocationProvenance(
         provider_family="llama-cpp",
         model="qwen2.5-7b",
-        semantic_profile_id="a3-extraction-v1",
+        semantic_profile_id=EXTRACTION_PROFILE_ID,
         semantic_profile_hash=H,
         prompt_id="a3.extract-chunk",
         prompt_version=1,
@@ -111,22 +176,16 @@ def _make_provenance() -> LLMInvocationProvenance:
     )
 
 
-def _make_source_document(
-    *,
-    project_id: str = "proj1",
-    document_id: str = "doc1",
-    num_paragraphs: int = 10,
-    chapter_id: str = "CH001",
-) -> SourceDocument:
+def make_source_document(num_paragraphs: int = 10) -> SourceDocument:
     paragraphs = tuple(
         SourceParagraph(
-            paragraph_id=f"{chapter_id}_P{i:04d}",
+            paragraph_id=f"CH001_P{i:04d}",
             text_original=f"Paragraph {i}",
         )
         for i in range(1, num_paragraphs + 1)
     )
     chapter = SourceChapter(
-        chapter_id=chapter_id,
+        chapter_id="CH001",
         title_original=None,
         heading_kind="synthetic",
         paragraphs=paragraphs,
@@ -148,40 +207,32 @@ def _make_source_document(
     )
     return SourceDocument(
         schema_version=1,
-        project_id=project_id,
-        document_id=document_id,
+        project_id=PROJECT_ID,
+        document_id=DOCUMENT_ID,
         source=source,
         normalization=normalization,
         chapters=(chapter,),
     )
 
 
-def _make_source_chunk(
-    *,
+def make_source_chunk(
     chunk_id: str = "CH001_C001",
-    project_id: str = "proj1",
-    document_id: str = "doc1",
     source_document_ref: ArtifactRef | None = None,
-    chapter_id: str = "CH001",
     paragraph_ids: tuple[str, ...] | None = None,
 ) -> SourceChunk:
     if source_document_ref is None:
-        source_document_ref = _make_artifact_ref()
+        source_document_ref = make_source_document_ref()
     if paragraph_ids is None:
-        paragraph_ids = (f"{chapter_id}_P0001", f"{chapter_id}_P0002")
+        paragraph_ids = ("CH001_P0001", "CH001_P0002")
     return SourceChunk(
         schema_version=1,
         chunk_id=chunk_id,
-        project_id=project_id,
-        document_id=document_id,
-        chapter_id=chapter_id,
+        project_id=PROJECT_ID,
+        document_id=DOCUMENT_ID,
+        chapter_id="CH001",
         source_document_ref=source_document_ref,
-        context_span=ParagraphSpan(
-            start=paragraph_ids[0], end=paragraph_ids[-1]
-        ),
-        ownership_span=ParagraphSpan(
-            start=paragraph_ids[0], end=paragraph_ids[-1]
-        ),
+        context_span=ParagraphSpan(start=paragraph_ids[0], end=paragraph_ids[-1]),
+        ownership_span=ParagraphSpan(start=paragraph_ids[0], end=paragraph_ids[-1]),
         paragraph_ids=paragraph_ids,
         token_count_method=TOKEN_COUNTER_ID,
         context_token_count=10,
@@ -189,44 +240,37 @@ def _make_source_chunk(
     )
 
 
-def _make_chunk_manifest(
-    *,
-    project_id: str = "proj1",
-    document_id: str = "doc1",
+def make_chunk_manifest(
+    chunk_refs: tuple[ArtifactRef, ...],
     source_document_ref: ArtifactRef | None = None,
-    chunk_refs: tuple[ArtifactRef, ...] | None = None,
-    profile: ChunkPlanningProfile | None = None,
 ) -> ChunkManifest:
     if source_document_ref is None:
-        source_document_ref = _make_artifact_ref()
-    if chunk_refs is None:
-        chunk_refs = (_make_artifact_ref("source_chunk", "CH001_C001", 1, H2),)
-    if profile is None:
-        profile = ChunkPlanningProfile(
-            schema_version=1,
-            profile_id="a2-default",
-            token_counter=TOKEN_COUNTER_ID,
-            ownership_token_budget=100,
-            context_overlap_token_budget=20,
-            context_token_budget=200,
-        )
+        source_document_ref = make_source_document_ref()
+    profile = ChunkPlanningProfile(
+        schema_version=1,
+        profile_id=PROFILE_ID,
+        token_counter=TOKEN_COUNTER_ID,
+        ownership_token_budget=100,
+        context_overlap_token_budget=20,
+        context_token_budget=200,
+    )
     return ChunkManifest(
         schema_version=1,
-        project_id=project_id,
-        document_id=document_id,
+        project_id=PROJECT_ID,
+        document_id=DOCUMENT_ID,
         source_document_ref=source_document_ref,
         planner_version=CHUNK_PLANNER_VERSION,
         profile=profile,
         chunk_refs=chunk_refs,
         chunk_count=len(chunk_refs),
         coverage=ChunkCoverage(
-            paragraphs_total=2, owned_once=2, unowned=0, multiply_owned=0
+            paragraphs_total=10, owned_once=10, unowned=0, multiply_owned=0
         ),
         state="CHUNKING_COMPLETE",
     )
 
 
-def _make_evidence(paragraph_id: str = "CH001_P0001") -> tuple[EvidenceRef, ...]:
+def make_evidence(paragraph_id: str = "CH001_P0001") -> tuple[EvidenceRef, ...]:
     return (
         EvidenceRef(
             paragraph_id=paragraph_id,
@@ -237,15 +281,14 @@ def _make_evidence(paragraph_id: str = "CH001_P0001") -> tuple[EvidenceRef, ...]
     )
 
 
-def _make_character(
-    *,
+def make_character(
     candidate_id: str = "cand_char_001",
     display_name_original: str = "John Smith",
     aliases_original: tuple[str, ...] = (),
     evidence: tuple[EvidenceRef, ...] | None = None,
 ) -> CharacterCandidate:
     if evidence is None:
-        evidence = _make_evidence()
+        evidence = make_evidence()
     return CharacterCandidate(
         candidate_id=candidate_id,
         display_name_original=display_name_original,
@@ -257,15 +300,14 @@ def _make_character(
     )
 
 
-def _make_location(
-    *,
+def make_location(
     candidate_id: str = "cand_loc_001",
     display_name_original: str = "北京",
     aliases_original: tuple[str, ...] = (),
     evidence: tuple[EvidenceRef, ...] | None = None,
 ) -> LocationCandidate:
     if evidence is None:
-        evidence = _make_evidence()
+        evidence = make_evidence()
     return LocationCandidate(
         candidate_id=candidate_id,
         display_name_original=display_name_original,
@@ -277,8 +319,7 @@ def _make_location(
     )
 
 
-def _make_unresolved(
-    *,
+def make_unresolved(
     candidate_id: str = "cand_unres_001",
     mention_original: str = "那个人",
     mention_kind: str = "person",
@@ -286,7 +327,7 @@ def _make_unresolved(
     evidence: tuple[EvidenceRef, ...] | None = None,
 ) -> UnresolvedMentionCandidate:
     if evidence is None:
-        evidence = _make_evidence()
+        evidence = make_evidence()
     return UnresolvedMentionCandidate(
         candidate_id=candidate_id,
         mention_original=mention_original,
@@ -298,14 +339,11 @@ def _make_unresolved(
     )
 
 
-def _make_extraction(
-    *,
+def make_extraction(
     chunk_id: str = "CH001_C001",
-    project_id: str = "proj1",
-    document_id: str = "doc1",
     source_document_ref: ArtifactRef | None = None,
     source_chunk_ref: ArtifactRef | None = None,
-    extraction_profile_id: str = "a3-extraction-v1",
+    extraction_profile_id: str = EXTRACTION_PROFILE_ID,
     extraction_profile_hash: str = H,
     characters: tuple[CharacterCandidate, ...] = (),
     locations: tuple[LocationCandidate, ...] = (),
@@ -315,9 +353,9 @@ def _make_extraction(
     relationships: tuple = (),
 ) -> CandidateExtraction:
     if source_document_ref is None:
-        source_document_ref = _make_artifact_ref()
+        source_document_ref = make_source_document_ref()
     if source_chunk_ref is None:
-        source_chunk_ref = _make_artifact_ref("source_chunk", chunk_id, 1, H2)
+        source_chunk_ref = make_source_chunk_ref(chunk_id)
     candidates = CandidatePayload(
         characters=characters,
         locations=locations,
@@ -328,38 +366,36 @@ def _make_extraction(
     )
     return CandidateExtraction(
         schema_version=1,
-        project_id=project_id,
-        document_id=document_id,
-        chunk_profile_id="a2-default",
+        project_id=PROJECT_ID,
+        document_id=DOCUMENT_ID,
+        chunk_profile_id=PROFILE_ID,
         chunk_id=chunk_id,
         source_document_ref=source_document_ref,
         source_chunk_ref=source_chunk_ref,
         extraction_profile_id=extraction_profile_id,
         extraction_profile_hash=extraction_profile_hash,
-        generation_provenance=_make_provenance(),
+        generation_provenance=make_provenance(),
         candidates=candidates,
     )
 
 
-def _make_snapshot(
+def build_snapshot(
+    chunk_ids: list[str] | None = None,
     *,
-    num_chunks: int = 1,
     characters_per_chunk: int = 0,
     locations_per_chunk: int = 0,
     unresolved_per_chunk: int = 0,
     display_names: list[str] | None = None,
-    **kwargs,
 ) -> ReconciliationInputSnapshot:
-    """Build a valid snapshot for testing."""
-    project_id = kwargs.get("project_id", "proj1")
-    document_id = kwargs.get("document_id", "doc1")
-    total_paragraphs = num_chunks * 5 + 5
-    source_doc = _make_source_document(
-        project_id=project_id,
-        document_id=document_id,
-        num_paragraphs=total_paragraphs,
-    )
-    source_doc_ref = _make_artifact_ref()
+    """Build a valid snapshot with production-realistic refs."""
+    if chunk_ids is None:
+        num_chunks = max(1, characters_per_chunk, locations_per_chunk, unresolved_per_chunk)
+        if num_chunks <= 1:
+            num_chunks = 1
+        chunk_ids = [f"CH001_C{c+1:03d}" for c in range(num_chunks)]
+
+    source_doc = make_source_document(num_paragraphs=len(chunk_ids) * 5 + 5)
+    source_doc_ref = make_source_document_ref()
 
     chunk_refs = []
     source_chunks = []
@@ -367,18 +403,14 @@ def _make_snapshot(
     extraction_refs = []
     report_refs = []
 
-    for c in range(num_chunks):
-        chunk_id = f"CH001_C{c+1:03d}"
+    for c, chunk_id in enumerate(chunk_ids):
         para_start = c * 5 + 1
-        para_end = c * 5 + 5
         para_ids = tuple(
-            f"CH001_P{i:04d}" for i in range(para_start, para_end + 1)
+            f"CH001_P{i:04d}" for i in range(para_start, para_start + 5)
         )
-        chunk_ref = _make_artifact_ref("source_chunk", chunk_id, 1, H2)
-        chunk = _make_source_chunk(
+        chunk_ref = make_source_chunk_ref(chunk_id)
+        chunk = make_source_chunk(
             chunk_id=chunk_id,
-            project_id=project_id,
-            document_id=document_id,
             source_document_ref=source_doc_ref,
             paragraph_ids=para_ids,
         )
@@ -386,35 +418,34 @@ def _make_snapshot(
         source_chunks.append(chunk)
 
         chars = tuple(
-            _make_character(
+            make_character(
                 candidate_id=f"cand_char_{i+1:03d}",
                 display_name_original=(
-                    display_names[(c * (characters_per_chunk + locations_per_chunk + unresolved_per_chunk) + i)]
-                    if display_names else f"Character {c}_{i}"
+                    display_names[c * 2 + i]
+                    if display_names and c * 2 + i < len(display_names)
+                    else f"Character{c}_{i}"
                 ),
-                evidence=_make_evidence(para_ids[0]),
+                evidence=make_evidence(para_ids[0]),
             )
             for i in range(characters_per_chunk)
         )
         locs = tuple(
-            _make_location(
+            make_location(
                 candidate_id=f"cand_loc_{i+1:03d}",
-                display_name_original=f"Location {c}_{i}",
-                evidence=_make_evidence(para_ids[0]),
+                display_name_original=f"Location{c}_{i}",
+                evidence=make_evidence(para_ids[0]),
             )
             for i in range(locations_per_chunk)
         )
         unres = tuple(
-            _make_unresolved(
+            make_unresolved(
                 candidate_id=f"cand_unres_{i+1:03d}",
-                evidence=_make_evidence(para_ids[0]),
+                evidence=make_evidence(para_ids[0]),
             )
             for i in range(unresolved_per_chunk)
         )
-        ext = _make_extraction(
+        ext = make_extraction(
             chunk_id=chunk_id,
-            project_id=project_id,
-            document_id=document_id,
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=chars,
@@ -422,18 +453,12 @@ def _make_snapshot(
             unresolved=unres,
         )
         extractions.append(ext)
-        extraction_refs.append(
-            _make_artifact_ref("candidate_extraction", f"ext_{c+1}", 1, H3)
-        )
-        report_refs.append(
-            _make_artifact_ref("validation_report", f"vr_{c+1}", 1, H4)
-        )
+        extraction_refs.append(make_extraction_ref(chunk_id))
+        report_refs.append(make_validation_report_ref(chunk_id))
 
-    manifest = _make_chunk_manifest(
-        project_id=project_id,
-        document_id=document_id,
-        source_document_ref=source_doc_ref,
+    manifest = make_chunk_manifest(
         chunk_refs=tuple(chunk_refs),
+        source_document_ref=source_doc_ref,
     )
 
     return ReconciliationInputSnapshot(
@@ -448,6 +473,34 @@ def _make_snapshot(
     )
 
 
+def build_single_chunk_snapshot(
+    ext: CandidateExtraction,
+    chunk_id: str = "CH001_C001",
+) -> ReconciliationInputSnapshot:
+    """Build a single-chunk snapshot for quick testing."""
+    source_doc = make_source_document(num_paragraphs=10)
+    source_doc_ref = make_source_document_ref()
+    chunk_ref = make_source_chunk_ref(chunk_id)
+    chunk = make_source_chunk(
+        chunk_id=chunk_id,
+        source_document_ref=source_doc_ref,
+    )
+    manifest = make_chunk_manifest(
+        chunk_refs=(chunk_ref,),
+        source_document_ref=source_doc_ref,
+    )
+    return ReconciliationInputSnapshot(
+        source_document=source_doc,
+        source_document_ref=source_doc_ref,
+        chunk_manifest=manifest,
+        source_chunks=(chunk,),
+        source_chunk_refs=(chunk_ref,),
+        candidate_extractions=(ext,),
+        candidate_extraction_refs=(make_extraction_ref(chunk_id),),
+        a3_validation_report_refs=(make_validation_report_ref(chunk_id),),
+    )
+
+
 # ===========================================================================
 # Normalization tests
 # ===========================================================================
@@ -455,14 +508,11 @@ def _make_snapshot(
 
 class TestNormalization:
     def test_nfkc(self):
-        # NFKC normalizes compatibility characters
-        # ﬁ (U+FB01) → fi
         assert normalize_name("\ufb01le") == "file"
 
     def test_casefold(self):
         assert normalize_name("John") == "john"
         assert normalize_name("JOHN") == "john"
-        # German ß → ss under casefold
         assert normalize_name("Straße") == "strasse"
 
     def test_strip(self):
@@ -475,7 +525,6 @@ class TestNormalization:
         assert normalize_name("John \n Smith") == "john smith"
 
     def test_punctuation_retained(self):
-        # Punctuation is NOT stripped
         assert normalize_name("Mr. Smith") == "mr. smith"
         assert normalize_name("Dr. Smith") == "dr. smith"
 
@@ -537,13 +586,11 @@ class TestBlockingTokens:
 
     def test_mr_smith(self):
         tokens = extract_blocking_tokens(("mr. smith",))
-        # "mr" and "smith" (period splits, but "mr" is 2 chars so kept)
         assert "mr" in tokens
         assert "smith" in tokens
 
     def test_chinese(self):
         tokens = extract_blocking_tokens(("林晚",))
-        # CJK characters are alphanumeric in Unicode
         assert "林晚" in tokens
 
     def test_pure_numeric_excluded(self):
@@ -558,6 +605,18 @@ class TestBlockingTokens:
         tokens = extract_blocking_tokens(("john smith", "smith john"))
         assert tokens == ("john", "smith")
         assert len(tokens) == len(set(tokens))
+
+    def test_underscore_splits(self):
+        """John_Smith → ("john", "smith"), not ("john_smith",)."""
+        tokens = extract_blocking_tokens(("john_smith",))
+        assert tokens == ("john", "smith")
+
+    def test_mixed_separators(self):
+        """Various non-alphanumeric separators all split."""
+        tokens = extract_blocking_tokens(("john-smith",))
+        assert tokens == ("john", "smith")
+        tokens = extract_blocking_tokens(("john.smith",))
+        assert tokens == ("john", "smith")
 
 
 # ===========================================================================
@@ -576,11 +635,9 @@ class TestStrongWeakKeys:
         assert is_strong_identity_key("john smith")
 
     def test_lin_wan_weak(self):
-        # 2 CJK characters → weak
         assert not is_strong_identity_key("林晚")
 
     def test_lin_wan_wan_strong(self):
-        # 3 CJK characters → strong
         assert is_strong_identity_key("林晚晚")
 
     def test_role_weak(self):
@@ -609,57 +666,42 @@ class TestStrongWeakKeys:
 # ===========================================================================
 
 
-class TestMustNotMerge:
-    def test_production_empty(self):
-        """Production v1 derived hard constraint set is empty."""
-        # Build a minimal index
-        entry = _make_index_entry("CH001_C001:cand_char_001", "character")
-        index = CandidateEntityIndex(
-            schema_version=1,
-            entries=(entry,),
-        )
-        result = derive_must_not_merge_constraints(index)
-        assert result == frozenset()
-
-    def test_event_co_participation_not_hard(self):
-        """Event participant co-occurrence does NOT create hard negative."""
-        entry1 = _make_index_entry("CH001_C001:cand_char_001", "character")
-        entry2 = _make_index_entry("CH001_C001:cand_char_002", "character")
-        index = CandidateEntityIndex(
-            schema_version=1,
-            entries=(entry1, entry2),
-        )
-        result = derive_must_not_merge_constraints(index)
-        assert result == frozenset()
-
-    def test_relationship_endpoints_not_hard(self):
-        """RelationshipCandidate source/target does NOT create hard negative."""
-        entry1 = _make_index_entry("CH001_C001:cand_char_001", "character")
-        entry2 = _make_index_entry("CH001_C001:cand_char_002", "character")
-        index = CandidateEntityIndex(
-            schema_version=1,
-            entries=(entry1, entry2),
-        )
-        result = derive_must_not_merge_constraints(index)
-        assert result == frozenset()
-
-
-def _make_index_entry(
-    ref: str, kind: str, display: str = "Test"
-) -> Any:
+def _make_index_entry(ref: str, kind: str, display: str = "Test") -> Any:
     from short_drama.story import CandidateEntityIndexEntry
 
     return CandidateEntityIndexEntry(
         candidate_ref=ref,
         candidate_kind=kind,
-        candidate_extraction_ref=_make_artifact_ref("candidate_extraction", "ext1", 1, H3),
+        candidate_extraction_ref=make_extraction_ref("CH001_C001"),
         source_order_key="000001:000000001:01:000000001:" + ref,
         display_name_original=display,
         aliases_original=(),
         descriptors_zh=(),
-        evidence_refs=_make_evidence(),
+        evidence_refs=make_evidence(),
         possible_candidate_refs=(),
     )
+
+
+class TestMustNotMerge:
+    def test_production_empty(self):
+        entry = _make_index_entry("CH001_C001:cand_char_001", "character")
+        index = CandidateEntityIndex(schema_version=1, entries=(entry,))
+        result = derive_must_not_merge_constraints(index)
+        assert result == frozenset()
+
+    def test_event_co_participation_not_hard(self):
+        e1 = _make_index_entry("CH001_C001:cand_char_001", "character")
+        e2 = _make_index_entry("CH001_C001:cand_char_002", "character")
+        index = CandidateEntityIndex(schema_version=1, entries=(e1, e2))
+        result = derive_must_not_merge_constraints(index)
+        assert result == frozenset()
+
+    def test_relationship_endpoints_not_hard(self):
+        e1 = _make_index_entry("CH001_C001:cand_char_001", "character")
+        e2 = _make_index_entry("CH001_C001:cand_char_002", "character")
+        index = CandidateEntityIndex(schema_version=1, entries=(e1, e2))
+        result = derive_must_not_merge_constraints(index)
+        assert result == frozenset()
 
 
 # ===========================================================================
@@ -669,60 +711,45 @@ def _make_index_entry(
 
 class TestSnapshotCoherence:
     def test_valid_snapshot_accepted(self):
-        snapshot = _make_snapshot(num_chunks=2, characters_per_chunk=1)
+        snapshot = build_snapshot(
+            ["CH001_C001", "CH001_C002"], characters_per_chunk=1
+        )
         result = plan_reconciliation(snapshot)
-        assert result.candidate_index.entries is not None
+        assert len(result.candidate_index.entries) == 2
 
     def test_extraction_count_mismatch(self):
-        snapshot = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        # Remove one extraction but keep the ref
-        extractions = snapshot.candidate_extractions[:1]
+        """Fewer extractions than chunks → fail closed."""
+        snapshot = build_snapshot(["CH001_C001"], characters_per_chunk=1)
+        # Create a manifest with 2 chunks but only 1 extraction
+        source_doc_ref = make_source_document_ref()
+        chunk_ref2 = make_source_chunk_ref("CH001_C002")
+        manifest = make_chunk_manifest(
+            chunk_refs=(snapshot.source_chunk_refs[0], chunk_ref2),
+            source_document_ref=source_doc_ref,
+        )
         bad_snapshot = ReconciliationInputSnapshot(
             source_document=snapshot.source_document,
-            source_document_ref=snapshot.source_document_ref,
-            chunk_manifest=snapshot.chunk_manifest,
-            source_chunks=snapshot.source_chunks,
-            source_chunk_refs=snapshot.source_chunk_refs,
-            candidate_extractions=extractions,
-            candidate_extraction_refs=snapshot.candidate_extraction_refs,
-            a3_validation_report_refs=snapshot.a3_validation_report_refs,
-        )
-        # Add a second chunk ref to manifest but only 1 extraction
-        manifest = ChunkManifest(
-            schema_version=1,
-            project_id="proj1",
-            document_id="doc1",
-            source_document_ref=snapshot.source_document_ref,
-            planner_version=CHUNK_PLANNER_VERSION,
-            profile=snapshot.chunk_manifest.profile,
-            chunk_refs=(snapshot.source_chunk_refs[0],
-                        _make_artifact_ref("source_chunk", "CH001_C002", 1, H2)),
-            chunk_count=2,
-            coverage=ChunkCoverage(
-                paragraphs_total=5, owned_once=5, unowned=0, multiply_owned=0
-            ),
-            state="CHUNKING_COMPLETE",
-        )
-        bad_snapshot2 = ReconciliationInputSnapshot(
-            source_document=snapshot.source_document,
-            source_document_ref=snapshot.source_document_ref,
+            source_document_ref=source_doc_ref,
             chunk_manifest=manifest,
-            source_chunks=snapshot.source_chunks + (
-                _make_source_chunk(chunk_id="CH001_C002"),
-            ),
-            source_chunk_refs=(snapshot.source_chunk_refs[0],
-                               _make_artifact_ref("source_chunk", "CH001_C002", 1, H2)),
+            source_chunks=(snapshot.source_chunks[0],
+                           make_source_chunk(chunk_id="CH001_C002", source_document_ref=source_doc_ref)),
+            source_chunk_refs=(snapshot.source_chunk_refs[0], chunk_ref2),
             candidate_extractions=snapshot.candidate_extractions,  # only 1
             candidate_extraction_refs=snapshot.candidate_extraction_refs,
             a3_validation_report_refs=snapshot.a3_validation_report_refs,
         )
         with pytest.raises(ReconciliationPlanningError, match="len"):
-            plan_reconciliation(bad_snapshot2)
+            plan_reconciliation(bad_snapshot)
 
     def test_source_ref_mismatch(self):
-        snapshot = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        # Change the source_document_ref in the snapshot to a different one
-        bad_ref = _make_artifact_ref("source_document", "doc_OTHER", 1, H)
+        """Wrong source_document_ref in manifest vs snapshot → fail closed."""
+        snapshot = build_snapshot(["CH001_C001"], characters_per_chunk=1)
+        bad_ref = ArtifactRef(
+            artifact_type="source_document",
+            artifact_id="proj_OTHER.doc_OTHER",
+            revision=1,
+            content_hash=H,
+        )
         bad_snapshot = ReconciliationInputSnapshot(
             source_document=snapshot.source_document,
             source_document_ref=bad_ref,
@@ -736,89 +763,285 @@ class TestSnapshotCoherence:
         with pytest.raises(ReconciliationPlanningError):
             plan_reconciliation(bad_snapshot)
 
-    def test_source_chunk_mismatch(self):
-        snapshot = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        # Swap chunk order
-        bad_chunks = (snapshot.source_chunks[0],)
-        bad_chunk_refs = (
-            _make_artifact_ref("source_chunk", "CH099_C999", 1, H2),
+    def test_source_chunk_bare_id_rejected(self):
+        """A source_chunk ref with bare CH001_C001 artifact_id (not production
+        format) is rejected."""
+        source_doc_ref = make_source_document_ref()
+        bad_chunk_ref = make_fake_artifact_ref(
+            artifact_type="source_chunk",
+            artifact_id="CH001_C001",  # bare, not production format
         )
-        # Need matching manifest
+        chunk = make_source_chunk(
+            chunk_id="CH001_C001", source_document_ref=source_doc_ref
+        )
         manifest = ChunkManifest(
             schema_version=1,
-            project_id="proj1",
-            document_id="doc1",
-            source_document_ref=snapshot.source_document_ref,
+            project_id=PROJECT_ID,
+            document_id=DOCUMENT_ID,
+            source_document_ref=source_doc_ref,
             planner_version=CHUNK_PLANNER_VERSION,
-            profile=snapshot.chunk_manifest.profile,
-            chunk_refs=bad_chunk_refs,
+            profile=ChunkPlanningProfile(
+                schema_version=1,
+                profile_id=PROFILE_ID,
+                token_counter=TOKEN_COUNTER_ID,
+                ownership_token_budget=100,
+                context_overlap_token_budget=20,
+                context_token_budget=200,
+            ),
+            chunk_refs=(bad_chunk_ref,),
             chunk_count=1,
             coverage=ChunkCoverage(
-                paragraphs_total=5, owned_once=5, unowned=0, multiply_owned=0
+                paragraphs_total=10, owned_once=10, unowned=0, multiply_owned=0
             ),
             state="CHUNKING_COMPLETE",
         )
-        bad_snapshot = ReconciliationInputSnapshot(
-            source_document=snapshot.source_document,
-            source_document_ref=snapshot.source_document_ref,
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=bad_chunk_ref,
+            characters=(make_character(),),
+        )
+        snapshot = ReconciliationInputSnapshot(
+            source_document=make_source_document(),
+            source_document_ref=source_doc_ref,
             chunk_manifest=manifest,
-            source_chunks=bad_chunks,
-            source_chunk_refs=bad_chunk_refs,
-            candidate_extractions=snapshot.candidate_extractions,
-            candidate_extraction_refs=snapshot.candidate_extraction_refs,
-            a3_validation_report_refs=snapshot.a3_validation_report_refs,
+            source_chunks=(chunk,),
+            source_chunk_refs=(bad_chunk_ref,),
+            candidate_extractions=(ext,),
+            candidate_extraction_refs=(make_extraction_ref("CH001_C001"),),
+            a3_validation_report_refs=(make_validation_report_ref("CH001_C001"),),
         )
-        with pytest.raises(ReconciliationPlanningError):
-            plan_reconciliation(bad_snapshot)
+        with pytest.raises(ReconciliationPlanningError, match="artifact_id"):
+            plan_reconciliation(snapshot)
 
-    def test_extraction_profile_mismatch(self):
-        """Different extraction_profile_id across extractions is rejected."""
-        snapshot = _make_snapshot(num_chunks=2, characters_per_chunk=1)
-        # Create a second extraction with different profile
-        ext2_bad = _make_extraction(
-            chunk_id="CH001_C002",
-            source_document_ref=snapshot.source_document_ref,
-            source_chunk_ref=snapshot.source_chunk_refs[1],
-            characters=(
-                _make_character(
-                    candidate_id="cand_char_001",
-                    evidence=_make_evidence("CH001_P0006"),
-                ),
-            ),
-            extraction_profile_id="different-profile",
+    def test_wrong_chunk_profile_artifact_id_rejected(self):
+        """A source_chunk ref with wrong profile in artifact_id is rejected."""
+        source_doc_ref = make_source_document_ref()
+        # Use a different profile_id in the artifact_id
+        bad_chunk_ref = ArtifactRef(
+            artifact_type="source_chunk",
+            artifact_id=f"{PROJECT_ID}.{DOCUMENT_ID}.wrong-profile.ch001_c001",
+            revision=1,
+            content_hash=H2,
         )
-        bad_extractions = (snapshot.candidate_extractions[0], ext2_bad)
+        chunk = make_source_chunk(
+            chunk_id="CH001_C001", source_document_ref=source_doc_ref
+        )
+        manifest = ChunkManifest(
+            schema_version=1,
+            project_id=PROJECT_ID,
+            document_id=DOCUMENT_ID,
+            source_document_ref=source_doc_ref,
+            planner_version=CHUNK_PLANNER_VERSION,
+            profile=ChunkPlanningProfile(
+                schema_version=1,
+                profile_id=PROFILE_ID,
+                token_counter=TOKEN_COUNTER_ID,
+                ownership_token_budget=100,
+                context_overlap_token_budget=20,
+                context_token_budget=200,
+            ),
+            chunk_refs=(bad_chunk_ref,),
+            chunk_count=1,
+            coverage=ChunkCoverage(
+                paragraphs_total=10, owned_once=10, unowned=0, multiply_owned=0
+            ),
+            state="CHUNKING_COMPLETE",
+        )
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=bad_chunk_ref,
+            characters=(make_character(),),
+        )
+        snapshot = ReconciliationInputSnapshot(
+            source_document=make_source_document(),
+            source_document_ref=source_doc_ref,
+            chunk_manifest=manifest,
+            source_chunks=(chunk,),
+            source_chunk_refs=(bad_chunk_ref,),
+            candidate_extractions=(ext,),
+            candidate_extraction_refs=(make_extraction_ref("CH001_C001"),),
+            a3_validation_report_refs=(make_validation_report_ref("CH001_C001"),),
+        )
+        with pytest.raises(ReconciliationPlanningError, match="artifact_id"):
+            plan_reconciliation(snapshot)
+
+    def test_chunk_profile_mismatch_rejected(self):
+        """ext.chunk_profile_id != manifest.profile.profile_id → rejected."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        chunk = make_source_chunk(
+            chunk_id="CH001_C001", source_document_ref=source_doc_ref
+        )
+        manifest = make_chunk_manifest(
+            chunk_refs=(chunk_ref,), source_document_ref=source_doc_ref
+        )
+        # Extraction with wrong chunk_profile_id
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            characters=(make_character(),),
+        )
+        # Override chunk_profile_id via a new extraction
+        from dataclasses import replace
+        ext_bad = CandidateExtraction(
+            schema_version=1,
+            project_id=PROJECT_ID,
+            document_id=DOCUMENT_ID,
+            chunk_profile_id="wrong-profile",  # mismatch!
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            extraction_profile_id=EXTRACTION_PROFILE_ID,
+            extraction_profile_hash=H,
+            generation_provenance=make_provenance(),
+            candidates=CandidatePayload(characters=(make_character(),)),
+        )
+        snapshot = ReconciliationInputSnapshot(
+            source_document=make_source_document(),
+            source_document_ref=source_doc_ref,
+            chunk_manifest=manifest,
+            source_chunks=(chunk,),
+            source_chunk_refs=(chunk_ref,),
+            candidate_extractions=(ext_bad,),
+            candidate_extraction_refs=(make_extraction_ref("CH001_C001"),),
+            a3_validation_report_refs=(make_validation_report_ref("CH001_C001"),),
+        )
+        with pytest.raises(ReconciliationPlanningError, match="chunk_profile_id"):
+            plan_reconciliation(snapshot)
+
+    def test_extraction_artifact_id_mismatch_rejected(self):
+        """CandidateExtraction ref with wrong artifact_id → rejected."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        chunk = make_source_chunk(
+            chunk_id="CH001_C001", source_document_ref=source_doc_ref
+        )
+        manifest = make_chunk_manifest(
+            chunk_refs=(chunk_ref,), source_document_ref=source_doc_ref
+        )
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            characters=(make_character(),),
+        )
+        # Use a wrong artifact_id for the extraction ref
+        bad_ext_ref = ArtifactRef(
+            artifact_type="candidate_extraction",
+            artifact_id="wrong.artifact.id",
+            revision=1,
+            content_hash=H3,
+        )
+        snapshot = ReconciliationInputSnapshot(
+            source_document=make_source_document(),
+            source_document_ref=source_doc_ref,
+            chunk_manifest=manifest,
+            source_chunks=(chunk,),
+            source_chunk_refs=(chunk_ref,),
+            candidate_extractions=(ext,),
+            candidate_extraction_refs=(bad_ext_ref,),
+            a3_validation_report_refs=(make_validation_report_ref("CH001_C001"),),
+        )
+        with pytest.raises(ReconciliationPlanningError, match="artifact_id"):
+            plan_reconciliation(snapshot)
+
+    def test_swapped_extraction_refs_rejected(self):
+        """Swapped CandidateExtraction refs (position mismatch) → rejected."""
+        snapshot = build_snapshot(
+            ["CH001_C001", "CH001_C002"], characters_per_chunk=1
+        )
+        # Swap the extraction refs
+        swapped_refs = (
+            snapshot.candidate_extraction_refs[1],
+            snapshot.candidate_extraction_refs[0],
+        )
         bad_snapshot = ReconciliationInputSnapshot(
             source_document=snapshot.source_document,
             source_document_ref=snapshot.source_document_ref,
             chunk_manifest=snapshot.chunk_manifest,
             source_chunks=snapshot.source_chunks,
             source_chunk_refs=snapshot.source_chunk_refs,
-            candidate_extractions=bad_extractions,
-            candidate_extraction_refs=snapshot.candidate_extraction_refs,
+            candidate_extractions=snapshot.candidate_extractions,
+            candidate_extraction_refs=swapped_refs,
             a3_validation_report_refs=snapshot.a3_validation_report_refs,
         )
-        with pytest.raises(ReconciliationPlanningError, match="profile"):
+        with pytest.raises(ReconciliationPlanningError, match="artifact_id"):
             plan_reconciliation(bad_snapshot)
 
     def test_manifest_order_mismatch(self):
-        """Source chunk refs not matching manifest order is rejected."""
-        snapshot = _make_snapshot(num_chunks=2, characters_per_chunk=1)
-        # Swap the chunk refs
-        swapped_refs = (snapshot.source_chunk_refs[1], snapshot.source_chunk_refs[0])
-        # But keep manifest order the same
+        """Source chunk refs not matching manifest order → rejected."""
+        snapshot = build_snapshot(
+            ["CH001_C001", "CH001_C002"], characters_per_chunk=1
+        )
+        swapped_refs = (
+            snapshot.source_chunk_refs[1],
+            snapshot.source_chunk_refs[0],
+        )
         bad_snapshot = ReconciliationInputSnapshot(
             source_document=snapshot.source_document,
             source_document_ref=snapshot.source_document_ref,
             chunk_manifest=snapshot.chunk_manifest,
             source_chunks=snapshot.source_chunks,
-            source_chunk_refs=swapped_refs,  # wrong order
+            source_chunk_refs=swapped_refs,
             candidate_extractions=snapshot.candidate_extractions,
             candidate_extraction_refs=snapshot.candidate_extraction_refs,
             a3_validation_report_refs=snapshot.a3_validation_report_refs,
         )
         with pytest.raises(ReconciliationPlanningError, match="chunk_refs"):
             plan_reconciliation(bad_snapshot)
+
+    def test_extraction_profile_mismatch(self):
+        """Different extraction_profile_id across extractions → rejected."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ref1 = make_source_chunk_ref("CH001_C001")
+        chunk_ref2 = make_source_chunk_ref("CH001_C002")
+        chunk1 = make_source_chunk(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(1, 6)),
+        )
+        chunk2 = make_source_chunk(
+            chunk_id="CH001_C002",
+            source_document_ref=source_doc_ref,
+            paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(6, 11)),
+        )
+        manifest = make_chunk_manifest(
+            chunk_refs=(chunk_ref1, chunk_ref2), source_document_ref=source_doc_ref
+        )
+        ext1 = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref1,
+            characters=(make_character(),),
+        )
+        ext2 = make_extraction(
+            chunk_id="CH001_C002",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref2,
+            characters=(make_character(),),
+            extraction_profile_id="different-profile",
+        )
+        snapshot = ReconciliationInputSnapshot(
+            source_document=make_source_document(num_paragraphs=15),
+            source_document_ref=source_doc_ref,
+            chunk_manifest=manifest,
+            source_chunks=(chunk1, chunk2),
+            source_chunk_refs=(chunk_ref1, chunk_ref2),
+            candidate_extractions=(ext1, ext2),
+            candidate_extraction_refs=(
+                make_extraction_ref("CH001_C001"),
+                make_extraction_ref("CH001_C002"),
+            ),
+            a3_validation_report_refs=(
+                make_validation_report_ref("CH001_C001"),
+                make_validation_report_ref("CH001_C002"),
+            ),
+        )
+        with pytest.raises(ReconciliationPlanningError, match="profile"):
+            plan_reconciliation(snapshot)
 
 
 # ===========================================================================
@@ -828,8 +1051,8 @@ class TestSnapshotCoherence:
 
 class TestCandidateIndex:
     def test_all_kinds_indexed(self):
-        snapshot = _make_snapshot(
-            num_chunks=1,
+        snapshot = build_snapshot(
+            ["CH001_C001"],
             characters_per_chunk=2,
             locations_per_chunk=1,
             unresolved_per_chunk=1,
@@ -840,119 +1063,22 @@ class TestCandidateIndex:
         assert kinds.count("location") == 1
         assert sum(1 for k in kinds if k.startswith("unresolved")) == 1
 
-    def test_fact_event_relationship_not_indexed(self):
-        """Fact/Event/Relationship candidates are NOT indexed."""
-        from short_drama.story import FactCandidate, EventCandidate, RelationshipCandidate
-
-        ext = _make_extraction(
-            characters=(_make_character(),),
-            facts=(
-                FactCandidate(
-                    candidate_id="cand_fact_001",
-                    fact_type="identity",
-                    statement_zh="test",
-                    subject_refs=(),
-                    object_refs=(),
-                    evidence_strength="explicit",
-                    evidence=_make_evidence(),
-                ),
-            ),
-            events=(
-                EventCandidate(
-                    candidate_id="cand_evt_001",
-                    summary_zh="test event",
-                    participant_refs=(),
-                    location_refs=(),
-                    temporal_mode="normal",
-                    evidence_strength="explicit",
-                    evidence=_make_evidence(),
-                ),
-            ),
-            relationships=(
-                RelationshipCandidate(
-                    candidate_id="cand_rel_001",
-                    source_ref="cand_char_001",
-                    target_ref="cand_char_001",
-                    relationship_type_zh="friend",
-                    state_zh=None,
-                    direction="symmetric",
-                    evidence_strength="explicit",
-                    evidence=_make_evidence(),
-                ),
-            ),
-        )
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        snapshot = ReconciliationInputSnapshot(
-            source_document=_make_source_document(num_paragraphs=10),
-            source_document_ref=source_doc_ref,
-            chunk_manifest=_make_chunk_manifest(
-                source_document_ref=source_doc_ref,
-                chunk_refs=(chunk_ref,),
-            ),
-            source_chunks=(
-                _make_source_chunk(source_document_ref=source_doc_ref),
-            ),
-            source_chunk_refs=(chunk_ref,),
-            candidate_extractions=(
-                _make_extraction(
-                    source_document_ref=source_doc_ref,
-                    source_chunk_ref=chunk_ref,
-                    characters=(_make_character(),),
-                ),
-            ),
-            candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-            ),
-            a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-            ),
-        )
-        result = plan_reconciliation(snapshot)
-        # Only the character is indexed, not fact/event/relationship
-        assert len(result.candidate_index.entries) == 1
-        assert result.candidate_index.entries[0].candidate_kind == "character"
-
     def test_unresolved_possible_refs_globalized(self):
-        snapshot = _make_snapshot(
-            num_chunks=1,
-            characters_per_chunk=1,
-            unresolved_per_chunk=1,
-        )
-        # The unresolved candidate has possible_candidate_refs pointing to
-        # local refs. Let's build a snapshot where this works.
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
-            characters=(_make_character(candidate_id="cand_char_001"),),
+            characters=(make_character(candidate_id="cand_char_001"),),
             unresolved=(
-                _make_unresolved(
+                make_unresolved(
                     possible_candidate_refs=("cand_char_001",),
                 ),
             ),
         )
-        snapshot = ReconciliationInputSnapshot(
-            source_document=source_doc,
-            source_document_ref=source_doc_ref,
-            chunk_manifest=_make_chunk_manifest(
-                source_document_ref=source_doc_ref,
-                chunk_refs=(chunk_ref,),
-            ),
-            source_chunks=(_make_source_chunk(source_document_ref=source_doc_ref),),
-            source_chunk_refs=(chunk_ref,),
-            candidate_extractions=(ext,),
-            candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-            ),
-            a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-            ),
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
-        # Find the unresolved entry
         unres_entries = [
             e for e in result.candidate_index.entries
             if e.candidate_kind.startswith("unresolved_")
@@ -963,55 +1089,35 @@ class TestCandidateIndex:
         )
 
     def test_source_order_key_deterministic(self):
-        """source_order_key uses the exact frozen format."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
-                    evidence=_make_evidence("CH001_P0003"),
+                    evidence=make_evidence("CH001_P0003"),
                 ),
             ),
         )
-        snapshot = ReconciliationInputSnapshot(
-            source_document=source_doc,
-            source_document_ref=source_doc_ref,
-            chunk_manifest=_make_chunk_manifest(
-                source_document_ref=source_doc_ref,
-                chunk_refs=(chunk_ref,),
-            ),
-            source_chunks=(_make_source_chunk(source_document_ref=source_doc_ref),),
-            source_chunk_refs=(chunk_ref,),
-            candidate_extractions=(ext,),
-            candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-            ),
-            a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-            ),
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         entry = result.candidate_index.entries[0]
-        # chunk_ordinal=1, paragraph_ordinal=3, category=character(1),
-        # candidate_suffix=2, global_ref=CH001_C001:cand_char_002
-        assert entry.source_order_key == "000001:000000003:01:000000002:CH001_C001:cand_char_002"
+        assert entry.source_order_key == (
+            "000001:000000003:01:000000002:CH001_C001:cand_char_002"
+        )
 
     def test_earliest_evidence_paragraph_controls_ordinal(self):
-        """When a candidate has multiple evidence paragraphs, the earliest one
-        (by position in SourceDocument.paragraphs) controls the ordinal."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        # Evidence at paragraph 5 and paragraph 2 → ordinal should be 2
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     evidence=(
                         EvidenceRef(
                             paragraph_id="CH001_P0005",
@@ -1029,69 +1135,51 @@ class TestCandidateIndex:
                 ),
             ),
         )
-        snapshot = ReconciliationInputSnapshot(
-            source_document=source_doc,
-            source_document_ref=source_doc_ref,
-            chunk_manifest=_make_chunk_manifest(
-                source_document_ref=source_doc_ref,
-                chunk_refs=(chunk_ref,),
-            ),
-            source_chunks=(_make_source_chunk(source_document_ref=source_doc_ref),),
-            source_chunk_refs=(chunk_ref,),
-            candidate_extractions=(ext,),
-            candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-            ),
-            a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-            ),
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         entry = result.candidate_index.entries[0]
-        # Paragraph 2 is earlier than paragraph 5
         assert ":000000002:" in entry.source_order_key
 
     def test_entries_sorted_by_source_order_key(self):
-        """Final entries are sorted by source_order_key."""
-        snapshot = _make_snapshot(
-            num_chunks=2,
-            characters_per_chunk=1,
+        snapshot = build_snapshot(
+            ["CH001_C001", "CH001_C002"], characters_per_chunk=1
         )
         result = plan_reconciliation(snapshot)
         keys = [e.source_order_key for e in result.candidate_index.entries]
         assert keys == sorted(keys)
 
     def test_evidence_paragraph_not_found_fails(self):
-        """If evidence paragraph doesn't exist in SourceDocument, fail closed."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=3)
-        # Evidence points to a paragraph that doesn't exist
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
-                    evidence=_make_evidence("CH001_P9999"),
+                make_character(
+                    evidence=make_evidence("CH001_P9999"),
                 ),
             ),
+        )
+        # Use a source doc with only 3 paragraphs
+        source_doc = make_source_document(num_paragraphs=3)
+        chunk = make_source_chunk(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            paragraph_ids=("CH001_P0001", "CH001_P0002"),
+        )
+        manifest = make_chunk_manifest(
+            chunk_refs=(chunk_ref,), source_document_ref=source_doc_ref
         )
         snapshot = ReconciliationInputSnapshot(
             source_document=source_doc,
             source_document_ref=source_doc_ref,
-            chunk_manifest=_make_chunk_manifest(
-                source_document_ref=source_doc_ref,
-                chunk_refs=(chunk_ref,),
-            ),
-            source_chunks=(_make_source_chunk(source_document_ref=source_doc_ref),),
+            chunk_manifest=manifest,
+            source_chunks=(chunk,),
             source_chunk_refs=(chunk_ref,),
             candidate_extractions=(ext,),
-            candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-            ),
-            a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-            ),
+            candidate_extraction_refs=(make_extraction_ref("CH001_C001"),),
+            a3_validation_report_refs=(make_validation_report_ref("CH001_C001"),),
         )
         with pytest.raises(ReconciliationPlanningError, match="paragraph"):
             plan_reconciliation(snapshot)
@@ -1104,29 +1192,26 @@ class TestCandidateIndex:
 
 class TestBlocking:
     def test_exact_identity_key_produces_block(self):
-        """Two characters with the same display name in same chunk get blocked."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.pair_plans) == 1
         plan = result.pair_plans[0]
@@ -1134,286 +1219,255 @@ class TestBlocking:
         assert plan.shared_identity_keys == ("john smith",)
 
     def test_token_overlap_produces_block(self):
-        """Two characters sharing a token (but not exact key) get blocked."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Williams",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
-        # They share token "john" but not exact key
         assert len(result.pair_plans) == 1
         plan = result.pair_plans[0]
         assert SIGNAL_IDENTITY_TOKEN_OVERLAP in plan.signals
         assert "john" in plan.shared_tokens
 
     def test_adjacent_chunk_produces_block(self):
-        """Characters in adjacent chunks get blocked."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref1 = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        chunk_ref2 = _make_artifact_ref("source_chunk", "CH001_C002", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=12)
-
-        ext1 = _make_extraction(
+        """Characters in adjacent chunks get blocked by adjacency."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ref1 = make_source_chunk_ref("CH001_C001")
+        chunk_ref2 = make_source_chunk_ref("CH001_C002")
+        ext1 = make_extraction(
             chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref1,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="Alice",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
             ),
         )
-        ext2 = _make_extraction(
+        ext2 = make_extraction(
             chunk_id="CH001_C002",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref2,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="Bob",
-                    evidence=_make_evidence("CH001_P0006"),
+                    evidence=make_evidence("CH001_P0006"),
                 ),
             ),
         )
-        manifest = _make_chunk_manifest(
+        snapshot = build_snapshot(
+            ["CH001_C001", "CH001_C002"], characters_per_chunk=0
+        )
+        # Override with our specific extractions
+        source_doc = make_source_document(num_paragraphs=15)
+        chunk1 = make_source_chunk(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
-            chunk_refs=(chunk_ref1, chunk_ref2),
+            paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(1, 6)),
+        )
+        chunk2 = make_source_chunk(
+            chunk_id="CH001_C002",
+            source_document_ref=source_doc_ref,
+            paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(6, 11)),
+        )
+        manifest = make_chunk_manifest(
+            chunk_refs=(chunk_ref1, chunk_ref2), source_document_ref=source_doc_ref
         )
         snapshot = ReconciliationInputSnapshot(
             source_document=source_doc,
             source_document_ref=source_doc_ref,
             chunk_manifest=manifest,
-            source_chunks=(
-                _make_source_chunk(
-                    chunk_id="CH001_C001",
-                    source_document_ref=source_doc_ref,
-                    paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(1, 6)),
-                ),
-                _make_source_chunk(
-                    chunk_id="CH001_C002",
-                    source_document_ref=source_doc_ref,
-                    paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(6, 11)),
-                ),
-            ),
+            source_chunks=(chunk1, chunk2),
             source_chunk_refs=(chunk_ref1, chunk_ref2),
             candidate_extractions=(ext1, ext2),
             candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-                _make_artifact_ref("candidate_extraction", "ext2", 1, H3),
+                make_extraction_ref("CH001_C001"),
+                make_extraction_ref("CH001_C002"),
             ),
             a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-                _make_artifact_ref("validation_report", "vr2", 1, H4),
+                make_validation_report_ref("CH001_C001"),
+                make_validation_report_ref("CH001_C002"),
             ),
         )
         result = plan_reconciliation(snapshot)
-        # Alice and Bob are in adjacent chunks → blocked by adjacency
         assert len(result.pair_plans) == 1
         plan = result.pair_plans[0]
         assert SIGNAL_ADJACENT_CHUNK in plan.signals
-        # No exact key or token overlap
         assert SIGNAL_EXACT_IDENTITY_KEY not in plan.signals
         assert SIGNAL_IDENTITY_TOKEN_OVERLAP not in plan.signals
 
     def test_distant_no_signal_absent(self):
-        """Characters in distant chunks with no shared signals are NOT blocked."""
-        # Use 3 chunks so chunk 1 and chunk 3 are not adjacent
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref1 = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        chunk_ref2 = _make_artifact_ref("source_chunk", "CH001_C002", 1, H2)
-        chunk_ref3 = _make_artifact_ref("source_chunk", "CH001_C003", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=20)
-
-        ext1 = _make_extraction(
-            chunk_id="CH001_C001",
-            source_document_ref=source_doc_ref,
-            source_chunk_ref=chunk_ref1,
-            characters=(
-                _make_character(
-                    candidate_id="cand_char_001",
-                    display_name_original="Alice",
-                    evidence=_make_evidence("CH001_P0001"),
+        """Characters in chunks distance 2 apart with no shared signals → NOT blocked."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ids = ["CH001_C001", "CH001_C002", "CH001_C003"]
+        source_doc = make_source_document(num_paragraphs=20)
+        chunk_refs = [make_source_chunk_ref(cid) for cid in chunk_ids]
+        chunks = [
+            make_source_chunk(
+                chunk_id=cid,
+                source_document_ref=source_doc_ref,
+                paragraph_ids=tuple(
+                    f"CH001_P{i:04d}" for i in range(c * 5 + 1, c * 5 + 6)
                 ),
-            ),
-        )
-        ext2 = _make_extraction(
-            chunk_id="CH001_C002",
-            source_document_ref=source_doc_ref,
-            source_chunk_ref=chunk_ref2,
-            characters=(),
-        )
-        ext3 = _make_extraction(
-            chunk_id="CH001_C003",
-            source_document_ref=source_doc_ref,
-            source_chunk_ref=chunk_ref3,
-            characters=(
-                _make_character(
-                    candidate_id="cand_char_001",
-                    display_name_original="Bob",
-                    evidence=_make_evidence("CH001_P0016"),
-                ),
-            ),
-        )
-        manifest = _make_chunk_manifest(
-            source_document_ref=source_doc_ref,
-            chunk_refs=(chunk_ref1, chunk_ref2, chunk_ref3),
+            )
+            for c, cid in enumerate(chunk_ids)
+        ]
+        exts = []
+        for c, (cid, cref) in enumerate(zip(chunk_ids, chunk_refs)):
+            if c == 0:
+                exts.append(make_extraction(
+                    chunk_id=cid,
+                    source_document_ref=source_doc_ref,
+                    source_chunk_ref=cref,
+                    characters=(make_character(
+                        candidate_id="cand_char_001",
+                        display_name_original="Alice",
+                        evidence=make_evidence(f"CH001_P{c*5+1:04d}"),
+                    ),),
+                ))
+            elif c == 2:
+                exts.append(make_extraction(
+                    chunk_id=cid,
+                    source_document_ref=source_doc_ref,
+                    source_chunk_ref=cref,
+                    characters=(make_character(
+                        candidate_id="cand_char_001",
+                        display_name_original="Bob",
+                        evidence=make_evidence(f"CH001_P{c*5+1:04d}"),
+                    ),),
+                ))
+            else:
+                exts.append(make_extraction(
+                    chunk_id=cid,
+                    source_document_ref=source_doc_ref,
+                    source_chunk_ref=cref,
+                ))
+        manifest = make_chunk_manifest(
+            chunk_refs=tuple(chunk_refs), source_document_ref=source_doc_ref
         )
         snapshot = ReconciliationInputSnapshot(
             source_document=source_doc,
             source_document_ref=source_doc_ref,
             chunk_manifest=manifest,
-            source_chunks=(
-                _make_source_chunk(
-                    chunk_id="CH001_C001",
-                    source_document_ref=source_doc_ref,
-                    paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(1, 6)),
-                ),
-                _make_source_chunk(
-                    chunk_id="CH001_C002",
-                    source_document_ref=source_doc_ref,
-                    paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(6, 11)),
-                ),
-                _make_source_chunk(
-                    chunk_id="CH001_C003",
-                    source_document_ref=source_doc_ref,
-                    paragraph_ids=tuple(f"CH001_P{i:04d}" for i in range(11, 16)),
-                ),
+            source_chunks=tuple(chunks),
+            source_chunk_refs=tuple(chunk_refs),
+            candidate_extractions=tuple(exts),
+            candidate_extraction_refs=tuple(
+                make_extraction_ref(cid) for cid in chunk_ids
             ),
-            source_chunk_refs=(chunk_ref1, chunk_ref2, chunk_ref3),
-            candidate_extractions=(ext1, ext2, ext3),
-            candidate_extraction_refs=(
-                _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-                _make_artifact_ref("candidate_extraction", "ext2", 1, H3),
-                _make_artifact_ref("candidate_extraction", "ext3", 1, H3),
-            ),
-            a3_validation_report_refs=(
-                _make_artifact_ref("validation_report", "vr1", 1, H4),
-                _make_artifact_ref("validation_report", "vr2", 1, H4),
-                _make_artifact_ref("validation_report", "vr3", 1, H4),
+            a3_validation_report_refs=tuple(
+                make_validation_report_ref(cid) for cid in chunk_ids
             ),
         )
         result = plan_reconciliation(snapshot)
-        # Alice (chunk 1) and Bob (chunk 3) are distance 2 apart → NOT adjacent
-        # No shared identity keys or tokens
+        # Alice (chunk 1) and Bob (chunk 3) are distance 2 apart → NOT blocked
         assert len(result.pair_plans) == 0
 
     def test_char_loc_cross_type_absent(self):
         """Character and location are never paired."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="Test",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
             ),
             locations=(
-                _make_location(
+                make_location(
                     candidate_id="cand_loc_001",
                     display_name_original="Test",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
-        # Even though they share the name "Test", char and loc are NOT paired
         assert len(result.pair_plans) == 0
 
     def test_unresolved_never_paired(self):
         """Unresolved candidates never enter pair plans."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
             unresolved=(
-                _make_unresolved(
+                make_unresolved(
                     candidate_id="cand_unres_001",
                     mention_original="John Smith",
-                    evidence=_make_evidence("CH001_P0003"),
+                    evidence=make_evidence("CH001_P0003"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
-        # Only the char-char pair exists, not unresolved-char
         assert len(result.pair_plans) == 1
         for plan in result.pair_plans:
             assert "cand_unres" not in plan.left_candidate_ref
             assert "cand_unres" not in plan.right_candidate_ref
 
     def test_signals_deduplicated_sorted(self):
-        """Signals in a pair plan are deduplicated and lexically sorted."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        # Two chars with same name in same chunk → exact_key + token + adjacency
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.pair_plans) == 1
         plan = result.pair_plans[0]
-        # Should have all three signals (same chunk = adjacent, exact key, token overlap)
         assert plan.signals == tuple(sorted(plan.signals))
         assert len(plan.signals) == len(set(plan.signals))
 
@@ -1425,33 +1479,29 @@ class TestBlocking:
 
 class TestPairState:
     def test_strong_exact_overlap_auto_same(self):
-        """Shared strong exact identity key → auto_same."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.pair_plans) == 1
         assert result.pair_plans[0].state == PAIR_STATE_AUTO_SAME
-        # Should generate a deterministic decision
         assert len(result.decisions) == 1
         dec = result.decisions[0]
         assert dec.decision == "same_entity"
@@ -1462,87 +1512,76 @@ class TestPairState:
         assert dec.generation_provenance is None
 
     def test_weak_exact_overlap_semantic(self):
-        """Shared weak exact identity key → needs_semantic_decision."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.pair_plans) == 1
-        # "john" is weak (single token, no CJK threshold)
         assert result.pair_plans[0].state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
 
     def test_token_only_semantic(self):
-        """Token-only overlap → needs_semantic_decision."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Williams",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.pair_plans) == 1
-        # Token overlap only, no exact strong key
         assert result.pair_plans[0].state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
 
     def test_adjacency_only_semantic(self):
-        """Adjacency-only (same chunk, no shared name) → needs_semantic_decision."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="Alice",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="Bob",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.pair_plans) == 1
         assert result.pair_plans[0].state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
@@ -1556,142 +1595,227 @@ class TestPairState:
 
 class TestMustNotMergeOverride:
     def test_synthetic_hard_constraint_overrides_auto_same(self):
-        """Injected hard constraint overrides auto_same, proving precedence."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
-        )
-        # Inject a hard constraint for this pair
+        snapshot = build_single_chunk_snapshot(ext)
         hard = frozenset({
             ("CH001_C001:cand_char_001", "CH001_C001:cand_char_002"),
         })
         result = plan_reconciliation(snapshot, must_not_merge=hard)
         assert len(result.pair_plans) == 1
         plan = result.pair_plans[0]
-        # Hard constraint overrides auto_same
         assert plan.state == PAIR_STATE_MUST_NOT_MERGE
         assert SIGNAL_HARD_MUST_NOT_MERGE in plan.signals
-        # Decision should be different_entity
         assert len(result.decisions) == 1
         assert result.decisions[0].decision == "different_entity"
         assert result.decisions[0].reason_code == "hard_must_not_merge"
 
+    def test_reversed_hard_constraint_canonicalized(self):
+        """Reversed synthetic hard pair → still must_not_merge."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            characters=(
+                make_character(
+                    candidate_id="cand_char_001",
+                    display_name_original="John Smith",
+                    evidence=make_evidence("CH001_P0001"),
+                ),
+                make_character(
+                    candidate_id="cand_char_002",
+                    display_name_original="John Smith",
+                    evidence=make_evidence("CH001_P0002"),
+                ),
+            ),
+        )
+        snapshot = build_single_chunk_snapshot(ext)
+        # Reversed: right comes before left
+        hard = frozenset({
+            ("CH001_C001:cand_char_002", "CH001_C001:cand_char_001"),
+        })
+        result = plan_reconciliation(snapshot, must_not_merge=hard)
+        assert len(result.pair_plans) == 1
+        assert result.pair_plans[0].state == PAIR_STATE_MUST_NOT_MERGE
+
+    def test_same_ref_hard_constraint_rejected(self):
+        """left == right in hard constraint → rejected."""
+        snapshot = build_snapshot(["CH001_C001"], characters_per_chunk=1)
+        hard = frozenset({
+            ("CH001_C001:cand_char_001", "CH001_C001:cand_char_001"),
+        })
+        with pytest.raises(ReconciliationPlanningError, match="distinct"):
+            plan_reconciliation(snapshot, must_not_merge=hard)
+
 
 # ===========================================================================
-# No N² test
+# No N² / exact adjacency count test
 # ===========================================================================
 
 
 class TestNoN2:
-    def test_no_whole_document_cartesian_scan(self):
-        """Prove the planner uses bucketed generation, not N² enumeration.
+    def test_exact_adjacency_window_pair_count(self):
+        """5 chunks × 2 chars → exactly 21 adjacency-window pairs.
 
-        We create many candidates in distant chunks with no shared signals.
-        If the implementation did N², it would generate O(N²) pairs.
-        With bucketed generation, only adjacent-chunk pairs are generated.
+        Same chunk: 5 × C(2,2) = 5
+        Adjacent boundaries: 4 × (2 × 2) = 16
+        Total: 21
         """
-        # 5 chunks, 2 characters each, all with unique names, distant chunks
-        # Only adjacent chunk pairs should be generated
-        source_doc_ref = _make_artifact_ref()
+        source_doc_ref = make_source_document_ref()
         num_chunks = 5
         chars_per_chunk = 2
+        chunk_ids = [f"CH001_C{c+1:03d}" for c in range(num_chunks)]
 
-        source_doc = _make_source_document(num_paragraphs=num_chunks * 5 + 5)
-
-        chunk_refs = []
-        source_chunks = []
-        extractions = []
-        extraction_refs = []
-        report_refs = []
-
-        for c in range(num_chunks):
-            chunk_id = f"CH001_C{c+1:03d}"
-            para_start = c * 5 + 1
-            para_ids = tuple(
-                f"CH001_P{i:04d}" for i in range(para_start, para_start + 5)
-            )
-            chunk_ref = _make_artifact_ref("source_chunk", chunk_id, 1, H2)
-            chunk = _make_source_chunk(
-                chunk_id=chunk_id,
+        source_doc = make_source_document(num_paragraphs=num_chunks * 5 + 5)
+        chunk_refs = [make_source_chunk_ref(cid) for cid in chunk_ids]
+        chunks = [
+            make_source_chunk(
+                chunk_id=cid,
                 source_document_ref=source_doc_ref,
-                paragraph_ids=para_ids,
+                paragraph_ids=tuple(
+                    f"CH001_P{i:04d}" for i in range(c * 5 + 1, c * 5 + 6)
+                ),
             )
-            chunk_refs.append(chunk_ref)
-            source_chunks.append(chunk)
-
-            # All unique names, no overlap
-            chars = tuple(
-                _make_character(
-                    candidate_id=f"cand_char_{i+1:03d}",
-                    display_name_original=f"UniquePerson{c}_{i}",
-                    evidence=_make_evidence(para_ids[0]),
-                )
-                for i in range(chars_per_chunk)
-            )
-            ext = _make_extraction(
-                chunk_id=chunk_id,
+            for c, cid in enumerate(chunk_ids)
+        ]
+        exts = []
+        for c, (cid, cref) in enumerate(zip(chunk_ids, chunk_refs)):
+            para_id = f"CH001_P{c*5+1:04d}"
+            exts.append(make_extraction(
+                chunk_id=cid,
                 source_document_ref=source_doc_ref,
-                source_chunk_ref=chunk_ref,
-                characters=chars,
-            )
-            extractions.append(ext)
-            extraction_refs.append(
-                _make_artifact_ref("candidate_extraction", f"ext_{c+1}", 1, H3)
-            )
-            report_refs.append(
-                _make_artifact_ref("validation_report", f"vr_{c+1}", 1, H4)
-            )
-
-        manifest = _make_chunk_manifest(
-            source_document_ref=source_doc_ref,
-            chunk_refs=tuple(chunk_refs),
+                source_chunk_ref=cref,
+                characters=tuple(
+                    make_character(
+                        candidate_id=f"cand_char_{i+1:03d}",
+                        display_name_original=f"测试甲{c}乙{i}",
+                        evidence=make_evidence(para_id),
+                    )
+                    for i in range(chars_per_chunk)
+                ),
+            ))
+        manifest = make_chunk_manifest(
+            chunk_refs=tuple(chunk_refs), source_document_ref=source_doc_ref
         )
         snapshot = ReconciliationInputSnapshot(
             source_document=source_doc,
             source_document_ref=source_doc_ref,
             chunk_manifest=manifest,
-            source_chunks=tuple(source_chunks),
+            source_chunks=tuple(chunks),
             source_chunk_refs=tuple(chunk_refs),
-            candidate_extractions=tuple(extractions),
-            candidate_extraction_refs=tuple(extraction_refs),
-            a3_validation_report_refs=tuple(report_refs),
+            candidate_extractions=tuple(exts),
+            candidate_extraction_refs=tuple(
+                make_extraction_ref(cid) for cid in chunk_ids
+            ),
+            a3_validation_report_refs=tuple(
+                make_validation_report_ref(cid) for cid in chunk_ids
+            ),
         )
-
         result = plan_reconciliation(snapshot)
 
-        # Total candidates: 5 * 2 = 10
-        # With N²: C(10,2) = 45 pairs
-        # With bucketed: only adjacent-chunk pairs
-        # Same chunk: 5 chunks * C(2,2) = 5 pairs
-        # Adjacent chunks: 4 boundaries * (2*2) = 16 pairs
-        # Total: 5 + 16 = 21 pairs (all adjacency-only)
-        total_candidates = num_chunks * chars_per_chunk
-        n_squared_pairs = total_candidates * (total_candidates - 1) // 2
-        assert len(result.pair_plans) < n_squared_pairs
-        # Verify all pairs are adjacency-only
+        # Exact count: 5 same-chunk + 16 adjacent = 21
+        assert len(result.pair_plans) == 21
+
+        # Verify every pair has distance <= 1
+        # Build chunk ordinal map from candidate refs
+        def get_chunk_ordinal(ref: str) -> int:
+            chunk_id = ref.split(":", 1)[0]
+            return chunk_ids.index(chunk_id) + 1
+
         for plan in result.pair_plans:
+            left_ord = get_chunk_ordinal(plan.left_candidate_ref)
+            right_ord = get_chunk_ordinal(plan.right_candidate_ref)
+            assert abs(left_ord - right_ord) <= 1, (
+                f"pair {plan.left_candidate_ref} (ord {left_ord}) vs "
+                f"{plan.right_candidate_ref} (ord {right_ord}) has distance "
+                f">{1}"
+            )
             assert plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
             assert SIGNAL_ADJACENT_CHUNK in plan.signals
             assert SIGNAL_EXACT_IDENTITY_KEY not in plan.signals
             assert SIGNAL_IDENTITY_TOKEN_OVERLAP not in plan.signals
+
+    def test_distance_2_pair_absent(self):
+        """Chunk 1 candidate + chunk 3 candidate, no shared name → no pair."""
+        source_doc_ref = make_source_document_ref()
+        chunk_ids = ["CH001_C001", "CH001_C002", "CH001_C003"]
+        source_doc = make_source_document(num_paragraphs=20)
+        chunk_refs = [make_source_chunk_ref(cid) for cid in chunk_ids]
+        chunks = [
+            make_source_chunk(
+                chunk_id=cid,
+                source_document_ref=source_doc_ref,
+                paragraph_ids=tuple(
+                    f"CH001_P{i:04d}" for i in range(c * 5 + 1, c * 5 + 6)
+                ),
+            )
+            for c, cid in enumerate(chunk_ids)
+        ]
+        # Only chunk 1 and chunk 3 have characters
+        ext1 = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_refs[0],
+            characters=(make_character(
+                candidate_id="cand_char_001",
+                display_name_original="Alice",
+                evidence=make_evidence("CH001_P0001"),
+            ),),
+        )
+        ext2 = make_extraction(
+            chunk_id="CH001_C002",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_refs[1],
+        )
+        ext3 = make_extraction(
+            chunk_id="CH001_C003",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_refs[2],
+            characters=(make_character(
+                candidate_id="cand_char_001",
+                display_name_original="Bob",
+                evidence=make_evidence("CH001_P0016"),
+            ),),
+        )
+        manifest = make_chunk_manifest(
+            chunk_refs=tuple(chunk_refs), source_document_ref=source_doc_ref
+        )
+        snapshot = ReconciliationInputSnapshot(
+            source_document=source_doc,
+            source_document_ref=source_doc_ref,
+            chunk_manifest=manifest,
+            source_chunks=tuple(chunks),
+            source_chunk_refs=tuple(chunk_refs),
+            candidate_extractions=(ext1, ext2, ext3),
+            candidate_extraction_refs=tuple(
+                make_extraction_ref(cid) for cid in chunk_ids
+            ),
+            a3_validation_report_refs=tuple(
+                make_validation_report_ref(cid) for cid in chunk_ids
+            ),
+        )
+        result = plan_reconciliation(snapshot)
+        # Alice (chunk 1) and Bob (chunk 3) are distance 2 → NOT blocked
+        assert len(result.pair_plans) == 0
 
 
 # ===========================================================================
@@ -1701,31 +1825,27 @@ class TestNoN2:
 
 class TestPlanHash:
     def test_same_input_same_hash(self):
-        """Same snapshot → same plan_hash."""
-        snapshot1 = _make_snapshot(num_chunks=2, characters_per_chunk=2)
-        snapshot2 = _make_snapshot(num_chunks=2, characters_per_chunk=2)
+        snapshot1 = build_snapshot(["CH001_C001", "CH001_C002"], characters_per_chunk=2)
+        snapshot2 = build_snapshot(["CH001_C001", "CH001_C002"], characters_per_chunk=2)
         result1 = plan_reconciliation(snapshot1)
         result2 = plan_reconciliation(snapshot2)
         assert result1.plan_hash == result2.plan_hash
 
     def test_different_input_different_hash(self):
-        """Different planning material → different plan_hash."""
-        snapshot1 = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        snapshot2 = _make_snapshot(num_chunks=1, characters_per_chunk=2)
+        snapshot1 = build_snapshot(["CH001_C001"], characters_per_chunk=1)
+        snapshot2 = build_snapshot(["CH001_C001", "CH001_C002"], characters_per_chunk=1)
         result1 = plan_reconciliation(snapshot1)
         result2 = plan_reconciliation(snapshot2)
         assert result1.plan_hash != result2.plan_hash
 
-    def test_hash_uses_content_hash(self):
-        """plan_hash is a valid SHA-256 hex digest."""
-        snapshot = _make_snapshot(num_chunks=1, characters_per_chunk=1)
+    def test_hash_is_sha256(self):
+        snapshot = build_snapshot(["CH001_C001"], characters_per_chunk=1)
         result = plan_reconciliation(snapshot)
         assert len(result.plan_hash) == 64
         assert all(c in "0123456789abcdef" for c in result.plan_hash)
 
     def test_policy_ids_in_result(self):
-        """Result carries the correct policy IDs."""
-        snapshot = _make_snapshot(num_chunks=1, characters_per_chunk=1)
+        snapshot = build_snapshot(["CH001_C001"], characters_per_chunk=1)
         result = plan_reconciliation(snapshot)
         assert result.normalization_policy_id == NAME_NORMALIZATION_POLICY_ID
         assert result.blocking_policy_id == BLOCKING_POLICY_ID
@@ -1739,43 +1859,14 @@ class TestPlanHash:
 
 class TestCoverageAudit:
     def test_coverage_complete(self):
-        """All char + loc + unresolved are indexed."""
-        snapshot = _make_snapshot(
-            num_chunks=2,
+        snapshot = build_snapshot(
+            ["CH001_C001", "CH001_C002"],
             characters_per_chunk=1,
             locations_per_chunk=1,
             unresolved_per_chunk=1,
         )
         result = plan_reconciliation(snapshot)
-        # 2 chunks * (1 char + 1 loc + 1 unresolved) = 6 entries
         assert len(result.candidate_index.entries) == 6
-
-    def test_duplicate_ref_rejected(self):
-        """Duplicate global candidate refs are rejected."""
-        # This would happen if two chunks had the same chunk_id, which is
-        # prevented by the coherence check. But we can test the audit directly
-        # by constructing an index with duplicates.
-        from short_drama.story import CandidateEntityIndexEntry
-
-        ref = "CH001_C001:cand_char_001"
-        ext_ref = _make_artifact_ref("candidate_extraction", "ext1", 1, H3)
-        entry = CandidateEntityIndexEntry(
-            candidate_ref=ref,
-            candidate_kind="character",
-            candidate_extraction_ref=ext_ref,
-            source_order_key="000001:000000001:01:000000001:" + ref,
-            display_name_original="Test",
-            aliases_original=(),
-            descriptors_zh=(),
-            evidence_refs=_make_evidence(),
-            possible_candidate_refs=(),
-        )
-        # We can't directly test the audit in isolation without the full
-        # planning pipeline. The audit is called internally.
-        # Instead, verify that the normal path works.
-        snapshot = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        result = plan_reconciliation(snapshot)
-        assert len(result.candidate_index.entries) == 1
 
 
 # ===========================================================================
@@ -1785,79 +1876,54 @@ class TestCoverageAudit:
 
 class TestDecisionDeterminism:
     def test_decision_id_deterministic(self):
-        """Same input produces the same decision_id."""
-        snapshot1 = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        snapshot2 = _make_snapshot(num_chunks=1, characters_per_chunk=1)
-        # Need same display names for auto_same
-        # The default _make_snapshot uses "Character 0_0" which is 2 tokens
-        # so it should be strong → auto_same
-        result1 = plan_reconciliation(snapshot1)
-        result2 = plan_reconciliation(snapshot2)
-        if result1.decisions and result2.decisions:
-            assert result1.decisions[0].decision_id == result2.decisions[0].decision_id
-
-    def test_decision_id_format(self):
-        """decision_id has format dec_<20 hex chars>."""
-        source_doc_ref = _make_artifact_ref()
-        chunk_ref = _make_artifact_ref("source_chunk", "CH001_C001", 1, H2)
-        source_doc = _make_source_document(num_paragraphs=10)
-        ext = _make_extraction(
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
             source_document_ref=source_doc_ref,
             source_chunk_ref=chunk_ref,
             characters=(
-                _make_character(
+                make_character(
                     candidate_id="cand_char_001",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0001"),
+                    evidence=make_evidence("CH001_P0001"),
                 ),
-                _make_character(
+                make_character(
                     candidate_id="cand_char_002",
                     display_name_original="John Smith",
-                    evidence=_make_evidence("CH001_P0002"),
+                    evidence=make_evidence("CH001_P0002"),
                 ),
             ),
         )
-        snapshot = _build_single_chunk_snapshot(
-            source_doc, source_doc_ref, chunk_ref, ext
+        snapshot = build_single_chunk_snapshot(ext)
+        result1 = plan_reconciliation(snapshot)
+        result2 = plan_reconciliation(snapshot)
+        assert result1.decisions[0].decision_id == result2.decisions[0].decision_id
+
+    def test_decision_id_format(self):
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            characters=(
+                make_character(
+                    candidate_id="cand_char_001",
+                    display_name_original="John Smith",
+                    evidence=make_evidence("CH001_P0001"),
+                ),
+                make_character(
+                    candidate_id="cand_char_002",
+                    display_name_original="John Smith",
+                    evidence=make_evidence("CH001_P0002"),
+                ),
+            ),
         )
+        snapshot = build_single_chunk_snapshot(ext)
         result = plan_reconciliation(snapshot)
         assert len(result.decisions) == 1
         dec_id = result.decisions[0].decision_id
         assert dec_id.startswith("dec_")
-        assert len(dec_id) == 4 + 20  # "dec_" + 20 hex
+        assert len(dec_id) == 4 + 20
         assert all(c in "0123456789abcdef" for c in dec_id[4:])
-
-
-# ===========================================================================
-# Helper
-# ===========================================================================
-
-
-def _build_single_chunk_snapshot(
-    source_doc: SourceDocument,
-    source_doc_ref: ArtifactRef,
-    chunk_ref: ArtifactRef,
-    ext: CandidateExtraction,
-) -> ReconciliationInputSnapshot:
-    """Build a single-chunk snapshot for quick testing."""
-    manifest = _make_chunk_manifest(
-        source_document_ref=source_doc_ref,
-        chunk_refs=(chunk_ref,),
-    )
-    chunk = _make_source_chunk(
-        source_document_ref=source_doc_ref,
-    )
-    return ReconciliationInputSnapshot(
-        source_document=source_doc,
-        source_document_ref=source_doc_ref,
-        chunk_manifest=manifest,
-        source_chunks=(chunk,),
-        source_chunk_refs=(chunk_ref,),
-        candidate_extractions=(ext,),
-        candidate_extraction_refs=(
-            _make_artifact_ref("candidate_extraction", "ext1", 1, H3),
-        ),
-        a3_validation_report_refs=(
-            _make_artifact_ref("validation_report", "vr1", 1, H4),
-        ),
-    )

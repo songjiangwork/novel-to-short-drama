@@ -1,0 +1,59 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "left_candidate_ref",
+          "right_candidate_ref",
+          "decision",
+          "reason_zh",
+          "evidence_refs"
+        ],
+        "properties": {
+          "left_candidate_ref": {
+            "type": "string",
+            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc)_[0-9]{3,}$"
+          },
+          "right_candidate_ref": {
+            "type": "string",
+            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc)_[0-9]{3,}$"
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["same_entity", "different_entity", "uncertain"]
+          },
+          "reason_zh": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["paragraph_id", "role", "strength", "excerpt"],
+              "properties": {
+                "paragraph_id": { "type": "string", "minLength": 1 },
+                "role": {
+                  "type": "string",
+                  "enum": ["primary", "supporting"]
+                },
+                "strength": {
+                  "type": "string",
+                  "enum": ["explicit", "implied", "uncertain"]
+                },
+                "excerpt": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

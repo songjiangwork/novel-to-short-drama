@@ -1,0 +1,11 @@
+Reconciliation block: {{block_id}}
+
+Candidate packets (structured context for this block; the ONLY evidence you may
+cite):
+{{candidate_packets_json}}
+
+Requested pairs (judge every pair; preserve the given left/right references
+exactly):
+{{requested_pairs_json}}
+
+Return the ReconciliationDecisionPayload JSON now.

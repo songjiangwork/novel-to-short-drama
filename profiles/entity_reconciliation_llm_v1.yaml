@@ -1,0 +1,43 @@
+# v1.2 A4A A4 Semantic LLM profile — TRACKED.
+#
+# Describes result-affecting generation semantics ONLY for the A4 ambiguity
+# decision. It carries no endpoint, timeout, credential, or hostname, so its
+# hash is a stable semantic identity that is not invalidated by runtime
+# transport changes. It also carries NO backend routing identity: there is no
+# `provider_family` and no concrete `model`. The configured backend family and
+# the requested model identifier are *declared runtime routing metadata* that
+# belong to the runtime transport config (see profiles/llm_local.example.yaml:
+# `provider_family` / `request_model`).
+#
+# A4 deliberately uses its OWN tracked semantic profile identity (it does not
+# reuse the A3 profile identity, even if the current backend happens to be the
+# same). Because the backend model is NOT part of this semantic identity,
+# switching the backend (e.g. Qwen -> Gemma) does NOT change this profile's
+# hash and does NOT invalidate downstream A4 reuse; it only changes the model
+# the transport requests and the declared routing metadata in the provenance.
+schema_version: 2
+
+# Stable semantic identifier for this profile (part of the semantic identity).
+profile_id: entity-reconciliation-llm-v1
+
+# Deterministic generation for the identity decision.
+temperature: 0.0
+
+# Bounded decision-output budget. A4 ambiguity blocks request a small set of
+# candidate pairs and return a ReconciliationDecisionPayload; 4096 is a bounded
+# headroom for the decision output. If a real smoke proves this insufficient,
+# it is an explicit semantic-contract change.
+max_output_tokens: 4096
+
+# Structured-output generation constraint (a generation constraint only; local
+# JSON Schema validation remains the authority).
+structured_output_mode: json_schema
+
+# Reasoning settings (semantic; affect output). Disabled reasoning is
+# explicitly mapped by the adapter to the provider request
+# reasoning_effort: "none", so the server startup default never silently
+# decides behavior. (Enabled reasoning would carry an explicit supported
+# effort, e.g. low/medium/high.)
+reasoning:
+  enabled: false
+  effort: null

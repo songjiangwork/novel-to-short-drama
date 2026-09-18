@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/canonical-location-registry.schema.json",
+  "title": "CanonicalLocationRegistry (v1.2 A4 persisted)",
+  "description": "Persisted contract for the A4 canonical location registry (entity_type = location). A4A owns the shape; A4D allocates canonical ids and merges aliases.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entity_type", "entities"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entity_type": { "const": "location" },
+    "entities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entity" }
+    }
+  },
+  "$defs": {
+    "global_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_id",
+        "entity_type",
+        "display_name_original",
+        "aliases_original",
+        "candidate_refs",
+        "first_appearance_candidate_ref"
+      ],
+      "properties": {
+        "canonical_id": { "type": "string", "pattern": "^loc_[0-9]{4,}$" },
+        "entity_type": { "const": "location" },
+        "display_name_original": { "type": "string", "minLength": 1 },
+        "aliases_original": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "candidate_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/global_candidate_ref" }
+        },
+        "first_appearance_candidate_ref": {
+          "$ref": "#/$defs/global_candidate_ref"
+        }
+      }
+    }
+  }
+}

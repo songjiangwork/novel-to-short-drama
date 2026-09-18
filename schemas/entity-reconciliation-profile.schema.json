@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "entity-reconciliation-profile.schema.json",
+  "title": "v1.2 A4 EntityReconciliationProfile",
+  "description": "Tracked model-independent orchestration profile for A4 entity reconciliation. Carries NO runtime/LLM transport fields and NO backend routing identity (those are A-I3 runtime config / SemanticLLMProfile concerns). Parity with EntityReconciliationProfile.to_dict() and profiles/entity_reconciliation_v1.yaml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "working_language",
+    "name_normalization_policy_id",
+    "blocking_policy_id",
+    "canonicalization_policy_id",
+    "prompt_id",
+    "prompt_version",
+    "output_schema_id",
+    "output_schema_version",
+    "max_generation_rounds"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "working_language": {"type": "string", "minLength": 1},
+    "name_normalization_policy_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "blocking_policy_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "canonicalization_policy_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "prompt_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "prompt_version": {"type": "integer", "minimum": 1},
+    "output_schema_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "output_schema_version": {"type": "integer", "minimum": 1},
+    "max_generation_rounds": {"const": 2}
+  }
+}

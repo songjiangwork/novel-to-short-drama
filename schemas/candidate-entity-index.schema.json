@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/candidate-entity-index.schema.json",
+  "title": "CandidateEntityIndex (v1.2 A4 persisted)",
+  "description": "Persisted contract for the global A4 coverage-universe candidate index. A4A owns the shape only; A4B fills entries and computes source_order_key.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "global_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_type", "artifact_id", "revision", "content_hash"],
+      "properties": {
+        "artifact_type": { "type": "string", "minLength": 1 },
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph_id", "role", "strength", "excerpt"],
+      "properties": {
+        "paragraph_id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "enum": ["primary", "supporting"] },
+        "strength": {
+          "type": "string",
+          "enum": ["explicit", "implied", "uncertain"]
+        },
+        "excerpt": { "type": ["string", "null"] }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_ref",
+        "candidate_kind",
+        "candidate_extraction_ref",
+        "source_order_key",
+        "display_name_original",
+        "aliases_original",
+        "descriptors_zh",
+        "evidence_refs",
+        "possible_candidate_refs"
+      ],
+      "properties": {
+        "candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
+        "candidate_kind": {
+          "enum": [
+            "character",
+            "location",
+            "unresolved_person",
+            "unresolved_location",
+            "unresolved_unknown",
+            "unresolved_other"
+          ]
+        },
+        "candidate_extraction_ref": { "$ref": "#/$defs/artifact_ref" },
+        "source_order_key": { "type": "string", "minLength": 1 },
+        "display_name_original": { "type": "string", "minLength": 1 },
+        "aliases_original": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "descriptors_zh": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "possible_candidate_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/global_candidate_ref" }
+        }
+      }
+    }
+  }
+}

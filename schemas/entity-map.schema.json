@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/entity-map.schema.json",
+  "title": "EntityMap (v1.2 A4 persisted)",
+  "description": "Persisted contract for A4's final aggregate authority: one entry per coverage-universe candidate plus exact refs to every A4 output and the exact upstream A3 identity material. A4A owns the shape (incl. resolved/unresolved exclusivity); A4D persists and audits coverage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "entries",
+    "candidate_entity_index_ref",
+    "reconciliation_decision_set_ref",
+    "canonical_character_registry_ref",
+    "canonical_location_registry_ref",
+    "unresolved_entity_set_ref",
+    "a3_input"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    },
+    "candidate_entity_index_ref": { "$ref": "#/$defs/artifact_ref" },
+    "reconciliation_decision_set_ref": { "$ref": "#/$defs/artifact_ref" },
+    "canonical_character_registry_ref": { "$ref": "#/$defs/artifact_ref" },
+    "canonical_location_registry_ref": { "$ref": "#/$defs/artifact_ref" },
+    "unresolved_entity_set_ref": { "$ref": "#/$defs/artifact_ref" },
+    "a3_input": { "$ref": "#/$defs/a3_input" }
+  },
+  "$defs": {
+    "global_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_type", "artifact_id", "revision", "content_hash"],
+      "properties": {
+        "artifact_type": { "type": "string", "minLength": 1 },
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "a3_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_document_ref",
+        "chunk_manifest_ref",
+        "candidate_extraction_refs",
+        "extraction_profile_id",
+        "extraction_profile_hash"
+      ],
+      "properties": {
+        "source_document_ref": { "$ref": "#/$defs/artifact_ref" },
+        "chunk_manifest_ref": { "$ref": "#/$defs/artifact_ref" },
+        "candidate_extraction_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/artifact_ref" }
+        },
+        "extraction_profile_id": { "type": "string", "minLength": 1 },
+        "extraction_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate_ref", "status", "canonical_id", "unresolved_id"],
+          "properties": {
+            "candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
+            "status": { "const": "resolved" },
+            "canonical_id": {
+              "type": "string",
+              "pattern": "^(?:char|loc)_[0-9]{4,}$"
+            },
+            "unresolved_id": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate_ref", "status", "canonical_id", "unresolved_id"],
+          "properties": {
+            "candidate_ref": { "$ref": "#/$defs/global_candidate_ref" },
+            "status": { "const": "unresolved" },
+            "canonical_id": { "type": "null" },
+            "unresolved_id": {
+              "type": "string",
+              "pattern": "^unres_[0-9]{4,}$"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -343,3 +345,141 @@ def test_prompt_spec_hash_matches_pinned_hash(tmp_path):
         user_template="Extract from: {{chunk_text}}",
         required_variables=["chunk_text"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Tracked a3.chunk-extraction v1 (immutable) + v2 (evidence excerpt contract)
+# ---------------------------------------------------------------------------
+
+
+PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts" / "story"
+
+
+def test_a3_chunk_extraction_v1_immutable_and_loadable():
+    """v1 content is untouched and loads with its pinned hash."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=1)
+    assert spec.version == 1
+    assert spec.content_hash == "118469c47ea401ee35ef9164089f918494d884158df73b02f493aa260ad40a09"
+
+
+def test_a3_chunk_extraction_v2_loads_with_correct_hash():
+    """v2 loads and its content_hash matches the pinned value."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=2)
+    assert spec.version == 2
+    assert spec.content_hash == "614e6bbb866b497b550cee1feb0dd9d955ec37ad97b209a2b7bd50a19ee0df06"
+    assert spec.required_variables == (
+        "chunk_id",
+        "left_context_json",
+        "ownership_json",
+        "right_context_json",
+    )
+
+
+def test_a3_chunk_extraction_v2_contains_exact_substring_contract():
+    """v2 system template contains the key evidence-fidelity requirements."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=2)
+    sys_text = spec.system_template
+    # Exact contiguous substring rule
+    assert "exact contiguous substring" in sys_text
+    assert "text_original" in sys_text
+    # Same paragraph_id requirement
+    assert "SAME" in sys_text and "paragraph_id" in sys_text
+    # No paraphrase
+    assert "paraphrase" in sys_text
+    # Null fallback
+    assert 'set "excerpt" to null' in sys_text
+    # Never substitute
+    assert "Never substitute" in sys_text
+
+
+def test_a3_chunk_extraction_v2_prefers_short_verbatim():
+    """v2 instructs the model to prefer short verbatim excerpts."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=2)
+    assert "single contiguous span" in spec.system_template
+    assert "Do not copy an entire paragraph" in spec.system_template
+
+
+def test_a3_chunk_extraction_v2_contains_self_check():
+    """v2 includes the self-check instruction."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=2)
+    assert "SELF-CHECK" in spec.system_template
+    assert "character-for-character" in spec.system_template
+    assert "set the excerpt to null instead" in spec.system_template
+
+
+def test_a3_chunk_extraction_v2_preserves_v1_rules():
+    """v2 retains all core v1 rules (chunk-local, zh-CN, local refs, etc.)."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=2)
+    sys_text = spec.system_template
+    assert "CHUNK-LOCAL ONLY" in sys_text
+    assert "zh-CN" in sys_text
+    assert "LOCAL REFERENCES" in sys_text
+    assert "UNRESOLVED IS VALID" in sys_text
+    assert "NO EXTRA DECISIONS" in sys_text
+    assert "OUTPUT FORMAT" in sys_text
+
+
+# ---------------------------------------------------------------------------
+# Tracked a3.chunk-extraction v3 (ellipsis fallback + anti-duplicate)
+# ---------------------------------------------------------------------------
+
+
+def test_a3_chunk_extraction_v3_loads_with_correct_hash():
+    """v3 loads and its content_hash matches the pinned value."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=3)
+    assert spec.version == 3
+    assert spec.content_hash == "852b281cf38560aaf79aa1d1eaba9f04251cd3a7d89c53c886786ac7c1387e76"
+    assert spec.required_variables == (
+        "chunk_id",
+        "left_context_json",
+        "ownership_json",
+        "right_context_json",
+    )
+
+
+def test_a3_chunk_extraction_v3_ellipsis_fallback():
+    """v3 contains the strong ellipsis fallback rule."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=3)
+    sys_text = spec.system_template
+    assert 'Never insert "..." or "\u2026"' in sys_text
+    assert "do not construct an abbreviated quote" in sys_text
+    assert "one shorter exact contiguous substring" in sys_text
+    assert "excerpt=null" in sys_text
+    assert "literally occur inside the copied contiguous source substring" in sys_text
+
+
+def test_a3_chunk_extraction_v3_anti_duplicate_rule():
+    """v3 contains the anti-duplication rule."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=3)
+    sys_text = spec.system_template
+    assert "NO SEMANTIC DUPLICATES" in sys_text
+    assert "semantically duplicate candidates" in sys_text
+    assert "Prefer one candidate with sufficient evidence" in sys_text
+    assert "Do NOT omit distinct facts" in sys_text
+
+
+def test_a3_chunk_extraction_v3_preserves_v2_rules():
+    """v3 retains all core v2 rules (exact substring, self-check, etc.)."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=3)
+    sys_text = spec.system_template
+    assert "CHUNK-LOCAL ONLY" in sys_text
+    assert "SOURCE FIDELITY" in sys_text
+    assert "zh-CN" in sys_text
+    assert "EXACT EXCERPT RULE" in sys_text
+    assert "exact contiguous substring" in sys_text
+    assert "EXCERPT IS ONE CONTIGUOUS SPAN" in sys_text
+    assert "SELF-CHECK" in sys_text
+    assert "LOCAL REFERENCES" in sys_text
+    assert "UNRESOLVED IS VALID" in sys_text
+    assert "NO EXTRA DECISIONS" in sys_text
+    assert "OUTPUT FORMAT" in sys_text

@@ -259,7 +259,7 @@ def test_tracked_story_extraction_profile_loads_and_round_trips():
     assert profile.profile_id == "story-extraction-v1"
     assert profile.working_language == "zh-CN"
     assert profile.prompt_id == "a3.chunk-extraction"
-    assert profile.prompt_version == 1
+    assert profile.prompt_version == 3
     assert profile.output_schema_id == "a3-candidate-payload"
     assert profile.output_schema_version == 1
     assert profile.max_generation_rounds == 2

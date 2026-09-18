@@ -1,0 +1,18 @@
+# v1.2 A3A Prompt Registry — a3.chunk-extraction v3 (TRACKED).
+#
+# v3 strengthens the ellipsis fallback (never insert ellipses to shorten or
+# bridge) and adds an anti-duplication rule (prefer one candidate with
+# sufficient evidence over near-duplicates). All v1/v2 rules are preserved.
+#
+# The pinned content_hash is computed over the exact semantic prompt material
+# (system.txt + user.txt + sorted required_variables) via the A-I3 canonical
+# prompt hash helper, NOT over this metadata file.
+schema_version: 1
+prompt_id: a3.chunk-extraction
+version: 3
+required_variables:
+  - chunk_id
+  - left_context_json
+  - ownership_json
+  - right_context_json
+content_hash: 852b281cf38560aaf79aa1d1eaba9f04251cd3a7d89c53c886786ac7c1387e76

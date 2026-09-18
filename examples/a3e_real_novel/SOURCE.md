@@ -26,12 +26,14 @@ Millennium Fulcrum Edition 3.0 (Project Gutenberg eBook #11).
 
 Retrieved from Project Gutenberg (public domain). The Gutenberg
 header/footer boilerplate has been removed; the text begins at the
-title page and ends at "THE END". No other modifications were made.
+title page and ends at "THE END". Formatting cleanup applied:
+mid-paragraph line wraps joined into single-line paragraphs and
+Markdown-style underscore emphasis markers removed (content unchanged).
 
 ## SHA-256
 
 ```
-0d8e1aa98f03aff9a3eb38d06eaa61b8bcc5b6b70eb972efcc140df870f0eb88
+468d63d7d35c0fd32709e1db4781da4cc6ec03e95d47a7e3c3ec97a432fbf11f
 ```
 
 ## Public-Domain Provenance Note

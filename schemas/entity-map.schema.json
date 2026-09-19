@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://novel-to-short-drama.local/schemas/entity-map.schema.json",
-  "title": "EntityMap (v1.2 A4 persisted)",
-  "description": "Persisted contract for A4's final aggregate authority: one entry per coverage-universe candidate plus exact refs to every A4 output and the exact upstream A3 identity material. A4A owns the shape (incl. resolved/unresolved exclusivity); A4D persists and audits coverage.",
+  "title": "EntityMap (v1.2 A4 persisted, v2)",
+  "description": "Persisted contract for A4's final aggregate authority: one entry per coverage-universe candidate plus exact refs to every A4 output, the exact upstream A3 identity material, and the exact backend-neutral A4 semantic-generation identity. A4A owns the shape (incl. resolved/unresolved exclusivity + A4SemanticIdentity); A4D persists and audits coverage.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,10 +13,11 @@
     "canonical_character_registry_ref",
     "canonical_location_registry_ref",
     "unresolved_entity_set_ref",
-    "a3_input"
+    "a3_input",
+    "semantic_identity"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "entries": {
       "type": "array",
       "items": { "$ref": "#/$defs/entry" }
@@ -26,12 +27,17 @@
     "canonical_character_registry_ref": { "$ref": "#/$defs/artifact_ref" },
     "canonical_location_registry_ref": { "$ref": "#/$defs/artifact_ref" },
     "unresolved_entity_set_ref": { "$ref": "#/$defs/artifact_ref" },
-    "a3_input": { "$ref": "#/$defs/a3_input" }
+    "a3_input": { "$ref": "#/$defs/a3_input" },
+    "semantic_identity": { "$ref": "#/$defs/semantic_identity" }
   },
   "$defs": {
     "global_candidate_ref": {
       "type": "string",
       "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     },
     "artifact_ref": {
       "type": "object",
@@ -41,7 +47,7 @@
         "artifact_type": { "type": "string", "minLength": 1 },
         "artifact_id": { "type": "string", "minLength": 1 },
         "revision": { "type": "integer", "minimum": 1 },
-        "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "content_hash": { "$ref": "#/$defs/sha256" }
       }
     },
     "a3_input": {
@@ -63,9 +69,42 @@
           "items": { "$ref": "#/$defs/artifact_ref" }
         },
         "extraction_profile_id": { "type": "string", "minLength": 1 },
-        "extraction_profile_hash": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+        "extraction_profile_hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "semantic_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reconciliation_profile_id",
+        "reconciliation_profile_hash",
+        "semantic_profile_id",
+        "semantic_profile_hash",
+        "prompt_id",
+        "prompt_version",
+        "prompt_content_hash",
+        "output_schema_id",
+        "output_schema_version",
+        "output_schema_hash",
+        "plan_hash",
+        "semantic_request_hashes"
+      ],
+      "properties": {
+        "reconciliation_profile_id": { "type": "string", "minLength": 1 },
+        "reconciliation_profile_hash": { "$ref": "#/$defs/sha256" },
+        "semantic_profile_id": { "type": "string", "minLength": 1 },
+        "semantic_profile_hash": { "$ref": "#/$defs/sha256" },
+        "prompt_id": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "integer", "minimum": 1 },
+        "prompt_content_hash": { "$ref": "#/$defs/sha256" },
+        "output_schema_id": { "type": "string", "minLength": 1 },
+        "output_schema_version": { "type": "integer", "minimum": 1 },
+        "output_schema_hash": { "$ref": "#/$defs/sha256" },
+        "plan_hash": { "$ref": "#/$defs/sha256" },
+        "semantic_request_hashes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sha256" }
         }
       }
     },

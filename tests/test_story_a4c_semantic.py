@@ -1728,9 +1728,9 @@ def _make_det_decision(
     )
 
 
-class TestDecisionCoverage:
+class TestDecisionCoverageFailClosed:
     """Exact pair coverage: every explicit pair → exactly one decision,
-    with state/method consistency."""
+    with state/method consistency (fail-closed regressions)."""
 
     def test_auto_same_decision_missing(self):
         """auto_same pair but deterministic decision missing.

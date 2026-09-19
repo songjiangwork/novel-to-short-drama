@@ -126,6 +126,7 @@ from .reconciliation_semantic import (
     ReconciliationSemanticResult,
     compute_llm_decision_id,
     llm_reason_code,
+    pack_semantic_pairs_v1,
     prepare_semantic_resolution,
     resolve_semantic_ambiguity,
 )
@@ -385,6 +386,7 @@ __all__ = [
     "ReconciliationSemanticResult",
     "compute_llm_decision_id",
     "llm_reason_code",
+    "pack_semantic_pairs_v1",
     "prepare_semantic_resolution",
     "resolve_semantic_ambiguity",
     "DerivedReconciliationOutputs",

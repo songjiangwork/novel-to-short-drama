@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore
+from short_drama.llm import LLMInvocationProvenance
 from short_drama.foundation import (
     FilePointerStore,
     PointerKind,
@@ -55,10 +56,12 @@ from short_drama.story import (
     RECONCILIATION_DECISION_SET_ARTIFACT_TYPE,
     RECONCILIATION_DECISION_SET_SCHEMA_VERSION,
     UNRESOLVED_ENTITY_SET_ARTIFACT_TYPE,
+    PAIR_STATE_NEEDS_SEMANTIC_DECISION,
     CandidateEntityIndex,
     CandidateEntityIndexEntry,
     CanonicalCharacterRegistry,
     EntityMap,
+    EvidenceRef,
     ReconciliationDecision,
     ReconciliationDecisionSet,
     ReconciliationFinalizationError,
@@ -66,6 +69,9 @@ from short_drama.story import (
     ReconciliationPlanningResult,
     ReconciliationPersistenceService,
     ReconciliationSemanticResult,
+    compute_llm_decision_id,
+    llm_reason_code,
+    pack_semantic_pairs_v1,
     StoryIntegrityError,
     StoryPersistenceError,
     a4_base_artifact_id,
@@ -147,6 +153,7 @@ def idx_entry(
     *,
     ext_ref: ArtifactRef | None = None,
     source_key: str | None = None,
+    evidence: tuple[EvidenceRef, ...] = (),
 ) -> CandidateEntityIndexEntry:
     if source_key is None:
         suffix = int(candidate_ref.rsplit("_", 1)[1])
@@ -161,7 +168,7 @@ def idx_entry(
         display_name_original=display,
         aliases_original=(),
         descriptors_zh=(),
-        evidence_refs=(),
+        evidence_refs=evidence,
         possible_candidate_refs=(),
     )
 
@@ -225,6 +232,161 @@ def make_scenario(index, a3_input):
     prep = prepare_semantic_resolution(planning, _profile(), sem_profile)
     identity = build_a4_semantic_identity(_profile(), prep, planning)
     return planning, finalization, identity
+
+
+# ---------------------------------------------------------------------------
+# Semantic (LLM) scenario helpers -- for the block-binding / evidence tests
+# ---------------------------------------------------------------------------
+
+# Weak (single-token) names so each disjoint pair is needs_semantic_decision.
+WEAK_NAMES = ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta")
+
+
+def make_evidence(i: int) -> tuple[EvidenceRef, ...]:
+    return (
+        EvidenceRef(
+            paragraph_id=f"P{i:03d}",
+            role="primary",
+            strength="explicit",
+            excerpt=f"evidence for candidate {i}",
+        ),
+    )
+
+
+def semantic_index(n_pairs: int = 8) -> CandidateEntityIndex:
+    """Build an index of ``n_pairs`` disjoint character pairs, each sharing a
+    unique WEAK identity key (single token) so the A4B plan marks every pair
+    ``needs_semantic_decision``. Chunks are spaced by 100 so no adjacent-chunk
+    (or same-chunk) pairs are generated -- exactly ``n_pairs`` pairs result.
+    """
+    entries = []
+    for i in range(1, n_pairs * 2 + 1):
+        ref = f"CH001_C001:cand_char_{i:03d}"
+        name = WEAK_NAMES[(i - 1) // 2]
+        chunk = i * 100  # spaced: no two candidates are in the same/adjacent chunk
+        entries.append(
+            idx_entry(
+                ref,
+                display=name,
+                source_key=frozen_key(chunk, 1, 1, i, ref),
+                ext_ref=EXT_A,
+                evidence=make_evidence(i),
+            )
+        )
+    return CandidateEntityIndex(
+        schema_version=CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
+        entries=tuple(entries),
+    )
+
+
+def make_provenance(prep, request_hash: str):
+    return LLMInvocationProvenance(
+        provider_family="qwen",
+        model="qwen3-27b",
+        semantic_profile_id=prep.semantic_profile_id,
+        semantic_profile_hash=prep.semantic_profile_hash,
+        prompt_id=prep.prompt_id,
+        prompt_version=prep.prompt_version,
+        prompt_content_hash=prep.prompt_content_hash,
+        rendered_prompt_hash="1" * 64,
+        output_schema_id=prep.output_schema_id,
+        output_schema_version=prep.output_schema_version,
+        output_schema_hash=prep.output_schema_hash,
+        request_hash=request_hash,
+        provider_response_id="resp",
+        finish_reason="stop",
+        usage=None,
+    )
+
+
+def make_llm_decision(
+    left: str,
+    right: str,
+    decision: str,
+    request_hash: str,
+    prep,
+    *,
+    evidence: tuple[EvidenceRef, ...] = (),
+    reason_code: str | None = None,
+    reason_zh: str = "语义判定",
+) -> ReconciliationDecision:
+    rc = reason_code if reason_code is not None else llm_reason_code(decision)
+    decision_id = compute_llm_decision_id(
+        left_ref=left,
+        right_ref=right,
+        decision=decision,
+        method="llm",
+        reason_code=rc,
+        reason_zh=reason_zh,
+        evidence_refs=evidence,
+        prompt_id=prep.prompt_id,
+        prompt_version=prep.prompt_version,
+        request_hash=request_hash,
+    )
+    return ReconciliationDecision(
+        decision_id=decision_id,
+        left_candidate_ref=left,
+        right_candidate_ref=right,
+        decision=decision,
+        method="llm",
+        reason_code=rc,
+        reason_zh=reason_zh,
+        evidence_refs=evidence,
+        prompt_id=prep.prompt_id,
+        prompt_version=prep.prompt_version,
+        generation_provenance=make_provenance(prep, request_hash),
+    )
+
+
+def make_semantic_scenario(
+    n_pairs: int = 8,
+    *,
+    decision: str = "same_entity",
+    use_evidence: bool = True,
+) -> tuple:
+    """Build a self-consistent semantic scenario with ``n_pairs`` LLM decisions.
+
+    Returns (planning, finalization, identity, request_hashes, pair_to_hash, prep,
+    index). Every needs_semantic_decision pair gets a valid LLM decision whose
+    provenance request_hash is the request hash of the exact block that contains
+    the pair (via the shared packing authority).
+    """
+    index = semantic_index(n_pairs)
+    planning = plan_candidate_index_v1(index)
+    sem_profile = load_semantic_profile(A4_LLM_PROFILE_PATH)
+    prep = prepare_semantic_resolution(planning, _profile(), sem_profile)
+    request_hashes = prep.semantic_request_hashes
+    blocks = pack_semantic_pairs_v1(planning)
+    pair_to_hash: dict[tuple[str, str], str] = {}
+    for block_ordinal, block in enumerate(blocks):
+        for plan in block:
+            pair_to_hash[(plan.left_candidate_ref, plan.right_candidate_ref)] = (
+                request_hashes[block_ordinal]
+            )
+    evidence_by_ref = {e.candidate_ref: e.evidence_refs for e in index.entries}
+    llm_decisions = []
+    for plan in planning.pair_plans:
+        if plan.state != PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            continue
+        left, right = plan.left_candidate_ref, plan.right_candidate_ref
+        ev = evidence_by_ref[left] if use_evidence else ()
+        llm_decisions.append(
+            make_llm_decision(
+                left, right, decision, pair_to_hash[(left, right)], prep, evidence=ev
+            )
+        )
+    all_decisions = planning.decisions + tuple(llm_decisions)
+    semantic_result = ReconciliationSemanticResult(
+        planning_result=planning,
+        blocks=prep.blocks,
+        semantic_decisions=tuple(llm_decisions),
+        all_decisions=all_decisions,
+        semantic_request_hashes=request_hashes,
+        block_results=(),
+    )
+    finalization = finalize_reconciliation(semantic_result)
+    identity = build_a4_semantic_identity(_profile(), prep, planning)
+    return planning, finalization, identity, request_hashes, pair_to_hash, prep, index
 
 
 def clean_a3_input() -> A3InputIdentity:
@@ -934,6 +1096,260 @@ def test_verifier_profile_binding(tmp_path):
     kw["profile"] = replace(h.profile, profile_id="other-profile")
     with pytest.raises(StoryIntegrityError):
         _verify_finalization_bundle(**kw)
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation-profile binding (full prompt/schema identity)
+# ---------------------------------------------------------------------------
+
+
+def _semantic_bundle(
+    planning, fin, ident, *, decision_set=None, index=None, a3_input=None, profile=None
+):
+    """Build ``_verify_finalization_bundle`` kwargs from a semantic scenario."""
+    return dict(
+        index=index if index is not None else fin.decision_set.candidate_index,
+        decision_set=decision_set if decision_set is not None else fin.decision_set,
+        char_registry=fin.canonical_character_registry,
+        loc_registry=fin.canonical_location_registry,
+        unresolved_set=fin.unresolved_entity_set,
+        entity_map_entries=fin.entity_map_entries,
+        a3_input=a3_input if a3_input is not None else clean_a3_input(),
+        semantic_identity=ident,
+        profile=profile if profile is not None else _profile(),
+    )
+
+
+def test_profile_binding_correct_full_profile_passes(tmp_path):
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    _verify_finalization_bundle(**_semantic_bundle(planning, fin, ident, index=index))
+
+
+def test_profile_binding_prompt_id_mismatch(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    kw["semantic_identity"] = replace(h.semantic_identity, prompt_id="other-prompt")
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_profile_binding_prompt_version_mismatch(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    kw["semantic_identity"] = replace(
+        h.semantic_identity, prompt_version=h.profile.prompt_version + 1
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_profile_binding_output_schema_id_mismatch(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    kw["semantic_identity"] = replace(h.semantic_identity, output_schema_id="other-schema")
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_profile_binding_output_schema_version_mismatch(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    kw["semantic_identity"] = replace(
+        h.semantic_identity, output_schema_version=h.profile.output_schema_version + 1
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+# ---------------------------------------------------------------------------
+# Semantic block request-hash binding + LLM persisted invariants
+# ---------------------------------------------------------------------------
+
+
+def _with_llm_decision(decision_set, match_key, new_decision):
+    """Return a decision set with the LLM decision for ``match_key`` replaced."""
+    decisions = tuple(
+        new_decision
+        if (
+            d.method == "llm"
+            and (d.left_candidate_ref, d.right_candidate_ref) == match_key
+        )
+        else d
+        for d in decision_set.decisions
+    )
+    return replace(decision_set, decisions=decisions)
+
+
+def _rebuild_llm_decision(
+    d: ReconciliationDecision, *, evidence=None, reason_code=None, request_hash=None
+):
+    """Rebuild an LLM decision with optional field overrides, recomputing the
+    decision id from the (possibly overridden) fields so the decision-id
+    authority stays satisfied."""
+    ev = evidence if evidence is not None else d.evidence_refs
+    rc = reason_code if reason_code is not None else llm_reason_code(d.decision)
+    rh = request_hash if request_hash is not None else d.generation_provenance.request_hash
+    decision_id = compute_llm_decision_id(
+        left_ref=d.left_candidate_ref,
+        right_ref=d.right_candidate_ref,
+        decision=d.decision,
+        method="llm",
+        reason_code=rc,
+        reason_zh=d.reason_zh,
+        evidence_refs=ev,
+        prompt_id=d.prompt_id,
+        prompt_version=d.prompt_version,
+        request_hash=rh,
+    )
+    provenance = d.generation_provenance
+    if request_hash is not None and request_hash != d.generation_provenance.request_hash:
+        provenance = make_provenance_from_provenance(provenance, request_hash)
+    return replace(
+        d,
+        decision_id=decision_id,
+        evidence_refs=ev,
+        reason_code=rc,
+        generation_provenance=provenance,
+    )
+
+
+def make_provenance_from_provenance(provenance, request_hash: str):
+    return replace(provenance, request_hash=request_hash)
+
+
+def test_semantic_block_mapping_correct_passes(tmp_path):
+    """7 disjoint pairs -> 2 blocks; the correct pair->block-hash mapping
+    (via the shared A4C packing authority) passes."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    assert len(rh) == 2  # 7 pairs -> 2 blocks (6 + 1)
+    _verify_finalization_bundle(**_semantic_bundle(planning, fin, ident, index=index))
+
+
+def test_semantic_block_cross_block_wrong_hash_fails(tmp_path):
+    """8 pairs -> block1 (6), block2 (2). Corrupt block2's first pair to h1
+    (block1's hash) while block2's second pair keeps h2 -- so the first-
+    occurrence sequence is still (h1, h2) but the exact block binding fails."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(8)
+    h1, h2 = rh
+    blocks = pack_semantic_pairs_v1(planning)
+    block2_pairs = [
+        (pl.left_candidate_ref, pl.right_candidate_ref) for pl in blocks[1]
+    ]
+    assert len(block2_pairs) >= 2
+    corrupt_key = block2_pairs[0]
+    corrupt_dec = next(
+        d
+        for d in fin.decision_set.decisions
+        if d.method == "llm"
+        and (d.left_candidate_ref, d.right_candidate_ref) == corrupt_key
+    )
+    new_dec = _rebuild_llm_decision(corrupt_dec, request_hash=h1)
+    decision_set = _with_llm_decision(fin.decision_set, corrupt_key, new_dec)
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(
+            **_semantic_bundle(planning, fin, ident, index=index, decision_set=decision_set)
+        )
+
+
+def test_semantic_block_count_mismatch_fails(tmp_path):
+    """The deterministic block count (2) must equal the identity's request-hash
+    count. A 1-hash identity fails closed."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    bad_ident = replace(ident, semantic_request_hashes=(rh[0],))
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(
+            index=index,
+            decision_set=fin.decision_set,
+            char_registry=fin.canonical_character_registry,
+            loc_registry=fin.canonical_location_registry,
+            unresolved_set=fin.unresolved_entity_set,
+            entity_map_entries=fin.entity_map_entries,
+            a3_input=clean_a3_input(),
+            semantic_identity=bad_ident,
+            profile=_profile(),
+        )
+
+
+def test_llm_wrong_reason_code_fails(tmp_path):
+    """An LLM decision whose reason_code does not equal the deterministic A4C
+    authority for its decision fails closed (even with a valid decision id)."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    dec = next(d for d in fin.decision_set.decisions if d.method == "llm")
+    assert dec.decision == "same_entity"
+    new_dec = replace(dec, reason_code="llm_different_entity")  # decision id unchanged
+    decision_set = _with_llm_decision(
+        fin.decision_set,
+        (dec.left_candidate_ref, dec.right_candidate_ref),
+        new_dec,
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(
+            **_semantic_bundle(planning, fin, ident, index=index, decision_set=decision_set)
+        )
+
+
+def test_llm_evidence_foreign_ref_fails(tmp_path):
+    """An evidence ref that is not exact evidence of either endpoint fails
+    closed."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    dec = next(d for d in fin.decision_set.decisions if d.method == "llm")
+    foreign = make_evidence(999)
+    new_dec = _rebuild_llm_decision(dec, evidence=foreign)
+    decision_set = _with_llm_decision(
+        fin.decision_set,
+        (dec.left_candidate_ref, dec.right_candidate_ref),
+        new_dec,
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(
+            **_semantic_bundle(planning, fin, ident, index=index, decision_set=decision_set)
+        )
+
+
+def test_llm_evidence_modified_excerpt_fails(tmp_path):
+    """An evidence ref whose excerpt was modified (no longer exact-equal to the
+    endpoint's evidence) fails closed."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    dec = next(d for d in fin.decision_set.decisions if d.method == "llm")
+    original = dec.evidence_refs[0]
+    modified = replace(original, excerpt="modified " + original.excerpt)
+    new_dec = _rebuild_llm_decision(dec, evidence=(modified,))
+    decision_set = _with_llm_decision(
+        fin.decision_set,
+        (dec.left_candidate_ref, dec.right_candidate_ref),
+        new_dec,
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(
+            **_semantic_bundle(planning, fin, ident, index=index, decision_set=decision_set)
+        )
+
+
+def test_llm_evidence_duplicate_fails(tmp_path):
+    """A duplicated evidence ref within one decision fails closed."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(7)
+    dec = next(d for d in fin.decision_set.decisions if d.method == "llm")
+    ev = dec.evidence_refs[0]
+    new_dec = _rebuild_llm_decision(dec, evidence=(ev, ev))
+    decision_set = _with_llm_decision(
+        fin.decision_set,
+        (dec.left_candidate_ref, dec.right_candidate_ref),
+        new_dec,
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(
+            **_semantic_bundle(planning, fin, ident, index=index, decision_set=decision_set)
+        )
+
+
+def test_llm_evidence_empty_passes(tmp_path):
+    """Empty evidence is allowed: a semantic scenario where every LLM decision
+    carries no evidence passes the verifier."""
+    planning, fin, ident, rh, pair_to_hash, prep, index = make_semantic_scenario(
+        7, use_evidence=False
+    )
+    assert all(d.evidence_refs == () for d in fin.decision_set.decisions if d.method == "llm")
+    _verify_finalization_bundle(**_semantic_bundle(planning, fin, ident, index=index))
 
 
 if __name__ == "__main__":  # pragma: no cover

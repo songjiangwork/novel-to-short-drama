@@ -214,14 +214,19 @@ class ReconciliationSemanticPreparation:
 # ---------------------------------------------------------------------------
 
 
-def _pack_semantic_blocks(
+def pack_semantic_pairs_v1(
     planning_result: ReconciliationPlanningResult,
-) -> list[list[ReconciliationPairPlan]]:
-    """Deterministic greedy packing of needs_semantic_decision pairs into blocks.
+) -> tuple[tuple[ReconciliationPairPlan, ...], ...]:
+    """Provider-free A4C semantic block packing authority.
 
-    Returns a list of blocks, each a list of pair plans.
+    Deterministic greedy packing of the ``needs_semantic_decision`` pair plans
+    into blocks using the frozen :data:`MAX_PAIRS_PER_BLOCK` / :data:`MAX_CANDIDATES_PER_BLOCK`
+    limits and canonical pair ordering (``(left, right)``). This is the SAME
+    packing :func:`prepare_semantic_resolution` uses to build the semantic
+    blocks, exposed provider-free so A4D can bind each semantic pair to its
+    exact block request hash (``semantic_request_hashes[block_ordinal]``) without
+    prompt rendering or provider calls. Do NOT duplicate this algorithm.
     """
-    # Collect all needs_semantic_decision pairs, canonical sort
     semantic_pairs = [
         p
         for p in planning_result.pair_plans
@@ -230,33 +235,37 @@ def _pack_semantic_blocks(
     semantic_pairs.sort(key=lambda p: (p.left_candidate_ref, p.right_candidate_ref))
 
     if not semantic_pairs:
-        return []
+        return ()
 
-    blocks: list[list[ReconciliationPairPlan]] = []
+    blocks: list[tuple[ReconciliationPairPlan, ...]] = []
     current_block: list[ReconciliationPairPlan] = []
     current_candidates: set[str] = set()
 
     for pair in semantic_pairs:
         pair_candidates = {pair.left_candidate_ref, pair.right_candidate_ref}
-
-        # Check if adding this pair would violate the limits
         if current_block:
             would_exceed_pairs = len(current_block) + 1 > MAX_PAIRS_PER_BLOCK
             would_exceed_candidates = (
                 len(current_candidates | pair_candidates) > MAX_CANDIDATES_PER_BLOCK
             )
             if would_exceed_pairs or would_exceed_candidates:
-                blocks.append(current_block)
+                blocks.append(tuple(current_block))
                 current_block = []
                 current_candidates = set()
-
         current_block.append(pair)
         current_candidates |= pair_candidates
 
     if current_block:
-        blocks.append(current_block)
+        blocks.append(tuple(current_block))
 
-    return blocks
+    return tuple(blocks)
+
+
+def _pack_semantic_blocks(
+    planning_result: ReconciliationPlanningResult,
+) -> list[list[ReconciliationPairPlan]]:
+    """Backward-compatible list-of-lists view of the frozen packing authority."""
+    return [list(block) for block in pack_semantic_pairs_v1(planning_result)]
 
 
 def _build_block_id(

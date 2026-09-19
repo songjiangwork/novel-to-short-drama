@@ -94,10 +94,15 @@ from .reconciliation_planning import (
     PAIR_STATE_AUTO_SAME,
     PAIR_STATE_MUST_NOT_MERGE,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
+    ReconciliationPlanningResult,
     plan_candidate_index_v1,
     validate_candidate_index_source_order,
 )
-from .reconciliation_semantic import compute_llm_decision_id, llm_reason_code
+from .reconciliation_semantic import (
+    compute_llm_decision_id,
+    llm_reason_code,
+    pack_semantic_pairs_v1,
+)
 from .reconciliation_validation import validate_finalization
 
 
@@ -585,30 +590,63 @@ def validate_a4_semantic_identity_binding(
     *,
     decisions: tuple[ReconciliationDecision, ...],
     semantic_identity: A4SemanticIdentity,
+    candidate_index: CandidateEntityIndex,
+    replanned: ReconciliationPlanningResult,
 ) -> None:
-    """Fail closed unless every LLM decision binds to the A4 semantic identity.
+    """Fail closed unless every LLM decision binds exactly to the A4C requests.
 
-    For every LLM decision requires, simultaneously:
+    This reproduces the A4C persisted-domain invariants WITHOUT re-running the
+    LLM. For every LLM decision requires, simultaneously:
       * ``method == "llm"`` with a ``generation_provenance``;
       * ``prompt_id`` / ``prompt_version`` equal the semantic identity's;
       * the provenance identity (semantic profile id/hash, prompt id/version
         content hash, output schema id/version/hash) matches the semantic
         identity exactly;
-      * the provenance ``request_hash`` is one of the semantic request hashes;
-      * ``decision_id`` equals the deterministically recomputed A4C decision id
-        (the reason code is derived from the decision itself, never trusted
-        from a persisted field).
+      * ``reason_code`` equals ``llm_reason_code(decision)`` (never trusted from
+        a persisted field);
+      * the provenance ``request_hash`` equals the request hash of the EXACT
+        semantic block that contained this pair (via the shared A4C packing
+        authority ``pack_semantic_pairs_v1``);
+      * every ``evidence_ref`` exact-equals an evidence ref belonging to the
+        left or right candidate (empty allowed; duplicates rejected);
+      * ``decision_id`` equals the deterministically recomputed A4C decision id.
 
-    Additionally requires exact request-hash coverage: the ordered first
-    occurrence of the LLM decisions' request hashes (in canonical pair order)
-    equals ``semantic_identity.semantic_request_hashes``. With zero semantic
-    pairs there are no LLM decisions and ``semantic_request_hashes == ()``.
+    Additionally requires the number of deterministic semantic blocks to equal
+    ``len(semantic_identity.semantic_request_hashes)``, and exact request-hash
+    coverage: the ordered first occurrence of the LLM decisions' request hashes
+    (in canonical pair order) equals ``semantic_identity.semantic_request_hashes``.
+    With zero semantic pairs there are no LLM decisions and ``semantic_request_hashes == ()``.
     """
+    # Deterministic block -> request hash mapping (single shared authority).
+    blocks = pack_semantic_pairs_v1(replanned)
+    semantic_request_hashes = semantic_identity.semantic_request_hashes
+    if len(blocks) != len(semantic_request_hashes):
+        raise StoryIntegrityError(
+            "number of deterministic semantic blocks "
+            f"({len(blocks)}) does not match the semantic identity request hash "
+            f"count ({len(semantic_request_hashes)})"
+        )
+    pair_to_request_hash: dict[tuple[str, str], str] = {}
+    for block_ordinal, block in enumerate(blocks):
+        block_hash = semantic_request_hashes[block_ordinal]
+        for plan in block:
+            pair_to_request_hash[
+                (plan.left_candidate_ref, plan.right_candidate_ref)
+            ] = block_hash
+
+    # Endpoint evidence authority for exact-equality revalidation.
+    endpoint_evidence: dict[str, set[tuple]] = {
+        entry.candidate_ref: {
+            (ev.paragraph_id, ev.role, ev.strength, ev.excerpt)
+            for ev in entry.evidence_refs
+        }
+        for entry in candidate_index.entries
+    }
+
     llm_decisions = sorted(
         (d for d in decisions if d.method == "llm"),
         key=lambda d: (d.left_candidate_ref, d.right_candidate_ref),
     )
-    request_hashes = set(semantic_identity.semantic_request_hashes)
     for decision in llm_decisions:
         provenance = decision.generation_provenance
         if provenance is None:
@@ -638,11 +676,47 @@ def validate_a4_semantic_identity_binding(
                 f"LLM decision {decision.decision_id!r} generation provenance "
                 f"identity does not match the semantic identity"
             )
-        if provenance.request_hash not in request_hashes:
+        # reason_code must equal the deterministic A4C authority for the decision.
+        if decision.reason_code != llm_reason_code(decision.decision):
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} reason_code "
+                f"{decision.reason_code!r} does not equal the A4C authority "
+                f"{llm_reason_code(decision.decision)!r}"
+            )
+        # Exact block request-hash binding (stricter than membership).
+        pair_key = (decision.left_candidate_ref, decision.right_candidate_ref)
+        expected_block_hash = pair_to_request_hash.get(pair_key)
+        if expected_block_hash is None:
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} for pair {pair_key!r} is "
+                f"not in any deterministic semantic block"
+            )
+        if provenance.request_hash != expected_block_hash:
             raise StoryIntegrityError(
                 f"LLM decision {decision.decision_id!r} request_hash "
-                f"{provenance.request_hash!r} is not among the semantic request hashes"
+                f"{provenance.request_hash!r} does not match the request hash of "
+                f"the semantic block that contains pair {pair_key!r} "
+                f"({expected_block_hash!r})"
             )
+        # Evidence exactness against the persisted candidate index.
+        valid_evidence = (
+            endpoint_evidence.get(decision.left_candidate_ref, set())
+            | endpoint_evidence.get(decision.right_candidate_ref, set())
+        )
+        seen_evidence: set[tuple] = set()
+        for ev in decision.evidence_refs:
+            ev_tuple = (ev.paragraph_id, ev.role, ev.strength, ev.excerpt)
+            if ev_tuple not in valid_evidence:
+                raise StoryIntegrityError(
+                    f"LLM decision {decision.decision_id!r} evidence_ref "
+                    f"{ev_tuple!r} is not exact evidence of either endpoint"
+                )
+            if ev_tuple in seen_evidence:
+                raise StoryIntegrityError(
+                    f"LLM decision {decision.decision_id!r} has duplicate "
+                    f"evidence_ref {ev_tuple!r}"
+                )
+            seen_evidence.add(ev_tuple)
         expected_id = compute_llm_decision_id(
             left_ref=decision.left_candidate_ref,
             right_ref=decision.right_candidate_ref,
@@ -717,8 +791,12 @@ def _validate_profile_binding(
 ) -> None:
     """Bind the semantic identity to the reconciliation profile.
 
-    Full binding (profile object) verifies the id AND hash; profile-id-only
-    binding (reuse) verifies the id only.
+    Full binding (profile object) verifies the id AND hash AND the exact
+    prompt / output-schema identity (id + version). Profile-id-only binding
+    (reuse) verifies the id only -- it stays narrow: a historical CURRENT's
+    profile id matching the namespace is all that is required before the
+    normal semantic-identity comparison (a differing historical profile is a
+    cache miss, not corruption).
     """
     if profile is not None:
         if semantic_identity.reconciliation_profile_id != profile.profile_id:
@@ -729,6 +807,26 @@ def _validate_profile_binding(
         if semantic_identity.reconciliation_profile_hash != profile.profile_hash:
             raise StoryIntegrityError(
                 "semantic identity reconciliation profile hash does not match the "
+                "requested reconciliation profile"
+            )
+        if semantic_identity.prompt_id != profile.prompt_id:
+            raise StoryIntegrityError(
+                "semantic identity prompt_id does not match the requested "
+                "reconciliation profile"
+            )
+        if semantic_identity.prompt_version != profile.prompt_version:
+            raise StoryIntegrityError(
+                "semantic identity prompt_version does not match the requested "
+                "reconciliation profile"
+            )
+        if semantic_identity.output_schema_id != profile.output_schema_id:
+            raise StoryIntegrityError(
+                "semantic identity output_schema_id does not match the requested "
+                "reconciliation profile"
+            )
+        if semantic_identity.output_schema_version != profile.output_schema_version:
+            raise StoryIntegrityError(
+                "semantic identity output_schema_version does not match the "
                 "requested reconciliation profile"
             )
     elif profile_id is not None:
@@ -863,9 +961,14 @@ def _verify_finalization_bundle(
             findings=tuple(findings),
         )
 
-    # Bind the LLM decisions to the semantic identity.
+    # Bind the LLM decisions to the semantic identity (exact block request
+    # hash + persisted evidence + reason-code invariants), using the replanned
+    # pair plans and the persisted candidate index as exact authorities.
     validate_a4_semantic_identity_binding(
-        decisions=decisions, semantic_identity=semantic_identity
+        decisions=decisions,
+        semantic_identity=semantic_identity,
+        candidate_index=index,
+        replanned=replanned,
     )
     # Bind the candidate index to the A3 input identity.
     _validate_a3_input_index_binding(index, a3_input)

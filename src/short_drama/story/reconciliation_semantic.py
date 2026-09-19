@@ -52,6 +52,7 @@ from short_drama.llm import (
     PromptRegistry,
     PromptSpec,
     SemanticLLMProfile,
+    StructuredGenerationRequest,
     StructuredGenerationResult,
     build_structured_request,
     render_prompt,
@@ -154,6 +155,40 @@ class ReconciliationSemanticResult:
     all_decisions: tuple[ReconciliationDecision, ...]
     semantic_request_hashes: tuple[str, ...]
     block_results: tuple[ReconciliationSemanticBlockResult, ...]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic, zero-provider preparation (A4D reuse seam)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSemanticPreparation:
+    """Deterministic, ZERO-provider A4C preparation.
+
+    Built without any LLM call. Carries the exact blocks, the per-block
+    ``StructuredGenerationRequest`` values (aligned with ``blocks``), the
+    canonical-order semantic request hashes, and the backend-neutral
+    prompt / output-schema / semantic-profile identity.
+
+    This is the single deterministic request-construction path. Both
+    :func:`resolve_semantic_ambiguity` (which then drives the provider per
+    block) and A4D (which derives the :class:`A4SemanticIdentity` *before* any
+    provider call for current-only reuse) consume it, so the prepared request
+    hashes are guaranteed identical to the actual resolve-path request hashes.
+    """
+
+    blocks: tuple[ReconciliationSemanticBlock, ...]
+    structured_requests: tuple[StructuredGenerationRequest, ...]
+    semantic_request_hashes: tuple[str, ...]
+    prompt_id: str
+    prompt_version: int
+    prompt_content_hash: str
+    output_schema_id: str
+    output_schema_version: int
+    output_schema_hash: str
+    semantic_profile_id: str
+    semantic_profile_hash: str
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +672,97 @@ def _convert_to_decision(
 
 
 # ---------------------------------------------------------------------------
+# Deterministic, zero-provider preparation (A4D reuse seam)
+# ---------------------------------------------------------------------------
+
+
+def _load_output_schema(
+    profile: EntityReconciliationProfile, output_schema_path: str | Path
+) -> OutputSchema:
+    """Load the profile-pinned JSON Schema and build the OutputSchema."""
+    try:
+        schema_data = load_json(Path(output_schema_path))
+    except Exception as exc:  # noqa: BLE001
+        raise ReconciliationSemanticError(
+            f"failed to load reconciliation-decision-payload output schema: {exc}"
+        ) from exc
+    if not isinstance(schema_data, dict):
+        raise ReconciliationSemanticError(
+            "reconciliation-decision-payload output schema must be a JSON object"
+        )
+    return OutputSchema.create(
+        schema_id=profile.output_schema_id,
+        schema_version=profile.output_schema_version,
+        schema=schema_data,
+    )
+
+
+def prepare_semantic_resolution(
+    planning_result: ReconciliationPlanningResult,
+    profile: EntityReconciliationProfile,
+    semantic_profile: SemanticLLMProfile,
+    *,
+    prompt_registry: PromptRegistry | None = None,
+    output_schema_path: str | Path = DEFAULT_OUTPUT_SCHEMA_PATH,
+) -> ReconciliationSemanticPreparation:
+    """Deterministically prepare A4C semantic requests WITHOUT any provider call.
+
+    This is the zero-provider preparation seam A4D consumes to derive the
+    :class:`A4SemanticIdentity` (and decide current-only reuse) before any LLM
+    call. It:
+
+    1. Builds the semantic blocks (fail-closed endpoint validation first).
+    2. Loads the profile-pinned prompt + output schema.
+    3. Runs the profile consistency gate (fail closed, zero provider calls).
+    4. Builds one ``StructuredGenerationRequest`` per block (no provider call).
+
+    The returned ``structured_requests`` are aligned with ``blocks``; their
+    request hashes equal the exact hashes the resolve path uses, so the
+    prepared identity and the actual resolve path agree by construction.
+    """
+    blocks = _build_blocks(planning_result)
+
+    registry = prompt_registry if prompt_registry is not None else PromptRegistry(
+        DEFAULT_PROMPT_BASE_DIR
+    )
+    prompt_spec = registry.load(profile.prompt_id, version=profile.prompt_version)
+
+    output_schema = _load_output_schema(profile, output_schema_path)
+
+    # Profile consistency gate (FAIL CLOSED, zero provider calls)
+    _check_profile_consistency(profile, prompt_spec, output_schema)
+
+    structured_requests: list[StructuredGenerationRequest] = []
+    for block in blocks:
+        variables = {
+            "block_id": block.block_id,
+            "candidate_packets_json": block.candidate_packets_json,
+            "requested_pairs_json": block.requested_pairs_json,
+        }
+        rendered_prompt = render_prompt(prompt_spec, variables)
+        request = build_structured_request(
+            rendered_prompt=rendered_prompt,
+            output_schema=output_schema,
+            semantic_profile=semantic_profile,
+        )
+        structured_requests.append(request)
+
+    return ReconciliationSemanticPreparation(
+        blocks=blocks,
+        structured_requests=tuple(structured_requests),
+        semantic_request_hashes=tuple(r.request_hash for r in structured_requests),
+        prompt_id=prompt_spec.prompt_id,
+        prompt_version=prompt_spec.version,
+        prompt_content_hash=prompt_spec.content_hash,
+        output_schema_id=output_schema.schema_id,
+        output_schema_version=output_schema.schema_version,
+        output_schema_hash=output_schema.schema_hash,
+        semantic_profile_id=semantic_profile.profile_id,
+        semantic_profile_hash=semantic_profile.semantic_profile_hash,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -655,11 +781,15 @@ def resolve_semantic_ambiguity(
     Consumes the A4B ``ReconciliationPlanningResult`` and resolves all
     ``needs_semantic_decision`` pairs via bounded LLM semantic generation.
 
+    The deterministic, zero-provider request construction is delegated to
+    :func:`prepare_semantic_resolution` (the A4D reuse seam); this function
+    only drives the provider per block and merges the results.
+
     Returns a :class:`ReconciliationSemanticResult` with:
       * all semantic blocks (in order);
       * all LLM decisions;
       * the combined deterministic + semantic decision set (all_decisions);
-      * the semantic request hashes (for future A4D reuse).
+      * the semantic request hashes (for A4D reuse).
 
     Fails closed (raises) on:
       * profile/prompt/schema contradiction;
@@ -669,71 +799,36 @@ def resolve_semantic_ambiguity(
 
     A4C does NOT persist, write CURRENT, or reuse.
     """
-    # 1. Build blocks (deterministic packing)
-    blocks = _build_blocks(planning_result)
+    preparation = prepare_semantic_resolution(
+        planning_result,
+        profile,
+        semantic_profile,
+        prompt_registry=prompt_registry,
+        output_schema_path=output_schema_path,
+    )
+    blocks = preparation.blocks
 
-    # 2. Zero semantic pairs → zero blocks → validate deterministic coverage
+    # 1. Zero semantic pairs → zero blocks → validate deterministic coverage
     if not blocks:
         all_decisions = _validate_decision_coverage(
             planning_result, planning_result.decisions, ()
         )
         return ReconciliationSemanticResult(
             planning_result=planning_result,
-            blocks=(),
+            blocks=blocks,
             semantic_decisions=(),
             all_decisions=all_decisions,
-            semantic_request_hashes=(),
+            semantic_request_hashes=preparation.semantic_request_hashes,
             block_results=(),
         )
 
-    # 3. Load the profile-pinned prompt
-    registry = prompt_registry if prompt_registry is not None else PromptRegistry(
-        DEFAULT_PROMPT_BASE_DIR
-    )
-    prompt_spec = registry.load(profile.prompt_id, version=profile.prompt_version)
-
-    # 4. Build the output schema
-    try:
-        schema_data = load_json(Path(output_schema_path))
-    except Exception as exc:  # noqa: BLE001
-        raise ReconciliationSemanticError(
-            f"failed to load reconciliation-decision-payload output schema: {exc}"
-        ) from exc
-    if not isinstance(schema_data, dict):
-        raise ReconciliationSemanticError(
-            "reconciliation-decision-payload output schema must be a JSON object"
-        )
-    output_schema = OutputSchema.create(
-        schema_id=profile.output_schema_id,
-        schema_version=profile.output_schema_version,
-        schema=schema_data,
-    )
-
-    # 5. Profile consistency gate (FAIL CLOSED, zero provider calls)
-    _check_profile_consistency(profile, prompt_spec, output_schema)
-
-    # 6. Process each block sequentially
+    # 2. Process each block sequentially (provider invocation happens here)
     all_semantic_decisions: list[ReconciliationDecision] = []
     all_block_results: list[ReconciliationSemanticBlockResult] = []
-    all_request_hashes: list[str] = []
 
-    for block in blocks:
-        # Build the prompt variables for this block
-        variables = {
-            "block_id": block.block_id,
-            "candidate_packets_json": block.candidate_packets_json,
-            "requested_pairs_json": block.requested_pairs_json,
-        }
-
-        # Render once
-        rendered_prompt = render_prompt(prompt_spec, variables)
-
-        # Build the structured request once
-        request = build_structured_request(
-            rendered_prompt=rendered_prompt,
-            output_schema=output_schema,
-            semantic_profile=semantic_profile,
-        )
+    for block, request in zip(blocks, preparation.structured_requests):
+        rendered_prompt = request.rendered_prompt
+        output_schema = request.output_schema
 
         # Parse candidate packets for evidence validation
         candidate_packets = json.loads(block.candidate_packets_json)
@@ -783,8 +878,8 @@ def resolve_semantic_ambiguity(
                     _convert_to_decision(
                         item,
                         request_hash=request.request_hash,
-                        prompt_id=prompt_spec.prompt_id,
-                        prompt_version=prompt_spec.version,
+                        prompt_id=rendered_prompt.prompt_id,
+                        prompt_version=rendered_prompt.prompt_version,
                         provenance=result.provenance,
                     )
                 )
@@ -802,7 +897,6 @@ def resolve_semantic_ambiguity(
                     generation_provenance=block_provenance,  # type: ignore[arg-type]
                 )
             )
-            all_request_hashes.append(request.request_hash)
         else:
             # Semantic exhaustion
             raise ReconciliationSemanticGenerationError(
@@ -815,7 +909,7 @@ def resolve_semantic_ambiguity(
                 ),
             )
 
-    # 7. Combine + validate exact decision coverage
+    # 3. Combine + validate exact decision coverage
     all_decisions = _validate_decision_coverage(
         planning_result, planning_result.decisions, tuple(all_semantic_decisions)
     )
@@ -825,7 +919,7 @@ def resolve_semantic_ambiguity(
         blocks=blocks,
         semantic_decisions=tuple(all_semantic_decisions),
         all_decisions=all_decisions,
-        semantic_request_hashes=tuple(all_request_hashes),
+        semantic_request_hashes=preparation.semantic_request_hashes,
         block_results=tuple(all_block_results),
     )
 

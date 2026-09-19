@@ -43,6 +43,7 @@ from short_drama.llm import (
 from short_drama.paths import PROFILES_DIR, REPO_ROOT, SCHEMAS_DIR
 from short_drama.story import (
     A3InputIdentity,
+    A4SemanticIdentity,
     CandidateEntityIndex,
     CandidateEntityIndexEntry,
     CanonicalCharacterRegistry,
@@ -254,6 +255,25 @@ def make_a3_input(**overrides) -> A3InputIdentity:
     return A3InputIdentity(**values)
 
 
+def make_semantic_identity(**overrides) -> A4SemanticIdentity:
+    values = {
+        "reconciliation_profile_id": "entity-reconciliation-v1",
+        "reconciliation_profile_hash": H,
+        "semantic_profile_id": "entity-reconciliation-llm-v1",
+        "semantic_profile_hash": H2,
+        "prompt_id": A4_PROMPT_ID,
+        "prompt_version": A4_PROMPT_VERSION,
+        "prompt_content_hash": PROMPT_CONTENT_HASH,
+        "output_schema_id": "a4-reconciliation-decision-payload",
+        "output_schema_version": 1,
+        "output_schema_hash": H,
+        "plan_hash": H2,
+        "semantic_request_hashes": (),
+    }
+    values.update(overrides)
+    return A4SemanticIdentity(**values)
+
+
 def make_entry(**overrides) -> EntityMapEntry:
     values = {
         "candidate_ref": LEFT_REF,
@@ -293,6 +313,7 @@ def make_entity_map(**overrides) -> EntityMap:
             artifact_type="unresolved_entity_set", artifact_id="ues-0001"
         ),
         "a3_input": make_a3_input(),
+        "semantic_identity": make_semantic_identity(),
     }
     values.update(overrides)
     return EntityMap(**values)
@@ -774,6 +795,62 @@ class TestSchemaParity:
         # valid EntityMap can carry it; the schema additionally rejects it.
         with pytest.raises(ReconciliationModelError):
             make_entry(canonical_id="char_0001", unresolved_id="unres_0001")
+
+
+# ---------------------------------------------------------------------------
+# A4SemanticIdentity (EntityMap v2)
+# ---------------------------------------------------------------------------
+
+
+class TestA4SemanticIdentity:
+    def test_round_trip(self) -> None:
+        ident = make_semantic_identity(semantic_request_hashes=(H, H2))
+        assert A4SemanticIdentity.from_dict(ident.to_dict()) == ident
+
+    def test_empty_request_hashes_allowed(self) -> None:
+        ident = make_semantic_identity(semantic_request_hashes=())
+        assert ident.semantic_request_hashes == ()
+
+    @pytest.mark.parametrize("field", [
+        "reconciliation_profile_hash",
+        "semantic_profile_hash",
+        "prompt_content_hash",
+        "output_schema_hash",
+        "plan_hash",
+    ])
+    def test_bad_hash_rejected(self, field: str) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_semantic_identity(**{field: "not-a-hash"})
+
+    def test_non_hash_request_hash_rejected(self) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_semantic_identity(semantic_request_hashes=("nothex",))
+
+    def test_duplicate_request_hashes_rejected(self) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_semantic_identity(semantic_request_hashes=(H, H))
+
+    def test_schema_parity(self) -> None:
+        # Validate the full EntityMap (which embeds semantic_identity) against
+        # the v2 schema; a valid semantic_identity must be accepted.
+        entity_map = make_entity_map(
+            semantic_identity=make_semantic_identity(semantic_request_hashes=(H, H2))
+        )
+        assert _validate(entity_map.to_dict(), _schema("entity-map.schema.json")) == []
+
+    def test_schema_rejects_bad_request_hash(self) -> None:
+        # A semantic_request_hashes item that is not a SHA-256 must be rejected
+        # by the schema (build the dict manually to bypass the Python model).
+        entity_map = make_entity_map(
+            semantic_identity=make_semantic_identity(semantic_request_hashes=(H,))
+        )
+        data = entity_map.to_dict()
+        data["semantic_identity"]["semantic_request_hashes"] = ["not-a-hash"]
+        assert _validate(data, _schema("entity-map.schema.json")) != []
+
+    def test_entity_map_requires_semantic_identity(self) -> None:
+        with pytest.raises(ReconciliationModelError):
+            make_entity_map(semantic_identity=None)
 
 
 # ---------------------------------------------------------------------------

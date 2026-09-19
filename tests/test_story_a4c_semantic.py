@@ -56,6 +56,7 @@ from short_drama.story import (
     ReconciliationDecisionItem,
     ReconciliationDecisionPayload,
     ReconciliationInputSnapshot,
+    ReconciliationModelError,
     ReconciliationPairPlan,
     ReconciliationPlanningError,
     ReconciliationPlanningResult,
@@ -72,6 +73,7 @@ from short_drama.story.reconciliation_semantic import (
     _build_candidate_packets,
     _build_requested_pairs_json,
     _pack_semantic_blocks,
+    _validate_decision_coverage,
     _verify_provenance,
 )
 
@@ -1619,3 +1621,389 @@ class TestZeroPairs:
         assert res.semantic_decisions == ()
         assert res.all_decisions == (auto_decision,)
         assert res.semantic_request_hashes == ()
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: Missing semantic-pair endpoint must fail before provider call
+# ---------------------------------------------------------------------------
+
+
+class TestMissingEndpointFailClosed:
+    """Invalid A4B planning input (missing endpoint / wrong kind) → fail closed,
+    zero provider calls, NOT semantic retry."""
+
+    def test_left_endpoint_missing_from_index(self):
+        """Semantic pair left endpoint missing from CandidateEntityIndex.
+
+        → ReconciliationSemanticError → FakeLLMClient call_count == 0
+        """
+        # left < right, left NOT in index, right in index
+        left = f"{CHUNK_ID}:cand_char_001"  # not in index
+        right = f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(right, display_name="B"),
+            # NO entry for left
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        client = FakeLLMClient([make_valid_payload(left, right, "same_entity")])
+        with pytest.raises(ReconciliationSemanticError, match="not found in"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+        assert client.call_count == 0
+
+    def test_right_endpoint_missing_from_index(self):
+        """Semantic pair right endpoint missing from CandidateEntityIndex.
+
+        → ReconciliationSemanticError → FakeLLMClient call_count == 0
+        """
+        # left in index, right NOT in index
+        left = f"{CHUNK_ID}:cand_char_001"
+        right = f"{CHUNK_ID}:cand_char_002"  # not in index
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            # NO entry for right
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        client = FakeLLMClient([make_valid_payload(left, right, "same_entity")])
+        with pytest.raises(ReconciliationSemanticError, match="not found in"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+        assert client.call_count == 0
+
+    def test_non_merge_graph_candidate_kind(self):
+        """Semantic pair points to non-merge-graph candidate kind.
+
+        → fail closed → zero calls
+        """
+        left = f"{CHUNK_ID}:cand_char_001"
+        right = f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, kind="unresolved_person", display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        client = FakeLLMClient([make_valid_payload(left, right, "same_entity")])
+        with pytest.raises(ReconciliationSemanticError, match="candidate_kind"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+        assert client.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: Enforce exact A4B explicit-pair decision coverage
+# ---------------------------------------------------------------------------
+
+
+def _make_det_decision(
+    left: str,
+    right: str,
+    decision: str,
+    method: str = "deterministic",
+) -> ReconciliationDecision:
+    """Helper to build a deterministic decision."""
+    return ReconciliationDecision(
+        decision_id="dec_" + "d" * 20,
+        left_candidate_ref=left,
+        right_candidate_ref=right,
+        decision=decision,
+        method=method,
+        reason_code="test_reason",
+        reason_zh="测试",
+        evidence_refs=(),
+        prompt_id=None,
+        prompt_version=None,
+        generation_provenance=None,
+    )
+
+
+class TestDecisionCoverage:
+    """Exact pair coverage: every explicit pair → exactly one decision,
+    with state/method consistency."""
+
+    def test_auto_same_decision_missing(self):
+        """auto_same pair but deterministic decision missing.
+
+        → ReconciliationSemanticError → zero provider calls (no semantic pairs)
+        """
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),)
+        # NO decisions supplied for the auto_same pair
+        result = make_planning_result(entries, pair_plans, decisions=())
+
+        client = FakeLLMClient([])
+        with pytest.raises(ReconciliationSemanticError, match="no decision found"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+        assert client.call_count == 0
+
+    def test_must_not_merge_decision_missing(self):
+        """must_not_merge pair decision missing → fail closed."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_MUST_NOT_MERGE),)
+        result = make_planning_result(entries, pair_plans, decisions=())
+
+        client = FakeLLMClient([])
+        with pytest.raises(ReconciliationSemanticError, match="no decision found"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+        assert client.call_count == 0
+
+    def test_extra_deterministic_decision_not_in_pair_plans(self):
+        """Extra deterministic decision not present in pair_plans → fail closed."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        extra_left = f"{CHUNK_ID}:cand_char_010"
+        extra_right = f"{CHUNK_ID}:cand_char_011"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+            make_candidate_entry(extra_left, display_name="X"),
+            make_candidate_entry(extra_right, display_name="Y"),
+        )
+        pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),)
+        # Valid decision for the auto_same pair + an extra one not in pair_plans
+        valid_det = _make_det_decision(left, right, "same_entity")
+        extra_det = _make_det_decision(extra_left, extra_right, "same_entity")
+        result = make_planning_result(
+            entries, pair_plans, decisions=(valid_det, extra_det)
+        )
+
+        client = FakeLLMClient([])
+        with pytest.raises(ReconciliationSemanticError, match="not present in"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+        assert client.call_count == 0
+
+    def test_deterministic_decision_for_needs_semantic_pair(self):
+        """Deterministic decision supplied for needs_semantic_decision pair
+        → fail closed (duplicate: deterministic + LLM both for same pair)."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_NEEDS_SEMANTIC_DECISION),)
+        # Deterministic decision for a pair that needs semantic → duplicate with LLM
+        det = _make_det_decision(left, right, "same_entity", method="deterministic")
+        result = make_planning_result(entries, pair_plans, decisions=(det,))
+
+        client = FakeLLMClient([make_valid_payload(left, right, "same_entity")])
+        with pytest.raises(ReconciliationSemanticError, match="duplicate decision"):
+            resolve_semantic_ambiguity(
+                result, make_profile(), make_semantic_profile(), client,
+                prompt_registry=PROMPT_REGISTRY,
+            )
+
+    def test_wrong_method_for_semantic_pair_direct(self):
+        """A single deterministic decision for a semantic pair (no LLM) →
+        method consistency check fires: 'expected llm'.
+
+        Tests _validate_decision_coverage directly.
+        """
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_NEEDS_SEMANTIC_DECISION),)
+        det = _make_det_decision(left, right, "same_entity", method="deterministic")
+        result = make_planning_result(entries, pair_plans, decisions=(det,))
+
+        with pytest.raises(ReconciliationSemanticError, match="expected 'llm'"):
+            _validate_decision_coverage(result, (det,), ())
+
+    def test_semantic_duplicate_deterministic_pair(self):
+        """Semantic decision attempts to duplicate deterministic pair
+        → fail closed."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (
+            make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),
+        )
+        det = _make_det_decision(left, right, "same_entity")
+        # Also provide a semantic decision for the same pair (should be duplicate)
+        result = make_planning_result(entries, pair_plans, decisions=(det,))
+
+        # No semantic pairs → should fail at coverage validation before LLM call
+        client = FakeLLMClient([])
+        with pytest.raises(ReconciliationSemanticError, match="duplicate decision"):
+            # Inject a fake semantic decision via a direct coverage validation call
+            _validate_decision_coverage(
+                result, (det,), (det,)
+            )
+        assert client.call_count == 0
+
+    def test_valid_mixed_auto_same_must_not_merge_semantic(self):
+        """Valid mixed auto_same + must_not_merge + semantic → exact full
+        coverage PASS."""
+        a_left, a_right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        b_left, b_right = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
+        c_left, c_right = f"{CHUNK_ID}:cand_char_005", f"{CHUNK_ID}:cand_char_006"
+
+        entries = (
+            make_candidate_entry(a_left, display_name="A"),
+            make_candidate_entry(a_right, display_name="B"),
+            make_candidate_entry(b_left, display_name="C"),
+            make_candidate_entry(b_right, display_name="D"),
+            make_candidate_entry(c_left, display_name="E"),
+            make_candidate_entry(c_right, display_name="F"),
+        )
+        pair_plans = (
+            make_pair_plan(a_left, a_right, state=PAIR_STATE_AUTO_SAME),
+            make_pair_plan(b_left, b_right, state=PAIR_STATE_MUST_NOT_MERGE),
+            make_pair_plan(c_left, c_right, state=PAIR_STATE_NEEDS_SEMANTIC_DECISION),
+        )
+        det_same = _make_det_decision(a_left, a_right, "same_entity")
+        det_diff = _make_det_decision(b_left, b_right, "different_entity")
+        result = make_planning_result(
+            entries, pair_plans, decisions=(det_same, det_diff)
+        )
+
+        client = FakeLLMClient(
+            [make_valid_payload(c_left, c_right, "uncertain")]
+        )
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+
+        assert client.call_count == 1
+        assert len(res.all_decisions) == 3
+        # Verify all three pairs are present
+        pair_keys = {
+            (d.left_candidate_ref, d.right_candidate_ref) for d in res.all_decisions
+        }
+        assert pair_keys == {
+            (a_left, a_right),
+            (b_left, b_right),
+            (c_left, c_right),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: Catch only typed-model rejection during semantic regeneration
+# ---------------------------------------------------------------------------
+
+
+class TestTypedModelExceptionNarrowing:
+    """Only ReconciliationModelError triggers semantic retry. Unexpected
+    non-model exceptions must propagate."""
+
+    def test_reconciliation_model_error_triggers_retry(self):
+        """ReconciliationModelError → semantic retry (2nd round attempted)."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        # First round: non-canonical pair order (left > right) triggers
+        # ReconciliationModelError in from_dict(). Schema passes because both
+        # refs match the pattern.
+        bad_payload = {
+            "decisions": [
+                {
+                    "left_candidate_ref": right,   # intentionally reversed
+                    "right_candidate_ref": left,
+                    "decision": "same_entity",
+                    "reason_zh": "测试",
+                    "evidence_refs": [],
+                }
+            ]
+        }
+        good_payload = make_valid_payload(left, right, "same_entity")
+
+        client = FakeLLMClient([bad_payload, good_payload])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+
+        # 2 rounds consumed: first failed (ReconciliationModelError), second succeeded
+        assert client.call_count == 2
+        assert len(res.semantic_decisions) == 1
+
+    def test_unexpected_exception_propagates(self):
+        """Unexpected non-model exception → propagated → no second semantic call."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A"),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        import short_drama.story.reconciliation_semantic as sem_mod
+
+        original_from_dict = ReconciliationDecisionPayload.from_dict
+
+        # Patch to raise a non-ReconciliationModelError exception
+        def _raise_unexpected(value):
+            raise ValueError("unexpected programming error")
+
+        sem_mod.ReconciliationDecisionPayload.from_dict = _raise_unexpected
+        try:
+            client = FakeLLMClient([make_valid_payload(left, right, "same_entity")])
+            with pytest.raises(ValueError, match="unexpected programming error"):
+                resolve_semantic_ambiguity(
+                    result, make_profile(), make_semantic_profile(), client,
+                    prompt_registry=PROMPT_REGISTRY,
+                )
+        finally:
+            sem_mod.ReconciliationDecisionPayload.from_dict = original_from_dict
+
+        # Only 1 call: the unexpected exception propagated, no retry
+        assert client.call_count == 1
+
+
+def make_valid_payload(
+    left: str,
+    right: str,
+    decision: str,
+    reason_zh: str = "LLM 判断",
+    evidence_refs: list[dict] | None = None,
+) -> dict:
+    """Build a schema-valid payload dict for FakeLLMClient."""
+    if evidence_refs is None:
+        evidence_refs = []
+    return {
+        "decisions": [
+            {
+                "left_candidate_ref": left,
+                "right_candidate_ref": right,
+                "decision": decision,
+                "reason_zh": reason_zh,
+                "evidence_refs": evidence_refs,
+            }
+        ]
+    }

@@ -59,6 +59,7 @@ from short_drama.llm import (
 from short_drama.paths import REPO_ROOT, SCHEMAS_DIR
 
 from .errors import (
+    ReconciliationModelError,
     ReconciliationProvenanceError,
     ReconciliationSemanticError,
     ReconciliationSemanticGenerationError,
@@ -71,6 +72,8 @@ from .reconciliation import (
     ReconciliationDecisionPayload,
 )
 from .reconciliation_planning import (
+    PAIR_STATE_AUTO_SAME,
+    PAIR_STATE_MUST_NOT_MERGE,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
     ReconciliationPairPlan,
     ReconciliationPlanningResult,
@@ -249,6 +252,9 @@ def _build_candidate_packets(
 
     Only includes endpoint candidates of the requested pairs, ordered by
     source_order_key from CandidateEntityIndex.
+
+    FAILS CLOSED if any endpoint ref is missing from the candidate index or
+    has a non-merge-graph kind (not character/location).
     """
     # Collect unique endpoint refs
     endpoint_refs: set[str] = set()
@@ -256,15 +262,25 @@ def _build_candidate_packets(
         endpoint_refs.add(p.left_candidate_ref)
         endpoint_refs.add(p.right_candidate_ref)
 
-    # Get candidate index entries for these refs
+    # Get candidate index entries for these refs; FAIL CLOSED on missing or
+    # non-merge-graph kind.
     ref_to_entry = {e.candidate_ref: e for e in planning_result.candidate_index.entries}
     endpoint_entries = []
-    for ref in endpoint_refs:
+    for ref in sorted(endpoint_refs):
         entry = ref_to_entry.get(ref)
-        if entry is not None:
-            endpoint_entries.append(entry)
+        if entry is None:
+            raise ReconciliationSemanticError(
+                f"semantic pair endpoint {ref!r} not found in "
+                f"CandidateEntityIndex; A4B planning input is invalid"
+            )
+        if entry.candidate_kind not in ("character", "location"):
+            raise ReconciliationSemanticError(
+                f"semantic pair endpoint {ref!r} has candidate_kind "
+                f"{entry.candidate_kind!r}; expected 'character' or 'location'"
+            )
+        endpoint_entries.append(entry)
 
-    # Sort by source_order_key
+    # Sort by source_order_key (canonical A4B order)
     endpoint_entries.sort(key=lambda e: e.source_order_key)
 
     # Build packet dicts (exact fields only)
@@ -656,13 +672,16 @@ def resolve_semantic_ambiguity(
     # 1. Build blocks (deterministic packing)
     blocks = _build_blocks(planning_result)
 
-    # 2. Zero semantic pairs → zero blocks → success with no LLM calls
+    # 2. Zero semantic pairs → zero blocks → validate deterministic coverage
     if not blocks:
+        all_decisions = _validate_decision_coverage(
+            planning_result, planning_result.decisions, ()
+        )
         return ReconciliationSemanticResult(
             planning_result=planning_result,
             blocks=(),
             semantic_decisions=(),
-            all_decisions=planning_result.decisions,
+            all_decisions=all_decisions,
             semantic_request_hashes=(),
             block_results=(),
         )
@@ -743,10 +762,10 @@ def resolve_semantic_ambiguity(
                 semantic_profile,
             )
 
-            # Typed domain load
+            # Typed domain load (only typed-model rejection triggers retry)
             try:
                 payload = ReconciliationDecisionPayload.from_dict(result.parsed_json)
-            except Exception:
+            except ReconciliationModelError:
                 last_failure = "typed payload load failed"
                 continue
 
@@ -796,9 +815,9 @@ def resolve_semantic_ambiguity(
                 ),
             )
 
-    # 7. Combine deterministic + semantic decisions
-    all_decisions = _combine_decisions(
-        planning_result.decisions, tuple(all_semantic_decisions)
+    # 7. Combine + validate exact decision coverage
+    all_decisions = _validate_decision_coverage(
+        planning_result, planning_result.decisions, tuple(all_semantic_decisions)
     )
 
     return ReconciliationSemanticResult(
@@ -811,27 +830,97 @@ def resolve_semantic_ambiguity(
     )
 
 
-def _combine_decisions(
+def _validate_decision_coverage(
+    planning_result: ReconciliationPlanningResult,
     deterministic_decisions: tuple[ReconciliationDecision, ...],
     semantic_decisions: tuple[ReconciliationDecision, ...],
 ) -> tuple[ReconciliationDecision, ...]:
-    """Combine A4B deterministic decisions with A4C semantic decisions.
+    """Validate and combine all decisions against the authoritative pair plans.
+
+    Enforces the frozen invariant:
+      * every explicit A4B pair in planning_result.pair_plans has exactly one
+        decision;
+      * no extra decisions for pairs not in pair_plans;
+      * state/method consistency:
+          auto_same → method=deterministic, decision=same_entity
+          must_not_merge → method=deterministic, decision=different_entity
+          needs_semantic_decision → method=llm, decision ∈
+              {same_entity, different_entity, uncertain}
 
     Returns canonical sort by (left_candidate_ref, right_candidate_ref).
-    Every explicit A4B pair must have exactly one decision.
     """
     all_decisions = list(deterministic_decisions) + list(semantic_decisions)
 
-    # Validate: every explicit pair from pair_plans has exactly one decision
-    # (This is enforced by the caller's block processing, but we verify here.)
-    pair_set = set()
+    # Build the decision lookup: pair key → decision
+    decision_by_pair: dict[tuple[str, str], ReconciliationDecision] = {}
     for d in all_decisions:
         key = (d.left_candidate_ref, d.right_candidate_ref)
-        if key in pair_set:
+        if key in decision_by_pair:
             raise ReconciliationSemanticError(
                 f"duplicate decision for pair {key!r}"
             )
-        pair_set.add(key)
+        decision_by_pair[key] = d
+
+    # Build the authoritative pair set from pair_plans
+    expected_pairs: set[tuple[str, str]] = set()
+    pair_state: dict[tuple[str, str], str] = {}
+    for plan in planning_result.pair_plans:
+        pair_key = (plan.left_candidate_ref, plan.right_candidate_ref)
+        expected_pairs.add(pair_key)
+        pair_state[pair_key] = plan.state
+
+    # Check: no extra decisions
+    for pair_key in decision_by_pair:
+        if pair_key not in expected_pairs:
+            raise ReconciliationSemanticError(
+                f"decision found for pair {pair_key!r} not present in "
+                f"planning_result.pair_plans; invalid decision coverage"
+            )
+
+    # Check: every expected pair has exactly one decision
+    for pair_key in expected_pairs:
+        if pair_key not in decision_by_pair:
+            raise ReconciliationSemanticError(
+                f"no decision found for pair {pair_key!r} in "
+                f"planning_result.pair_plans; incomplete decision coverage"
+            )
+
+    # State/method consistency validation
+    for pair_key, state in pair_state.items():
+        d = decision_by_pair[pair_key]
+        if state == PAIR_STATE_AUTO_SAME:
+            if d.method != "deterministic":
+                raise ReconciliationSemanticError(
+                    f"pair {pair_key!r} (auto_same) has method {d.method!r}; "
+                    f"expected 'deterministic'"
+                )
+            if d.decision != "same_entity":
+                raise ReconciliationSemanticError(
+                    f"pair {pair_key!r} (auto_same) has decision {d.decision!r}; "
+                    f"expected 'same_entity'"
+                )
+        elif state == PAIR_STATE_MUST_NOT_MERGE:
+            if d.method != "deterministic":
+                raise ReconciliationSemanticError(
+                    f"pair {pair_key!r} (must_not_merge) has method {d.method!r}; "
+                    f"expected 'deterministic'"
+                )
+            if d.decision != "different_entity":
+                raise ReconciliationSemanticError(
+                    f"pair {pair_key!r} (must_not_merge) has decision "
+                    f"{d.decision!r}; expected 'different_entity'"
+                )
+        elif state == PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            if d.method != "llm":
+                raise ReconciliationSemanticError(
+                    f"pair {pair_key!r} (needs_semantic_decision) has method "
+                    f"{d.method!r}; expected 'llm'"
+                )
+            if d.decision not in ("same_entity", "different_entity", "uncertain"):
+                raise ReconciliationSemanticError(
+                    f"pair {pair_key!r} (needs_semantic_decision) has decision "
+                    f"{d.decision!r}; expected same_entity/different_entity/uncertain"
+                )
 
     # Canonical sort
     all_decisions.sort(key=lambda d: (d.left_candidate_ref, d.right_candidate_ref))

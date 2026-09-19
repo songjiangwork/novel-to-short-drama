@@ -62,7 +62,11 @@ from short_drama.foundation import (
 from short_drama.io import load_json
 from short_drama.paths import SCHEMAS_DIR
 
-from .errors import StoryIntegrityError, StoryPersistenceError
+from .errors import (
+    ReconciliationPlanningError,
+    StoryIntegrityError,
+    StoryPersistenceError,
+)
 from .reconciliation import (
     CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
@@ -76,6 +80,7 @@ from .reconciliation import (
     CanonicalLocationRegistry,
     EntityMap,
     EntityReconciliationProfile,
+    ReconciliationDecision,
     ReconciliationDecisionSet,
     UnresolvedEntitySet,
 )
@@ -83,7 +88,16 @@ from .reconciliation_finalization import (
     ReconciliationFinalizationError,
     ReconciliationFinalizationResult,
     build_identity_graph,
+    derive_reconciliation_outputs,
 )
+from .reconciliation_planning import (
+    PAIR_STATE_AUTO_SAME,
+    PAIR_STATE_MUST_NOT_MERGE,
+    PAIR_STATE_NEEDS_SEMANTIC_DECISION,
+    plan_candidate_index_v1,
+    validate_candidate_index_source_order,
+)
+from .reconciliation_semantic import compute_llm_decision_id, llm_reason_code
 from .reconciliation_validation import validate_finalization
 
 
@@ -563,6 +577,303 @@ def _require_a4_validation_report(
 
 
 # ---------------------------------------------------------------------------
+# Shared fail-closed verification (publication revalidation + CURRENT verify)
+# ---------------------------------------------------------------------------
+
+
+def validate_a4_semantic_identity_binding(
+    *,
+    decisions: tuple[ReconciliationDecision, ...],
+    semantic_identity: A4SemanticIdentity,
+) -> None:
+    """Fail closed unless every LLM decision binds to the A4 semantic identity.
+
+    For every LLM decision requires, simultaneously:
+      * ``method == "llm"`` with a ``generation_provenance``;
+      * ``prompt_id`` / ``prompt_version`` equal the semantic identity's;
+      * the provenance identity (semantic profile id/hash, prompt id/version
+        content hash, output schema id/version/hash) matches the semantic
+        identity exactly;
+      * the provenance ``request_hash`` is one of the semantic request hashes;
+      * ``decision_id`` equals the deterministically recomputed A4C decision id
+        (the reason code is derived from the decision itself, never trusted
+        from a persisted field).
+
+    Additionally requires exact request-hash coverage: the ordered first
+    occurrence of the LLM decisions' request hashes (in canonical pair order)
+    equals ``semantic_identity.semantic_request_hashes``. With zero semantic
+    pairs there are no LLM decisions and ``semantic_request_hashes == ()``.
+    """
+    llm_decisions = sorted(
+        (d for d in decisions if d.method == "llm"),
+        key=lambda d: (d.left_candidate_ref, d.right_candidate_ref),
+    )
+    request_hashes = set(semantic_identity.semantic_request_hashes)
+    for decision in llm_decisions:
+        provenance = decision.generation_provenance
+        if provenance is None:
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} has no generation provenance"
+            )
+        if (
+            decision.prompt_id != semantic_identity.prompt_id
+            or decision.prompt_version != semantic_identity.prompt_version
+        ):
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} prompt identity "
+                f"{decision.prompt_id!r}/{decision.prompt_version!r} does not "
+                f"match the semantic identity"
+            )
+        if (
+            provenance.semantic_profile_id != semantic_identity.semantic_profile_id
+            or provenance.semantic_profile_hash != semantic_identity.semantic_profile_hash
+            or provenance.prompt_id != semantic_identity.prompt_id
+            or provenance.prompt_version != semantic_identity.prompt_version
+            or provenance.prompt_content_hash != semantic_identity.prompt_content_hash
+            or provenance.output_schema_id != semantic_identity.output_schema_id
+            or provenance.output_schema_version != semantic_identity.output_schema_version
+            or provenance.output_schema_hash != semantic_identity.output_schema_hash
+        ):
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} generation provenance "
+                f"identity does not match the semantic identity"
+            )
+        if provenance.request_hash not in request_hashes:
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} request_hash "
+                f"{provenance.request_hash!r} is not among the semantic request hashes"
+            )
+        expected_id = compute_llm_decision_id(
+            left_ref=decision.left_candidate_ref,
+            right_ref=decision.right_candidate_ref,
+            decision=decision.decision,
+            method="llm",
+            reason_code=llm_reason_code(decision.decision),
+            reason_zh=decision.reason_zh,
+            evidence_refs=decision.evidence_refs,
+            prompt_id=decision.prompt_id,
+            prompt_version=decision.prompt_version,
+            request_hash=provenance.request_hash,
+        )
+        if decision.decision_id != expected_id:
+            raise StoryIntegrityError(
+                f"LLM decision {decision.decision_id!r} does not match the "
+                f"deterministic decision-id authority (expected {expected_id!r})"
+            )
+    seen: list[str] = []
+    for decision in llm_decisions:
+        request_hash = decision.generation_provenance.request_hash  # type: ignore[union-attr]
+        if request_hash not in seen:
+            seen.append(request_hash)
+    if tuple(seen) != semantic_identity.semantic_request_hashes:
+        raise StoryIntegrityError(
+            "semantic request hashes are not exactly covered by the LLM decisions "
+            f"(expected {semantic_identity.semantic_request_hashes!r}, "
+            f"got {tuple(seen)!r})"
+        )
+
+
+def _validate_a3_input_index_binding(
+    candidate_index: CandidateEntityIndex, a3_input: A3InputIdentity
+) -> None:
+    """Fail closed unless the candidate index binds to the A3 input identity.
+
+    Requires, simultaneously:
+      * the A3 input ``candidate_extraction_refs`` are unique;
+      * every candidate's ``candidate_extraction_ref`` is a member of the A3
+        input refs;
+      * the candidate extraction source order is consistent with the A3 input
+        strict source order (non-decreasing A3 ordinal in index source order).
+    """
+    seen: set[ArtifactRef] = set()
+    for ref in a3_input.candidate_extraction_refs:
+        if ref in seen:
+            raise StoryIntegrityError(
+                f"duplicate candidate_extraction_ref in A3 input identity: {ref!r}"
+            )
+        seen.add(ref)
+    a3_ordinals = {ref: i for i, ref in enumerate(a3_input.candidate_extraction_refs)}
+    prev_ordinal = -1
+    for entry in candidate_index.entries:
+        ext_ref = entry.candidate_extraction_ref
+        if ext_ref not in a3_ordinals:
+            raise StoryIntegrityError(
+                f"candidate {entry.candidate_ref!r} references extraction "
+                f"{ext_ref!r} not present in the A3 input identity"
+            )
+        ordinal = a3_ordinals[ext_ref]
+        if ordinal < prev_ordinal:
+            raise StoryIntegrityError(
+                f"candidate {entry.candidate_ref!r} extraction ref {ext_ref!r} "
+                f"breaks the A3 input strict source order"
+            )
+        prev_ordinal = ordinal
+
+
+def _validate_profile_binding(
+    semantic_identity: A4SemanticIdentity,
+    profile: EntityReconciliationProfile | None,
+    profile_id: str | None,
+) -> None:
+    """Bind the semantic identity to the reconciliation profile.
+
+    Full binding (profile object) verifies the id AND hash; profile-id-only
+    binding (reuse) verifies the id only.
+    """
+    if profile is not None:
+        if semantic_identity.reconciliation_profile_id != profile.profile_id:
+            raise StoryIntegrityError(
+                "semantic identity reconciliation profile id does not match the "
+                "requested reconciliation profile"
+            )
+        if semantic_identity.reconciliation_profile_hash != profile.profile_hash:
+            raise StoryIntegrityError(
+                "semantic identity reconciliation profile hash does not match the "
+                "requested reconciliation profile"
+            )
+    elif profile_id is not None:
+        if semantic_identity.reconciliation_profile_id != profile_id:
+            raise StoryIntegrityError(
+                "semantic identity reconciliation profile id does not match the "
+                "requested reconciliation profile"
+            )
+
+
+def _verify_finalization_bundle(
+    *,
+    index: CandidateEntityIndex,
+    decision_set: ReconciliationDecisionSet,
+    char_registry: CanonicalCharacterRegistry,
+    loc_registry: CanonicalLocationRegistry,
+    unresolved_set: UnresolvedEntitySet,
+    entity_map_entries: tuple,
+    a3_input: A3InputIdentity,
+    semantic_identity: A4SemanticIdentity,
+    profile: EntityReconciliationProfile | None = None,
+    profile_id: str | None = None,
+) -> None:
+    """Independently revalidate a persisted (or in-memory) A4 finalization.
+
+    This is the single source of the fail-closed A4D verification, reused by
+    both :meth:`ReconciliationPersistenceService.publish_validated` (independent
+    revalidation before persistence) and
+    :meth:`ReconciliationPersistenceService._verify_current_entity_map` (CURRENT
+    verification). It:
+
+      * gates on the frozen ``source_order_key`` shape / strict source order;
+      * gates on unique decision ids;
+      * replans the index and requires the replanned ``plan_hash`` to equal the
+        semantic identity's ``plan_hash``;
+      * validates every decision against the replanned pair plans (deterministic
+        decisions must equal the replanned authority; semantic decisions must
+        use method ``llm``);
+      * exact-compares the persisted outputs against the graph-derived
+        expectation (single-source derivation authority);
+      * re-runs the deterministic graph/coverage validation;
+      * binds the LLM decisions to the semantic identity;
+      * binds the candidate index to the A3 input identity;
+      * binds the semantic identity to the reconciliation profile.
+
+    Raises :class:`ReconciliationFinalizationError` on blocking findings and
+    :class:`StoryIntegrityError` on any other structural violation.
+    """
+    decisions = decision_set.decisions
+
+    # Structural gates: frozen source order + unique decision ids. A structurally
+    # invalid index / decision set fails closed with StoryIntegrityError.
+    try:
+        validate_candidate_index_source_order(index)
+    except ReconciliationPlanningError as exc:
+        raise StoryIntegrityError(
+            f"A4 candidate index has an invalid source_order_key: {exc}"
+        ) from exc
+    seen_ids: set[str] = set()
+    for decision in decisions:
+        if decision.decision_id in seen_ids:
+            raise StoryIntegrityError(
+                f"duplicate decision_id in decision set: {decision.decision_id!r}"
+            )
+        seen_ids.add(decision.decision_id)
+
+    # Replan the index and require plan_hash parity.
+    replanned = plan_candidate_index_v1(index)
+    if replanned.plan_hash != semantic_identity.plan_hash:
+        raise StoryIntegrityError(
+            f"replanned plan_hash {replanned.plan_hash!r} does not match the "
+            f"semantic identity plan_hash {semantic_identity.plan_hash!r}"
+        )
+    replanned_plans = {
+        (p.left_candidate_ref, p.right_candidate_ref): p for p in replanned.pair_plans
+    }
+    replanned_det = {
+        (d.left_candidate_ref, d.right_candidate_ref): d for d in replanned.decisions
+    }
+
+    # Validate every decision against the replanned pair plans.
+    for decision in decisions:
+        key = (decision.left_candidate_ref, decision.right_candidate_ref)
+        plan = replanned_plans.get(key)
+        if plan is None:
+            raise StoryIntegrityError(
+                f"decision for pair {key!r} is not present in the replanned pair plans"
+            )
+        if plan.state in (PAIR_STATE_AUTO_SAME, PAIR_STATE_MUST_NOT_MERGE):
+            expected = replanned_det.get(key)
+            if decision != expected:
+                raise StoryIntegrityError(
+                    f"deterministic decision for pair {key!r} does not match the "
+                    f"replanned planning authority"
+                )
+        elif plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            if decision.method != "llm":
+                raise StoryIntegrityError(
+                    f"semantic decision for pair {key!r} must use method 'llm', "
+                    f"got {decision.method!r}"
+                )
+        else:
+            raise StoryIntegrityError(f"unknown pair state {plan.state!r} for pair {key!r}")
+
+    # Exact-compare the persisted outputs against the graph-derived expectation.
+    derived = derive_reconciliation_outputs(index, decision_set)
+    if (
+        derived.canonical_character_registry != char_registry
+        or derived.canonical_location_registry != loc_registry
+        or derived.unresolved_entity_set != unresolved_set
+        or derived.entity_map_entries != entity_map_entries
+    ):
+        raise StoryIntegrityError(
+            "persisted A4 outputs do not exactly match the graph-derived expectation"
+        )
+
+    # Re-run the deterministic graph/coverage validation.
+    graph = build_identity_graph(index.entries, decisions)
+    findings = validate_finalization(
+        candidate_index=index,
+        decision_set=decision_set,
+        pair_plans=replanned.pair_plans,
+        graph=graph,
+        canonical_character_registry=char_registry,
+        canonical_location_registry=loc_registry,
+        unresolved_entity_set=unresolved_set,
+        entity_map_entries=entity_map_entries,
+    )
+    if any(f.severity is ValidationSeverity.BLOCKING for f in findings):
+        raise ReconciliationFinalizationError(
+            "A4 finalization does not re-validate cleanly; not current-eligible",
+            findings=tuple(findings),
+        )
+
+    # Bind the LLM decisions to the semantic identity.
+    validate_a4_semantic_identity_binding(
+        decisions=decisions, semantic_identity=semantic_identity
+    )
+    # Bind the candidate index to the A3 input identity.
+    _validate_a3_input_index_binding(index, a3_input)
+    # Bind the semantic identity to the reconciliation profile.
+    _validate_profile_binding(semantic_identity, profile, profile_id)
+
+
+# ---------------------------------------------------------------------------
 # Pointer helper
 # ---------------------------------------------------------------------------
 
@@ -585,8 +896,19 @@ def _current_pointer(
 
 @dataclass(frozen=True, slots=True)
 class ReconciliationPublication:
-    """Outcome of an A4D reconciliation persistence / reuse operation."""
+    """Outcome of an A4D reconciliation persistence / reuse operation.
 
+    Carries the exact published / reused A4 artifact refs (the five outputs,
+    the entity map, the PASS validation report) plus the CURRENT pointer ref
+    and whether the operation was a reuse. A4E uses it for the orchestration
+    summary.
+    """
+
+    candidate_entity_index_ref: ArtifactRef
+    reconciliation_decision_set_ref: ArtifactRef
+    canonical_character_registry_ref: ArtifactRef
+    canonical_location_registry_ref: ArtifactRef
+    unresolved_entity_set_ref: ArtifactRef
     entity_map_ref: ArtifactRef
     validation_report_ref: ArtifactRef
     current_pointer_ref: ArtifactRef
@@ -629,10 +951,17 @@ class ReconciliationPersistenceService:
         base: str,
         logical_entity_map_id: str,
         pointer_id: str,
+        reconciliation_profile_id: str,
         current_pointer_ref: ArtifactRef | None,
         current_entity_map_ref: ArtifactRef,
     ) -> EntityMap:
-        """Fully verify the exact CURRENT EntityMap; fail closed on corruption."""
+        """Fully verify the exact CURRENT EntityMap; fail closed on corruption.
+
+        The shared :func:`_verify_finalization_bundle` verifier is reused here so
+        publication revalidation and CURRENT verification enforce byte-identical
+        checks (plan_hash parity, decision validation against the replanned pair
+        plans, graph-derived output parity, semantic / A3 / profile binding).
+        """
         self._check_current_logical_target(current_entity_map_ref, logical_entity_map_id)
         entity_map = load_entity_map(
             self.store, current_entity_map_ref, expected_artifact_id=logical_entity_map_id
@@ -677,23 +1006,17 @@ class ReconciliationPersistenceService:
                     "A4 output artifacts do not share one run revision with the EntityMap"
                 )
 
-        # Re-run the deterministic graph/coverage validation over the persisted
-        # artifacts (pair plans are not persisted, so pass None).
-        graph = build_identity_graph(index.entries, decision_set.decisions)
-        findings = validate_finalization(
-            candidate_index=index,
+        _verify_finalization_bundle(
+            index=index,
             decision_set=decision_set,
-            graph=graph,
-            canonical_character_registry=char_registry,
-            canonical_location_registry=loc_registry,
-            unresolved_entity_set=unresolved_set,
+            char_registry=char_registry,
+            loc_registry=loc_registry,
+            unresolved_set=unresolved_set,
             entity_map_entries=entity_map.entries,
-            pair_plans=None,
+            a3_input=entity_map.a3_input,
+            semantic_identity=entity_map.semantic_identity,
+            profile_id=reconciliation_profile_id,
         )
-        if any(f.severity is ValidationSeverity.BLOCKING for f in findings):
-            raise StoryIntegrityError(
-                "persisted A4 finalization does not re-validate cleanly; not current-eligible"
-            )
 
         expected_report = build_a4_validation_report(entity_map, current_entity_map_ref)
         _require_a4_validation_report(
@@ -742,6 +1065,7 @@ class ReconciliationPersistenceService:
             base=base,
             logical_entity_map_id=logical_entity_map_id,
             pointer_id=pointer_id,
+            reconciliation_profile_id=reconciliation_profile_id,
             current_pointer_ref=current_pointer_ref,
             current_entity_map_ref=current_entity_map_ref,
         )
@@ -749,6 +1073,11 @@ class ReconciliationPersistenceService:
             return None
         assert current_pointer_ref is not None
         return ReconciliationPublication(
+            candidate_entity_index_ref=entity_map.candidate_entity_index_ref,
+            reconciliation_decision_set_ref=entity_map.reconciliation_decision_set_ref,
+            canonical_character_registry_ref=entity_map.canonical_character_registry_ref,
+            canonical_location_registry_ref=entity_map.canonical_location_registry_ref,
+            unresolved_entity_set_ref=entity_map.unresolved_entity_set_ref,
             entity_map_ref=current_entity_map_ref,
             validation_report_ref=_require_a4_validation_report(
                 self.store,
@@ -791,6 +1120,23 @@ class ReconciliationPersistenceService:
         pointer_id = a4_pointer_id(project_id, document_id, profile_id)
         logical_entity_map_id = entity_map_artifact_id(base)
 
+        # Independent revalidation of the in-memory finalization BEFORE any
+        # artifact is written: replan parity, graph-derived output parity,
+        # graph/coverage, semantic / A3 / profile binding. This is the shared
+        # verifier, so a new publication and a CURRENT verify enforce identical
+        # checks (Blocker 4).
+        _verify_finalization_bundle(
+            index=finalization_result.candidate_index,
+            decision_set=finalization_result.decision_set,
+            char_registry=finalization_result.canonical_character_registry,
+            loc_registry=finalization_result.canonical_location_registry,
+            unresolved_set=finalization_result.unresolved_entity_set,
+            entity_map_entries=finalization_result.entity_map_entries,
+            a3_input=a3_input,
+            semantic_identity=semantic_identity,
+            profile=reconciliation_profile,
+        )
+
         # Re-read/re-verify CURRENT at the actual publication boundary (the
         # post-provider race). A corrupt / wrong-logical-target CURRENT fails
         # closed; a valid same-identity CURRENT is reused.
@@ -802,6 +1148,7 @@ class ReconciliationPersistenceService:
                 base=base,
                 logical_entity_map_id=logical_entity_map_id,
                 pointer_id=pointer_id,
+                reconciliation_profile_id=profile_id,
                 current_pointer_ref=current_pointer_ref,
                 current_entity_map_ref=current_entity_map_ref,
             )
@@ -811,6 +1158,11 @@ class ReconciliationPersistenceService:
             ):
                 assert current_pointer_ref is not None
                 return ReconciliationPublication(
+                    candidate_entity_index_ref=current_entity_map.candidate_entity_index_ref,
+                    reconciliation_decision_set_ref=current_entity_map.reconciliation_decision_set_ref,
+                    canonical_character_registry_ref=current_entity_map.canonical_character_registry_ref,
+                    canonical_location_registry_ref=current_entity_map.canonical_location_registry_ref,
+                    unresolved_entity_set_ref=current_entity_map.unresolved_entity_set_ref,
                     entity_map_ref=current_entity_map_ref,
                     validation_report_ref=_require_a4_validation_report(
                         self.store,
@@ -909,6 +1261,11 @@ class ReconciliationPersistenceService:
             ) from exc
 
         return ReconciliationPublication(
+            candidate_entity_index_ref=index_ref,
+            reconciliation_decision_set_ref=decision_ref,
+            canonical_character_registry_ref=char_ref,
+            canonical_location_registry_ref=loc_ref,
+            unresolved_entity_set_ref=unresolved_ref,
             entity_map_ref=entity_map_ref,
             validation_report_ref=report_ref,
             current_pointer_ref=pointer_ref,
@@ -930,6 +1287,7 @@ __all__ = [
     "a4_validation_artifact_id",
     "build_a4_validation_report",
     "candidate_entity_index_artifact_id",
+    "validate_a4_semantic_identity_binding",
     "canonical_character_registry_artifact_id",
     "canonical_location_registry_artifact_id",
     "entity_map_artifact_id",

@@ -81,20 +81,38 @@ def _finding(code: str, message: str, **identity: Any) -> ValidationFinding:
 def _check_canonical_id_gaps(
     entity_type: str, registry: Any
 ) -> tuple[ValidationFinding, ...]:
-    """Verify canonical IDs are gap-free starting at 1 (char_NNNN / loc_NNNN)."""
+    """Verify canonical IDs are gap-free starting at 1 (char_NNNN / loc_NNNN).
+
+    Compares numeric suffixes (not raw strings) so a gap is detected even when a
+    corrupted id carries an unexpected digit width.
+    """
     findings = []
-    ids = sorted(entity.canonical_id for entity in registry.entities)
     prefix = "char_" if entity_type == "character" else "loc_"
-    for expected_index, entity_id in enumerate(ids, start=1):
+
+    def numeric_suffix(entity_id: str) -> int | None:
+        if not entity_id.startswith(prefix):
+            return None
+        tail = entity_id[len(prefix):]
+        return int(tail) if tail.isdigit() else None
+
+    entities = sorted(
+        registry.entities,
+        key=lambda e: (
+            numeric_suffix(e.canonical_id) is None,
+            numeric_suffix(e.canonical_id) or 0,
+            e.canonical_id,
+        ),
+    )
+    for expected_index, entity in enumerate(entities, start=1):
         expected = f"{prefix}{expected_index:04d}"
-        if entity_id != expected:
+        if entity.canonical_id != expected:
             findings.append(
                 _finding(
                     A4_CANONICAL_ID_GAP,
                     f"{entity_type} registry canonical id gap: expected {expected!r}, "
-                    f"got {entity_id!r}",
+                    f"got {entity.canonical_id!r}",
                     entity_type=entity_type,
-                    canonical_id=entity_id,
+                    canonical_id=entity.canonical_id,
                     expected_canonical_id=expected,
                 )
             )

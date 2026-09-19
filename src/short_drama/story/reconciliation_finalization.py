@@ -431,6 +431,63 @@ def _build_entity_map_entries(
 
 
 # ---------------------------------------------------------------------------
+# Derived outputs (single-source authority)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedReconciliationOutputs:
+    """The deterministic graph-derived A4 outputs for an (index, decisions) pair.
+
+    Single-source authority reused by both :func:`finalize_reconciliation`
+    (fresh run) and the A4D persistence verifier (to exact-compare persisted
+    outputs against the freshly derived expectation).
+    """
+
+    canonical_character_registry: CanonicalCharacterRegistry
+    canonical_location_registry: CanonicalLocationRegistry
+    unresolved_entity_set: UnresolvedEntitySet
+    entity_map_entries: tuple[EntityMapEntry, ...]
+
+
+def derive_reconciliation_outputs(
+    candidate_index: CandidateEntityIndex,
+    decision_set: ReconciliationDecisionSet,
+) -> DerivedReconciliationOutputs:
+    """Derive the deterministic A4 outputs from the index + decision set.
+
+    This is the single source of the graph-derived canonical registries,
+    unresolved set, and EntityMap entries. Both :func:`finalize_reconciliation`
+    and the A4D persistence verifier consume it, so a persisted output is
+    byte-comparable to the freshly derived one.
+    """
+    index_entries = candidate_index.entries
+    decisions = decision_set.decisions
+    graph = build_identity_graph(index_entries, decisions)
+    ref_to_entry = {e.candidate_ref: e for e in index_entries}
+    char_entities, loc_entities = _assign_canonical_entities(graph, ref_to_entry)
+    unresolved_entities = _build_unresolved_entities(graph, index_entries)
+    entity_map_entries = _build_entity_map_entries(
+        index_entries, char_entities, loc_entities, unresolved_entities
+    )
+    return DerivedReconciliationOutputs(
+        canonical_character_registry=CanonicalCharacterRegistry(
+            schema_version=CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
+            entities=char_entities,
+        ),
+        canonical_location_registry=CanonicalLocationRegistry(
+            schema_version=CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
+            entities=loc_entities,
+        ),
+        unresolved_entity_set=UnresolvedEntitySet(
+            schema_version=UNRESOLVED_ENTITY_SET_SCHEMA_VERSION,
+            entities=unresolved_entities,
+        ),
+        entity_map_entries=entity_map_entries,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Finalization result
 # ---------------------------------------------------------------------------
 
@@ -479,32 +536,20 @@ def finalize_reconciliation(
     index_entries = index.entries
     decisions = semantic_result.all_decisions
 
-    graph = build_identity_graph(index_entries, decisions)
-    ref_to_entry = {e.candidate_ref: e for e in index_entries}
-
-    char_entities, loc_entities = _assign_canonical_entities(graph, ref_to_entry)
-    unresolved_entities = _build_unresolved_entities(graph, index_entries)
-    entity_map_entries = _build_entity_map_entries(
-        index_entries, char_entities, loc_entities, unresolved_entities
-    )
-
-    char_registry = CanonicalCharacterRegistry(
-        schema_version=CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION, entities=char_entities
-    )
-    loc_registry = CanonicalLocationRegistry(
-        schema_version=CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION, entities=loc_entities
-    )
-    unresolved_set = UnresolvedEntitySet(
-        schema_version=UNRESOLVED_ENTITY_SET_SCHEMA_VERSION, entities=unresolved_entities
-    )
     decision_set = ReconciliationDecisionSet(
         schema_version=RECONCILIATION_DECISION_SET_SCHEMA_VERSION, decisions=decisions
     )
+    outputs = derive_reconciliation_outputs(index, decision_set)
+    char_registry = outputs.canonical_character_registry
+    loc_registry = outputs.canonical_location_registry
+    unresolved_set = outputs.unresolved_entity_set
+    entity_map_entries = outputs.entity_map_entries
 
     findings: tuple[ValidationFinding, ...] = ()
     if validate:
         from short_drama.story.reconciliation_validation import validate_finalization
 
+        graph = build_identity_graph(index_entries, decisions)
         findings = validate_finalization(
             candidate_index=index,
             decision_set=decision_set,
@@ -545,8 +590,18 @@ def build_a4_semantic_identity(
     ``plan_hash == planning_result.plan_hash`` hold by construction.
     ``semantic_request_hashes`` come verbatim from the A4C preparation, so they
     equal the exact resolve-path request hashes.
+
+    The preparation is bound to the authoritative plan: a mismatch between
+    ``preparation.plan_hash`` and ``planning_result.plan_hash`` fails closed so
+    a semantic identity can never describe a different plan than the one it was
+    prepared from.
     """
     plan_hash = planning_result.plan_hash
+    if preparation.plan_hash != plan_hash:
+        raise ReconciliationFinalizationError(
+            f"preparation plan_hash {preparation.plan_hash!r} does not match "
+            f"planning_result.plan_hash {plan_hash!r}"
+        )
     return A4SemanticIdentity(
         reconciliation_profile_id=profile.profile_id,
         reconciliation_profile_hash=profile.profile_hash,
@@ -564,10 +619,12 @@ def build_a4_semantic_identity(
 
 
 __all__ = [
+    "DerivedReconciliationOutputs",
     "IdentityGraph",
     "ReconciliationFinalizationError",
     "ReconciliationFinalizationResult",
     "build_a4_semantic_identity",
     "build_identity_graph",
+    "derive_reconciliation_outputs",
     "finalize_reconciliation",
 ]

@@ -49,14 +49,18 @@ from short_drama.story import (
     CANDIDATE_ENTITY_INDEX_ARTIFACT_TYPE,
     CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
     CANONICAL_CHARACTER_REGISTRY_ARTIFACT_TYPE,
+    CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
     CANONICAL_LOCATION_REGISTRY_ARTIFACT_TYPE,
     ENTITY_MAP_ARTIFACT_TYPE,
     RECONCILIATION_DECISION_SET_ARTIFACT_TYPE,
+    RECONCILIATION_DECISION_SET_SCHEMA_VERSION,
     UNRESOLVED_ENTITY_SET_ARTIFACT_TYPE,
     CandidateEntityIndex,
     CandidateEntityIndexEntry,
+    CanonicalCharacterRegistry,
     EntityMap,
     ReconciliationDecision,
+    ReconciliationDecisionSet,
     ReconciliationFinalizationError,
     ReconciliationPairPlan,
     ReconciliationPlanningResult,
@@ -76,18 +80,20 @@ from short_drama.story import (
     entity_map_artifact_id,
     finalize_reconciliation,
     load_candidate_entity_index,
+    load_canonical_character_registry,
+    load_canonical_location_registry,
     load_entity_map,
+    load_entity_reconciliation_profile,
     load_reconciliation_decision_set,
     load_unresolved_entity_set,
     next_a4_revision,
-    load_canonical_character_registry,
-    load_canonical_location_registry,
-    load_entity_reconciliation_profile,
     persist_entity_map,
+    plan_candidate_index_v1,
     prepare_semantic_resolution,
     reconciliation_decision_set_artifact_id,
     unresolved_entity_set_artifact_id,
 )
+from short_drama.story.reconciliation_persistence import _verify_finalization_bundle
 
 PROFILES = Path(__file__).resolve().parents[1] / "profiles"
 RECON_PROFILE_PATH = PROFILES / "entity_reconciliation_v1.yaml"
@@ -98,10 +104,25 @@ DOCUMENT = "doc"
 H = "a" * 64
 H2 = "b" * 64
 
+# Clean scenario: L and R are the same character ("John Smith"), LOC1 and LOC2
+# are the same location ("Central Plaza"). Both pairs are auto_same (shared
+# strong identity key) so the plan is fully deterministic (zero LLM).
 L = "CH001_C001:cand_char_001"
 R = "CH001_C002:cand_char_002"
 LOC1 = "CH001_C001:cand_loc_001"
 LOC2 = "CH001_C002:cand_loc_002"
+# A different scenario (a different plan -> different plan_hash) for identity
+# invalidation tests.
+L2 = "CH001_C001:cand_char_010"
+R2 = "CH001_C002:cand_char_011"
+
+# Per-chunk extraction refs (candidates in a chunk share its extraction ref).
+EXT_A = ArtifactRef(
+    artifact_type="candidate_extraction", artifact_id="ce-a", revision=1, content_hash=H
+)
+EXT_B = ArtifactRef(
+    artifact_type="candidate_extraction", artifact_id="ce-b", revision=1, content_hash=H
+)
 
 
 def make_ref(artifact_type: str, artifact_id: str, revision: int = 1) -> ArtifactRef:
@@ -110,13 +131,34 @@ def make_ref(artifact_type: str, artifact_id: str, revision: int = 1) -> Artifac
     )
 
 
-def idx_entry(candidate_ref: str, kind: str = "character", source_key: str = "CH001_C001:P0001") -> CandidateEntityIndexEntry:
+def frozen_key(
+    chunk_ordinal: int, para_ordinal: int, category_ordinal: int, suffix: int, ref: str
+) -> str:
+    return (
+        f"{chunk_ordinal:06d}:{para_ordinal:09d}:{category_ordinal:02d}"
+        f":{suffix:09d}:{ref}"
+    )
+
+
+def idx_entry(
+    candidate_ref: str,
+    kind: str = "character",
+    display: str = "John Smith",
+    *,
+    ext_ref: ArtifactRef | None = None,
+    source_key: str | None = None,
+) -> CandidateEntityIndexEntry:
+    if source_key is None:
+        suffix = int(candidate_ref.rsplit("_", 1)[1])
+        chunk = int(candidate_ref.split("_C")[1].split(":")[0])
+        category = 1 if kind == "character" else 2
+        source_key = frozen_key(chunk, 1, category, suffix, candidate_ref)
     return CandidateEntityIndexEntry(
         candidate_ref=candidate_ref,
         candidate_kind=kind,
-        candidate_extraction_ref=make_ref("candidate_extraction", "ce-1"),
+        candidate_extraction_ref=ext_ref if ext_ref is not None else EXT_A,
         source_order_key=source_key,
-        display_name_original="name",
+        display_name_original=display,
         aliases_original=(),
         descriptors_zh=(),
         evidence_refs=(),
@@ -128,54 +170,21 @@ def clean_index() -> CandidateEntityIndex:
     return CandidateEntityIndex(
         schema_version=CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
         entries=(
-            idx_entry(L, source_key="CH001_C001:P0001"),
-            idx_entry(R, source_key="CH001_C002:P0002"),
-            idx_entry(LOC1, kind="location", source_key="CH001_C003:P0003"),
-            idx_entry(LOC2, kind="location", source_key="CH001_C003:P0004"),
+            idx_entry(L, display="John Smith", ext_ref=EXT_A),
+            idx_entry(LOC1, kind="location", display="Central Plaza", ext_ref=EXT_A),
+            idx_entry(R, display="John Smith", ext_ref=EXT_B),
+            idx_entry(LOC2, kind="location", display="Central Plaza", ext_ref=EXT_B),
         ),
     )
 
 
-def clean_decisions() -> tuple[ReconciliationDecision, ...]:
-    return (
-        ReconciliationDecision(
-            decision_id="dec_aaa111",
-            left_candidate_ref=L,
-            right_candidate_ref=R,
-            decision="same_entity",
-            method="deterministic",
-            reason_code="auto_same_identity",
-            reason_zh="auto",
-            evidence_refs=(),
-            prompt_id=None,
-            prompt_version=None,
-            generation_provenance=None,
-        ),
-        ReconciliationDecision(
-            decision_id="dec_bbb222",
-            left_candidate_ref=LOC1,
-            right_candidate_ref=LOC2,
-            decision="different_entity",
-            method="deterministic",
-            reason_code="must_not_merge",
-            reason_zh="mnm",
-            evidence_refs=(),
-            prompt_id=None,
-            prompt_version=None,
-            generation_provenance=None,
-        ),
-    )
-
-
-def clean_plans() -> tuple[ReconciliationPairPlan, ...]:
-    return (
-        ReconciliationPairPlan(
-            left_candidate_ref=L, right_candidate_ref=R,
-            state="auto_same", signals=(), shared_identity_keys=(), shared_tokens=(),
-        ),
-        ReconciliationPairPlan(
-            left_candidate_ref=LOC1, right_candidate_ref=LOC2,
-            state="must_not_merge", signals=(), shared_identity_keys=(), shared_tokens=(),
+def different_index() -> CandidateEntityIndex:
+    """A different candidate index (same chunks) -> a different plan_hash."""
+    return CandidateEntityIndex(
+        schema_version=CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
+        entries=(
+            idx_entry(L2, display="Alice Brown", ext_ref=EXT_A),
+            idx_entry(R2, display="Alice Brown", ext_ref=EXT_B),
         ),
     )
 
@@ -203,41 +212,46 @@ def make_semantic(planning, decisions) -> ReconciliationSemanticResult:
     )
 
 
+def make_scenario(index, a3_input):
+    """Build a self-consistent (planning, finalization, identity) from an index.
+
+    The planning is the REAL A4B plan (``plan_candidate_index_v1``), so the
+    identity's ``plan_hash`` equals the replanned plan_hash (the shared verifier
+    requires this). The identity is built from the zero-provider preparation.
+    """
+    planning = plan_candidate_index_v1(index)
+    finalization = finalize_reconciliation(make_semantic(planning, planning.decisions))
+    sem_profile = load_semantic_profile(A4_LLM_PROFILE_PATH)
+    prep = prepare_semantic_resolution(planning, _profile(), sem_profile)
+    identity = build_a4_semantic_identity(_profile(), prep, planning)
+    return planning, finalization, identity
+
+
 def clean_a3_input() -> A3InputIdentity:
     return A3InputIdentity(
         source_document_ref=make_ref("source_document", "doc-1"),
         chunk_manifest_ref=make_ref("chunk_manifest", "cm-1"),
-        candidate_extraction_refs=(
-            make_ref("candidate_extraction", "ce-1"),
-            make_ref("candidate_extraction", "ce-2"),
-        ),
+        candidate_extraction_refs=(EXT_A, EXT_B),
         extraction_profile_id="a3-v1",
         extraction_profile_hash=H,
     )
 
 
-def clean_semantic_identity() -> A4SemanticIdentity:
-    profile = _profile()
-    sem_profile = load_semantic_profile(A4_LLM_PROFILE_PATH)
-    planning = make_planning(clean_index(), clean_plans(), clean_decisions())
-    prep = prepare_semantic_resolution(planning, profile, sem_profile)
-    return build_a4_semantic_identity(profile, prep, planning)
-
-
-def clean_finalization():
-    planning = make_planning(clean_index(), clean_plans(), clean_decisions())
-    return finalize_reconciliation(make_semantic(planning, clean_decisions()))
-
-
 def conflict_finalization():
-    """A finalization result that carries a blocking finding (conflict)."""
+    """A finalization result that carries a blocking finding (conflict).
+
+    L same R, R same M, L different M -> a different_entity decision contradicts
+    the L-R-M same component. The finalizer's own validation flags the conflict
+    (``has_blocking_findings``), so ``publish_validated`` raises before the
+    shared verifier runs.
+    """
     M = "CH001_C004:cand_char_004"
     index = CandidateEntityIndex(
         schema_version=CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
         entries=(
             idx_entry(L),
-            idx_entry(R, source_key="CH001_C002:P0002"),
-            idx_entry(M, source_key="CH001_C004:P0004"),
+            idx_entry(R, source_key=frozen_key(2, 1, 1, 2, R)),
+            idx_entry(M, source_key=frozen_key(4, 1, 1, 4, M)),
         ),
     )
     decisions = (
@@ -275,14 +289,16 @@ class Harness:
 def make_harness(tmp_path: Path) -> Harness:
     store = FileArtifactStore(tmp_path / "artifacts")
     pointers = FilePointerStore(tmp_path / "pointers", store)
+    a3_input = clean_a3_input()
+    _planning, finalization, identity = make_scenario(clean_index(), a3_input)
     return Harness(
         store=store,
         pointers=pointers,
         service=ReconciliationPersistenceService(store, pointers),
         profile=_profile(),
-        a3_input=clean_a3_input(),
-        semantic_identity=clean_semantic_identity(),
-        finalization=clean_finalization(),
+        a3_input=a3_input,
+        semantic_identity=identity,
+        finalization=finalization,
     )
 
 
@@ -430,7 +446,8 @@ def test_typed_loader_outputs_round_trip(tmp_path):
         h.store, loaded_map.reconciliation_decision_set_ref,
         expected_artifact_id=reconciliation_decision_set_artifact_id(b),
     )
-    assert {d.decision_id for d in decisions.decisions} == {"dec_aaa111", "dec_bbb222"}
+    assert len(decisions.decisions) == 2
+    assert all(d.method == "deterministic" for d in decisions.decisions)
     unresolved = load_unresolved_entity_set(
         h.store, loaded_map.unresolved_entity_set_ref,
         expected_artifact_id=unresolved_entity_set_artifact_id(b),
@@ -531,13 +548,15 @@ def test_a3_input_change_invalidates(tmp_path):
 def test_semantic_identity_change_invalidates(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
-    new_identity = replace(h.semantic_identity, plan_hash="c" * 64)
-    second = publish(h, semantic_identity=new_identity)
+    # A different candidate index -> a different plan_hash -> a different A4
+    # identity (same a3_input). Publishing it must supersede, not reuse.
+    _p, finalization, identity = make_scenario(different_index(), h.a3_input)
+    second = publish(h, finalization=finalization, semantic_identity=identity)
     assert second.reused is False
     assert second.entity_map_ref.revision == 2
     # The old identity is no longer current; the new one is.
     assert _current_target_ref(h) == second.entity_map_ref
-    assert reuse(h, semantic_identity=new_identity).reused is True
+    assert reuse(h, semantic_identity=identity).reused is True
     # The old identity is a normal miss (different from current).
     assert reuse(h) is None
 
@@ -559,7 +578,8 @@ def test_backend_switch_does_not_change_reuse_identity(tmp_path):
 def test_stale_identity_supersedes_same_artifact_id(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
-    second = publish(h, semantic_identity=replace(h.semantic_identity, plan_hash="c" * 64))
+    _p, finalization, identity = make_scenario(different_index(), h.a3_input)
+    second = publish(h, finalization=finalization, semantic_identity=identity)
     assert first.entity_map_ref.revision == 1
     assert second.entity_map_ref.revision == 2
     assert first.entity_map_ref.artifact_id == second.entity_map_ref.artifact_id
@@ -570,7 +590,8 @@ def test_stale_identity_supersedes_same_artifact_id(tmp_path):
 def test_no_historical_auto_resurrection(tmp_path):
     h = make_harness(tmp_path)
     first = publish(h)
-    publish(h, semantic_identity=replace(h.semantic_identity, plan_hash="c" * 64))  # rev 2
+    _p, finalization, identity = make_scenario(different_index(), h.a3_input)
+    publish(h, finalization=finalization, semantic_identity=identity)  # rev 2
     # Re-request the OLD identity: it publishes a NEW revision (rev 3), it does not
     # resurrect historical revision 1.
     third = publish(h)
@@ -725,13 +746,10 @@ def test_orphan_revision_skip(tmp_path):
     h = make_harness(tmp_path)
     # Simulate a failed publication that left a partial revision-1 artifact
     # (an entity map that is never pointed to). The next publish must skip it.
-    index = clean_index()
     from short_drama.story.reconciliation import (
-        ReconciliationDecisionSet,
         RECONCILIATION_DECISION_SET_SCHEMA_VERSION,
     )
 
-    planning = make_planning(index, clean_plans(), clean_decisions())
     # Build a valid entity map payload to occupy revision 1.
     dummy_map = EntityMap(
         schema_version=2,
@@ -804,6 +822,118 @@ def test_semantic_identity_equals_prepare_request_hashes(tmp_path):
         req.request_hash for req in prep.structured_requests
     )
     assert len(identity.semantic_request_hashes) == 1
+
+
+# ---------------------------------------------------------------------------
+# Shared verifier gates (Blocker 1 / 2 / 3 regression coverage)
+
+
+def _verifier_kwargs(h):
+    return dict(
+        index=h.finalization.candidate_index,
+        decision_set=h.finalization.decision_set,
+        char_registry=h.finalization.canonical_character_registry,
+        loc_registry=h.finalization.canonical_location_registry,
+        unresolved_set=h.finalization.unresolved_entity_set,
+        entity_map_entries=h.finalization.entity_map_entries,
+        a3_input=h.a3_input,
+        semantic_identity=h.semantic_identity,
+        profile=h.profile,
+    )
+
+
+def test_verifier_passes_clean(tmp_path):
+    h = make_harness(tmp_path)
+    _verify_finalization_bundle(**_verifier_kwargs(h))  # no error
+
+
+def test_verifier_source_order_gate(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    kw["index"] = CandidateEntityIndex(
+        schema_version=CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION,
+        entries=(idx_entry(L, source_key="BAD:KEY:FORMAT"),),
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_duplicate_decision_id(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    first = h.finalization.decision_set.decisions[0]
+    kw["decision_set"] = ReconciliationDecisionSet(
+        schema_version=RECONCILIATION_DECISION_SET_SCHEMA_VERSION,
+        decisions=(first, first),
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_plan_hash_parity(tmp_path):
+    h = make_harness(tmp_path)
+    # A plan_hash that does not match the replanned plan fails closed.
+    kw = _verifier_kwargs(h)
+    kw["semantic_identity"] = replace(h.semantic_identity, plan_hash="0" * 64)
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_output_parity(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    # Drop every canonical character: it no longer equals the graph-derived output.
+    kw["char_registry"] = CanonicalCharacterRegistry(
+        schema_version=CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
+        entities=(),
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_decision_mismatch(tmp_path):
+    h = make_harness(tmp_path)
+    kw = _verifier_kwargs(h)
+    decisions = h.finalization.decision_set.decisions
+    flipped = tuple(
+        replace(d, decision="different_entity") if i == 0 else d
+        for i, d in enumerate(decisions)
+    )
+    kw["decision_set"] = ReconciliationDecisionSet(
+        schema_version=RECONCILIATION_DECISION_SET_SCHEMA_VERSION,
+        decisions=flipped,
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_semantic_request_hash_mismatch(tmp_path):
+    h = make_harness(tmp_path)
+    # An extra request hash not backed by an LLM decision fails closed.
+    kw = _verifier_kwargs(h)
+    kw["semantic_identity"] = replace(
+        h.semantic_identity, semantic_request_hashes=("f" * 64,)
+    )
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_a3_binding(tmp_path):
+    h = make_harness(tmp_path)
+    # An a3_input that lacks the index's extraction refs fails closed.
+    kw = _verifier_kwargs(h)
+    kw["a3_input"] = replace(h.a3_input, candidate_extraction_refs=(EXT_A,))
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
+
+
+def test_verifier_profile_binding(tmp_path):
+    h = make_harness(tmp_path)
+    # A different reconciliation profile fails closed.
+    kw = _verifier_kwargs(h)
+    kw["profile"] = replace(h.profile, profile_id="other-profile")
+    with pytest.raises(StoryIntegrityError):
+        _verify_finalization_bundle(**kw)
 
 
 if __name__ == "__main__":  # pragma: no cover

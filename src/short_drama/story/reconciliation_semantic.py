@@ -99,6 +99,20 @@ _REASON_CODE_MAP = {
 }
 
 
+def llm_reason_code(decision: str) -> str:
+    """The deterministic A4C ``reason_code`` for an LLM decision.
+
+    Reused by A4D CURRENT verification so the recomputed decision_id derives
+    its reason code from the decision itself (never from a persisted field).
+    """
+    try:
+        return _REASON_CODE_MAP[decision]
+    except KeyError:
+        raise ReconciliationSemanticError(
+            f"no A4C LLM reason code for decision {decision!r}"
+        ) from None
+
+
 # ---------------------------------------------------------------------------
 # In-memory semantic block
 # ---------------------------------------------------------------------------
@@ -189,6 +203,10 @@ class ReconciliationSemanticPreparation:
     output_schema_hash: str
     semantic_profile_id: str
     semantic_profile_hash: str
+    # Authoritative A4B plan identity this preparation was built from. A4D uses
+    # this to require ``preparation.plan_hash == planning_result.plan_hash`` so
+    # the derived A4SemanticIdentity is bound to the exact plan it describes.
+    plan_hash: str
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +614,7 @@ def _validate_block_payload(
 # ---------------------------------------------------------------------------
 
 
-def _compute_llm_decision_id(
+def compute_llm_decision_id(
     left_ref: str,
     right_ref: str,
     decision: str,
@@ -609,6 +627,10 @@ def _compute_llm_decision_id(
     request_hash: str,
 ) -> str:
     """Compute the deterministic LLM decision_id.
+
+    This is the single authority for A4C LLM decision ids, reused by A4D
+    CURRENT verification to require ``persisted decision_id == deterministically
+    recomputed decision_id``.
 
     Hash material (excludes provider_family, model, provider_response_id,
     endpoint, timestamp):
@@ -644,7 +666,7 @@ def _convert_to_decision(
 ) -> ReconciliationDecision:
     """Convert a valid provider decision item to a ReconciliationDecision."""
     reason_code = _REASON_CODE_MAP[item.decision]
-    decision_id = _compute_llm_decision_id(
+    decision_id = compute_llm_decision_id(
         left_ref=item.left_candidate_ref,
         right_ref=item.right_candidate_ref,
         decision=item.decision,
@@ -751,6 +773,7 @@ def prepare_semantic_resolution(
         blocks=blocks,
         structured_requests=tuple(structured_requests),
         semantic_request_hashes=tuple(r.request_hash for r in structured_requests),
+        plan_hash=planning_result.plan_hash,
         prompt_id=prompt_spec.prompt_id,
         prompt_version=prompt_spec.version,
         prompt_content_hash=prompt_spec.content_hash,

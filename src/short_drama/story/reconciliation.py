@@ -74,7 +74,7 @@ CANDIDATE_ENTITY_INDEX_SCHEMA_VERSION = 1
 RECONCILIATION_DECISION_SET_SCHEMA_VERSION = 1
 CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION = 1
 UNRESOLVED_ENTITY_SET_SCHEMA_VERSION = 1
-ENTITY_MAP_SCHEMA_VERSION = 1
+ENTITY_MAP_SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Frozen value domains (kept in lockstep with the parent A-I5 contract)
@@ -1652,14 +1652,148 @@ class EntityMapEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class A4SemanticIdentity:
+    """The exact backend-neutral A4 semantic-generation identity (EntityMap v2).
+
+    This is the precise A4 semantic-identity material pinned by the final
+    aggregate authority so that CURRENT reuse can be reliably decided *before*
+    any provider call. It is deliberately backend-neutral: it carries NO
+    endpoint, provider family, concrete model, provider response id, credential,
+    timeout, wall clock, or llama.cpp slot. Changing only the backend routing
+    (Qwen -> Gemma) therefore does NOT invalidate A4 reuse.
+
+    Backend provenance still lives in each ``ReconciliationDecision``
+    ``generation_provenance`` for audit, but it never participates in this
+    reuse identity.
+
+    All hash fields are lowercase 64-char SHA-256. ``semantic_request_hashes``
+    is in canonical block order, unique, and may be empty (the zero-semantic-
+    pair case).
+    """
+
+    reconciliation_profile_id: str
+    reconciliation_profile_hash: str
+    semantic_profile_id: str
+    semantic_profile_hash: str
+    prompt_id: str
+    prompt_version: int
+    prompt_content_hash: str
+    output_schema_id: str
+    output_schema_version: int
+    output_schema_hash: str
+    plan_hash: str
+    semantic_request_hashes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_storage_id(
+            self.reconciliation_profile_id,
+            "A4SemanticIdentity.reconciliation_profile_id",
+        )
+        _require_hash(
+            self.reconciliation_profile_hash,
+            "A4SemanticIdentity.reconciliation_profile_hash",
+        )
+        _require_storage_id(
+            self.semantic_profile_id, "A4SemanticIdentity.semantic_profile_id"
+        )
+        _require_hash(
+            self.semantic_profile_hash, "A4SemanticIdentity.semantic_profile_hash"
+        )
+        _require_storage_id(self.prompt_id, "A4SemanticIdentity.prompt_id")
+        _require_positive_int(
+            self.prompt_version, "A4SemanticIdentity.prompt_version"
+        )
+        _require_hash(
+            self.prompt_content_hash, "A4SemanticIdentity.prompt_content_hash"
+        )
+        _require_storage_id(
+            self.output_schema_id, "A4SemanticIdentity.output_schema_id"
+        )
+        _require_positive_int(
+            self.output_schema_version, "A4SemanticIdentity.output_schema_version"
+        )
+        _require_hash(
+            self.output_schema_hash, "A4SemanticIdentity.output_schema_hash"
+        )
+        _require_hash(self.plan_hash, "A4SemanticIdentity.plan_hash")
+        object.__setattr__(
+            self,
+            "semantic_request_hashes",
+            _to_string_tuple(
+                self.semantic_request_hashes,
+                "A4SemanticIdentity.semantic_request_hashes",
+                unique=True,
+            ),
+        )
+        for h in self.semantic_request_hashes:
+            _require_hash(h, "A4SemanticIdentity.semantic_request_hashes item")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reconciliation_profile_id": self.reconciliation_profile_id,
+            "reconciliation_profile_hash": self.reconciliation_profile_hash,
+            "semantic_profile_id": self.semantic_profile_id,
+            "semantic_profile_hash": self.semantic_profile_hash,
+            "prompt_id": self.prompt_id,
+            "prompt_version": self.prompt_version,
+            "prompt_content_hash": self.prompt_content_hash,
+            "output_schema_id": self.output_schema_id,
+            "output_schema_version": self.output_schema_version,
+            "output_schema_hash": self.output_schema_hash,
+            "plan_hash": self.plan_hash,
+            "semantic_request_hashes": list(self.semantic_request_hashes),
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "A4SemanticIdentity":
+        _require_exact_keys(
+            value,
+            {
+                "reconciliation_profile_id",
+                "reconciliation_profile_hash",
+                "semantic_profile_id",
+                "semantic_profile_hash",
+                "prompt_id",
+                "prompt_version",
+                "prompt_content_hash",
+                "output_schema_id",
+                "output_schema_version",
+                "output_schema_hash",
+                "plan_hash",
+                "semantic_request_hashes",
+            },
+            "A4SemanticIdentity",
+        )
+        if not isinstance(value["semantic_request_hashes"], list):
+            raise ReconciliationModelError(
+                "A4SemanticIdentity.semantic_request_hashes must be a list"
+            )
+        return cls(
+            reconciliation_profile_id=value["reconciliation_profile_id"],
+            reconciliation_profile_hash=value["reconciliation_profile_hash"],
+            semantic_profile_id=value["semantic_profile_id"],
+            semantic_profile_hash=value["semantic_profile_hash"],
+            prompt_id=value["prompt_id"],
+            prompt_version=value["prompt_version"],
+            prompt_content_hash=value["prompt_content_hash"],
+            output_schema_id=value["output_schema_id"],
+            output_schema_version=value["output_schema_version"],
+            output_schema_hash=value["output_schema_hash"],
+            plan_hash=value["plan_hash"],
+            semantic_request_hashes=tuple(value["semantic_request_hashes"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EntityMap:
-    """A4's final aggregate authority (section 26 / 28).
+    """A4's final aggregate authority (EntityMap v2).
 
     Pins the exact refs to every A4 output (CandidateEntityIndex,
     ReconciliationDecisionSet, both canonical registries, UnresolvedEntitySet)
-    plus the exact upstream A3 identity material (``a3_input``). A4A establishes
-    only the shape: it does NOT persist the EntityMap, create a CURRENT pointer,
-    or audit coverage (A4D).
+    plus the exact upstream A3 identity material (``a3_input``) and the exact
+    backend-neutral A4 semantic-generation identity (``semantic_identity``).
+    A4A establishes only the shape: it does NOT persist the EntityMap, create a
+    CURRENT pointer, or audit coverage (A4D).
     """
 
     schema_version: int
@@ -1670,6 +1804,7 @@ class EntityMap:
     canonical_location_registry_ref: ArtifactRef
     unresolved_entity_set_ref: ArtifactRef
     a3_input: A3InputIdentity
+    semantic_identity: A4SemanticIdentity
 
     def __post_init__(self) -> None:
         if (
@@ -1721,6 +1856,10 @@ class EntityMap:
             raise ReconciliationModelError(
                 "EntityMap.a3_input must be an A3InputIdentity"
             )
+        if not isinstance(self.semantic_identity, A4SemanticIdentity):
+            raise ReconciliationModelError(
+                "EntityMap.semantic_identity must be an A4SemanticIdentity"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1738,6 +1877,7 @@ class EntityMap:
             ),
             "unresolved_entity_set_ref": self.unresolved_entity_set_ref.to_dict(),
             "a3_input": self.a3_input.to_dict(),
+            "semantic_identity": self.semantic_identity.to_dict(),
         }
 
     @classmethod
@@ -1753,6 +1893,7 @@ class EntityMap:
                 "canonical_location_registry_ref",
                 "unresolved_entity_set_ref",
                 "a3_input",
+                "semantic_identity",
             },
             "EntityMap",
         )
@@ -1760,6 +1901,7 @@ class EntityMap:
             raise ReconciliationModelError("EntityMap.entries must be a list")
         try:
             a3_input = A3InputIdentity.from_dict(value["a3_input"])
+            semantic_identity = A4SemanticIdentity.from_dict(value["semantic_identity"])
             refs = {
                 name: ArtifactRef.from_dict(value[name])
                 for name in (
@@ -1783,6 +1925,7 @@ class EntityMap:
             canonical_location_registry_ref=refs["canonical_location_registry_ref"],
             unresolved_entity_set_ref=refs["unresolved_entity_set_ref"],
             a3_input=a3_input,
+            semantic_identity=semantic_identity,
         )
 
 

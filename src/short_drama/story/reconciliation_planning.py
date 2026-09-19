@@ -329,6 +329,122 @@ def _local_candidate_suffix(local_id: str) -> int:
     return int(local_id.rsplit("_", 1)[1])
 
 
+# ---------------------------------------------------------------------------
+# Frozen source_order_key parser / validator (A4D replanning + source-order gate)
+# ---------------------------------------------------------------------------
+
+# Exact frozen A4B source_order_key shape:
+#   {chunk_ordinal:06d}:{paragraph_ordinal:09d}:{category_ordinal:02d}:
+#   {candidate_suffix:09d}:{candidate_ref}
+# where candidate_ref == CH<digits>_C<digits>:cand_(char|loc|unres)_<digits>
+_SOURCE_ORDER_KEY_RE = re.compile(
+    r"^(?P<chunk_ordinal>[0-9]{6}):"
+    r"(?P<paragraph_ordinal>[0-9]{9}):"
+    r"(?P<category_ordinal>[0-9]{2}):"
+    r"(?P<candidate_suffix>[0-9]{9}):"
+    r"(?P<candidate_ref>CH[0-9]{3,}_C[0-9]{3,}:cand_(?:char|loc|unres)_[0-9]{3,})$"
+)
+
+
+def _category_ordinal_for_kind(candidate_kind: str) -> int:
+    """Map a candidate_kind to its frozen source_order_key category ordinal."""
+    if candidate_kind == "character":
+        return 1
+    if candidate_kind == "location":
+        return 2
+    if candidate_kind.startswith("unresolved_"):
+        return 3
+    raise ReconciliationPlanningError(f"unknown candidate_kind: {candidate_kind!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSourceOrderKey:
+    """The parsed fields of a frozen A4B ``source_order_key``."""
+
+    chunk_ordinal: int
+    paragraph_ordinal: int
+    category_ordinal: int
+    candidate_suffix: int
+    candidate_ref: str
+
+
+def parse_source_order_key(key: str) -> ParsedSourceOrderKey:
+    """Parse a frozen A4B ``source_order_key`` into its deterministic fields.
+
+    Fails closed unless the key exactly matches the frozen shape. This is the
+    single authority for recovering ``chunk_ordinal`` (adjacency blocking) from
+    a persisted :class:`CandidateEntityIndex`.
+    """
+    match = _SOURCE_ORDER_KEY_RE.match(key)
+    if match is None:
+        raise ReconciliationPlanningError(
+            f"source_order_key {key!r} does not match the frozen A4B format"
+        )
+    return ParsedSourceOrderKey(
+        chunk_ordinal=int(match["chunk_ordinal"]),
+        paragraph_ordinal=int(match["paragraph_ordinal"]),
+        category_ordinal=int(match["category_ordinal"]),
+        candidate_suffix=int(match["candidate_suffix"]),
+        candidate_ref=match["candidate_ref"],
+    )
+
+
+def validate_candidate_index_source_order(
+    candidate_index: CandidateEntityIndex,
+) -> dict[str, int]:
+    """Strictly validate a ``CandidateEntityIndex`` source-order material.
+
+    Requires, simultaneously (fail closed on any violation):
+      * every ``source_order_key`` matches the exact frozen shape;
+      * the embedded candidate_ref equals the entry's candidate_ref;
+      * the category ordinal matches the entry's candidate_kind;
+      * the candidate numeric suffix matches the ref's local candidate id;
+      * candidate refs are unique;
+      * entries are strictly ascending by source_order_key.
+
+    Returns the ``candidate_ref -> chunk_ordinal`` mapping recovered for
+    adjacency blocking.
+    """
+    chunk_ordinal_map: dict[str, int] = {}
+    seen_refs: set[str] = set()
+    ordered_keys: list[str] = []
+    for entry in candidate_index.entries:
+        ref = entry.candidate_ref
+        if ref in seen_refs:
+            raise ReconciliationPlanningError(
+                f"duplicate candidate_ref in candidate index: {ref!r}"
+            )
+        seen_refs.add(ref)
+        parsed = parse_source_order_key(entry.source_order_key)
+        if parsed.candidate_ref != ref:
+            raise ReconciliationPlanningError(
+                f"source_order_key embedded candidate_ref "
+                f"{parsed.candidate_ref!r} != entry candidate_ref {ref!r}"
+            )
+        expected_ordinal = _category_ordinal_for_kind(entry.candidate_kind)
+        if parsed.category_ordinal != expected_ordinal:
+            raise ReconciliationPlanningError(
+                f"source_order_key category ordinal {parsed.category_ordinal!r} "
+                f"does not match candidate_kind {entry.candidate_kind!r} for "
+                f"ref {ref!r}"
+            )
+        local_id = ref.split(":", 1)[1]
+        if parsed.candidate_suffix != _local_candidate_suffix(local_id):
+            raise ReconciliationPlanningError(
+                f"source_order_key candidate suffix {parsed.candidate_suffix!r} "
+                f"does not match ref {ref!r}"
+            )
+        chunk_ordinal_map[ref] = parsed.chunk_ordinal
+        ordered_keys.append(entry.source_order_key)
+    for i in range(1, len(ordered_keys)):
+        if ordered_keys[i] <= ordered_keys[i - 1]:
+            raise ReconciliationPlanningError(
+                f"candidate index entries are not strictly ascending by "
+                f"source_order_key at position {i}"
+            )
+    return chunk_ordinal_map
+
+
 def _earliest_evidence_paragraph_ordinal(
     evidence: tuple[EvidenceRef, ...],
     paragraph_index: dict[str, int],
@@ -472,7 +588,7 @@ class ReconciliationPlanningResult:
 # ---------------------------------------------------------------------------
 
 
-def _compute_decision_id(
+def compute_deterministic_decision_id(
     left_ref: str,
     right_ref: str,
     decision: str,
@@ -480,7 +596,12 @@ def _compute_decision_id(
     reason_code: str,
     reason_zh: str,
 ) -> str:
-    """Compute a deterministic decision_id from canonical decision material."""
+    """Compute the deterministic decision_id from canonical decision material.
+
+    This is the single authority for A4B deterministic decision ids, reused by
+    A4D CURRENT verification to require ``persisted decision_id ==
+    deterministically recomputed decision_id``.
+    """
     material = {
         "left_candidate_ref": left_ref,
         "right_candidate_ref": right_ref,
@@ -1089,6 +1210,188 @@ def _compute_plan_hash(
 
 
 # ---------------------------------------------------------------------------
+# must-not-merge canonicalization + shared index -> planning pipeline
+# ---------------------------------------------------------------------------
+
+
+def _canonicalize_must_not_merge(
+    must_not_merge: frozenset[tuple[str, str]],
+) -> frozenset[tuple[str, str]]:
+    """Canonicalize an explicit hard-constraint set (fail closed on bad pairs)."""
+    hard_constraints: frozenset[tuple[str, str]] = frozenset()
+    for pair in must_not_merge:
+        if len(pair) != 2:
+            raise ReconciliationPlanningError(
+                f"must_not_merge pair must have exactly 2 elements: {pair!r}"
+            )
+        a, b = pair
+        if a == b:
+            raise ReconciliationPlanningError(
+                f"must_not_merge pair must reference distinct candidates: {pair!r}"
+            )
+        hard_constraints = hard_constraints | frozenset({(min(a, b), max(a, b))})
+    return hard_constraints
+
+
+def _plan_from_candidate_index(
+    candidate_index: CandidateEntityIndex,
+    chunk_ordinal_map: dict[str, int],
+    hard_constraints: frozenset[tuple[str, str]],
+) -> ReconciliationPlanningResult:
+    """Run the shared A4B index -> planning pipeline (identity keys, blocking,
+    pair states, deterministic decisions, coverage audit, plan hash).
+
+    This is the single source of planning logic reused by both
+    :func:`plan_reconciliation` (fresh A4B) and :func:`plan_candidate_index_v1`
+    (A4D replanning from a persisted index).
+    """
+    # Identity keys + blocking tokens
+    identity_keys_map: dict[str, tuple[str, ...]] = {}
+    tokens_map: dict[str, tuple[str, ...]] = {}
+    for entry in candidate_index.entries:
+        if entry.candidate_kind in ("character", "location"):
+            keys = extract_identity_keys(
+                entry.display_name_original, entry.aliases_original
+            )
+            identity_keys_map[entry.candidate_ref] = keys
+            tokens_map[entry.candidate_ref] = extract_blocking_tokens(keys)
+        else:
+            identity_keys_map[entry.candidate_ref] = ()
+            tokens_map[entry.candidate_ref] = ()
+
+    # Blocked pairs (indexed, not N^2)
+    pair_info = _generate_blocked_pairs(
+        candidate_index,
+        identity_keys_map,
+        tokens_map,
+        chunk_ordinal_map,
+        hard_constraints,
+    )
+
+    # Pair states + pair plans
+    pair_plans: list[ReconciliationPairPlan] = []
+    for (left, right), info in pair_info.items():
+        state = _assign_pair_state(
+            info, left, right, identity_keys_map, hard_constraints
+        )
+        signals = tuple(sorted(info["signals"]))
+        shared_keys = tuple(sorted(info["shared_identity_keys"]))
+        shared_tokens = tuple(sorted(info["shared_tokens"]))
+        pair_plans.append(
+            ReconciliationPairPlan(
+                left_candidate_ref=left,
+                right_candidate_ref=right,
+                state=state,
+                signals=signals,
+                shared_identity_keys=shared_keys,
+                shared_tokens=shared_tokens,
+            )
+        )
+    pair_plans.sort(key=lambda p: (p.left_candidate_ref, p.right_candidate_ref))
+    pair_plans_tuple = tuple(pair_plans)
+
+    # Deterministic decisions for auto_same / must_not_merge
+    decisions: list[ReconciliationDecision] = []
+    for plan in pair_plans_tuple:
+        if plan.state == PAIR_STATE_AUTO_SAME:
+            decision_id = compute_deterministic_decision_id(
+                plan.left_candidate_ref,
+                plan.right_candidate_ref,
+                "same_entity",
+                "deterministic",
+                "same_strong_exact_identity_key",
+                "确定性自动合并：共享强身份键",
+            )
+            decisions.append(
+                ReconciliationDecision(
+                    decision_id=decision_id,
+                    left_candidate_ref=plan.left_candidate_ref,
+                    right_candidate_ref=plan.right_candidate_ref,
+                    decision="same_entity",
+                    method="deterministic",
+                    reason_code="same_strong_exact_identity_key",
+                    reason_zh="确定性自动合并：共享强身份键",
+                    evidence_refs=(),
+                    prompt_id=None,
+                    prompt_version=None,
+                    generation_provenance=None,
+                )
+            )
+        elif plan.state == PAIR_STATE_MUST_NOT_MERGE:
+            decision_id = compute_deterministic_decision_id(
+                plan.left_candidate_ref,
+                plan.right_candidate_ref,
+                "different_entity",
+                "deterministic",
+                "hard_must_not_merge",
+                "确定性硬约束：不可合并",
+            )
+            decisions.append(
+                ReconciliationDecision(
+                    decision_id=decision_id,
+                    left_candidate_ref=plan.left_candidate_ref,
+                    right_candidate_ref=plan.right_candidate_ref,
+                    decision="different_entity",
+                    method="deterministic",
+                    reason_code="hard_must_not_merge",
+                    reason_zh="确定性硬约束：不可合并",
+                    evidence_refs=(),
+                    prompt_id=None,
+                    prompt_version=None,
+                    generation_provenance=None,
+                )
+            )
+
+    # Coverage audit (fail closed)
+    _audit_coverage(candidate_index, pair_plans_tuple)
+
+    # Plan hash
+    plan_hash = _compute_plan_hash(
+        candidate_index,
+        pair_plans_tuple,
+        NAME_NORMALIZATION_POLICY_ID,
+        BLOCKING_POLICY_ID,
+        CANONICALIZATION_POLICY_ID,
+    )
+
+    return ReconciliationPlanningResult(
+        candidate_index=candidate_index,
+        pair_plans=pair_plans_tuple,
+        decisions=tuple(decisions),
+        normalization_policy_id=NAME_NORMALIZATION_POLICY_ID,
+        blocking_policy_id=BLOCKING_POLICY_ID,
+        canonicalization_policy_id=CANONICALIZATION_POLICY_ID,
+        plan_hash=plan_hash,
+    )
+
+
+def plan_candidate_index_v1(
+    candidate_index: CandidateEntityIndex,
+    *,
+    must_not_merge: frozenset[tuple[str, str]] | None = None,
+) -> ReconciliationPlanningResult:
+    """Rebuild A4B v1 planning from a persisted :class:`CandidateEntityIndex`.
+
+    This is the single-source planning authority reused by A4D CURRENT
+    verification / publication revalidation so the replanned ``plan_hash`` and
+    pair plans are byte-identical to a fresh A4B run over the same index.
+
+    The candidate index must carry the frozen ``source_order_key`` shape so
+    ``chunk_ordinal`` can be recovered deterministically for adjacency blocking
+    (enforced by :func:`validate_candidate_index_source_order`). Production v1
+    derives an empty ``must_not_merge`` set unless one is explicitly supplied.
+    """
+    chunk_ordinal_map = validate_candidate_index_source_order(candidate_index)
+    if must_not_merge is not None:
+        hard_constraints = _canonicalize_must_not_merge(must_not_merge)
+    else:
+        hard_constraints = derive_must_not_merge_constraints(candidate_index)
+    return _plan_from_candidate_index(
+        candidate_index, chunk_ordinal_map, hard_constraints
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main planning entry point
 # ---------------------------------------------------------------------------
 
@@ -1121,152 +1424,7 @@ def plan_reconciliation(
     # Step 3: Build candidate index
     candidate_index = _build_candidate_index(snapshot, paragraph_position)
 
-    # Step 4: Extract identity keys and blocking tokens
-    identity_keys_map: dict[str, tuple[str, ...]] = {}
-    tokens_map: dict[str, tuple[str, ...]] = {}
-    for entry in candidate_index.entries:
-        if entry.candidate_kind in ("character", "location"):
-            keys = extract_identity_keys(
-                entry.display_name_original,
-                entry.aliases_original,
-            )
-            identity_keys_map[entry.candidate_ref] = keys
-            tokens_map[entry.candidate_ref] = extract_blocking_tokens(keys)
-        else:
-            # Unresolved candidates get no merge identity keys
-            identity_keys_map[entry.candidate_ref] = ()
-            tokens_map[entry.candidate_ref] = ()
-
-    # Step 5: Build chunk ordinal map
-    chunk_ordinal_map: dict[str, int] = {}
-    for entry in candidate_index.entries:
-        if entry.candidate_kind in ("character", "location"):
-            # chunk_ordinal = position of the entry's chunk in the manifest
-            chunk_id = entry.candidate_ref.split(":", 1)[0]
-            for i, ext in enumerate(snapshot.candidate_extractions):
-                if ext.chunk_id == chunk_id:
-                    chunk_ordinal_map[entry.candidate_ref] = i + 1
-                    break
-
-    # Step 6: Derive must-not-merge constraints (canonicalized at boundary)
-    if must_not_merge is not None:
-        hard_constraints: frozenset[tuple[str, str]] = frozenset()
-        for pair in must_not_merge:
-            if len(pair) != 2:
-                raise ReconciliationPlanningError(
-                    f"must_not_merge pair must have exactly 2 elements: {pair!r}"
-                )
-            a, b = pair
-            if a == b:
-                raise ReconciliationPlanningError(
-                    f"must_not_merge pair must reference distinct candidates: {pair!r}"
-                )
-            hard_constraints = hard_constraints | frozenset({(min(a, b), max(a, b))})
-    else:
-        hard_constraints = derive_must_not_merge_constraints(candidate_index)
-
-    # Step 7: Generate blocked pairs (indexed, not N²)
-    pair_info = _generate_blocked_pairs(
-        candidate_index,
-        identity_keys_map,
-        tokens_map,
-        chunk_ordinal_map,
-        hard_constraints,
-    )
-
-    # Step 8: Assign pair states and build pair plans
-    pair_plans: list[ReconciliationPairPlan] = []
-    for (left, right), info in pair_info.items():
-        state = _assign_pair_state(
-            info, left, right, identity_keys_map, hard_constraints
-        )
-        signals = tuple(sorted(info["signals"]))
-        shared_keys = tuple(sorted(info["shared_identity_keys"]))
-        shared_tokens = tuple(sorted(info["shared_tokens"]))
-        pair_plans.append(
-            ReconciliationPairPlan(
-                left_candidate_ref=left,
-                right_candidate_ref=right,
-                state=state,
-                signals=signals,
-                shared_identity_keys=shared_keys,
-                shared_tokens=shared_tokens,
-            )
-        )
-    # Canonical order: sorted by (left, right)
-    pair_plans.sort(key=lambda p: (p.left_candidate_ref, p.right_candidate_ref))
-    pair_plans_tuple = tuple(pair_plans)
-
-    # Step 9: Generate deterministic decisions for auto_same / must_not_merge
-    decisions: list[ReconciliationDecision] = []
-    for plan in pair_plans_tuple:
-        if plan.state == PAIR_STATE_AUTO_SAME:
-            decision_id = _compute_decision_id(
-                plan.left_candidate_ref,
-                plan.right_candidate_ref,
-                "same_entity",
-                "deterministic",
-                "same_strong_exact_identity_key",
-                "确定性自动合并：共享强身份键",
-            )
-            decisions.append(
-                ReconciliationDecision(
-                    decision_id=decision_id,
-                    left_candidate_ref=plan.left_candidate_ref,
-                    right_candidate_ref=plan.right_candidate_ref,
-                    decision="same_entity",
-                    method="deterministic",
-                    reason_code="same_strong_exact_identity_key",
-                    reason_zh="确定性自动合并：共享强身份键",
-                    evidence_refs=(),
-                    prompt_id=None,
-                    prompt_version=None,
-                    generation_provenance=None,
-                )
-            )
-        elif plan.state == PAIR_STATE_MUST_NOT_MERGE:
-            decision_id = _compute_decision_id(
-                plan.left_candidate_ref,
-                plan.right_candidate_ref,
-                "different_entity",
-                "deterministic",
-                "hard_must_not_merge",
-                "确定性硬约束：不可合并",
-            )
-            decisions.append(
-                ReconciliationDecision(
-                    decision_id=decision_id,
-                    left_candidate_ref=plan.left_candidate_ref,
-                    right_candidate_ref=plan.right_candidate_ref,
-                    decision="different_entity",
-                    method="deterministic",
-                    reason_code="hard_must_not_merge",
-                    reason_zh="确定性硬约束：不可合并",
-                    evidence_refs=(),
-                    prompt_id=None,
-                    prompt_version=None,
-                    generation_provenance=None,
-                )
-            )
-
-    # Step 10: Coverage audit (fail closed)
-    _audit_coverage(candidate_index, pair_plans_tuple)
-
-    # Step 11: Compute plan hash
-    plan_hash = _compute_plan_hash(
-        candidate_index,
-        pair_plans_tuple,
-        NAME_NORMALIZATION_POLICY_ID,
-        BLOCKING_POLICY_ID,
-        CANONICALIZATION_POLICY_ID,
-    )
-
-    return ReconciliationPlanningResult(
-        candidate_index=candidate_index,
-        pair_plans=pair_plans_tuple,
-        decisions=tuple(decisions),
-        normalization_policy_id=NAME_NORMALIZATION_POLICY_ID,
-        blocking_policy_id=BLOCKING_POLICY_ID,
-        canonicalization_policy_id=CANONICALIZATION_POLICY_ID,
-        plan_hash=plan_hash,
-    )
+    # Delegate the index -> planning pipeline to the single-source authority so
+    # fresh A4B runs and A4D CURRENT verification / publication revalidation
+    # share byte-identical pair plans, deterministic decisions, and plan_hash.
+    return plan_candidate_index_v1(candidate_index, must_not_merge=must_not_merge)

@@ -65,23 +65,18 @@ from short_drama.artifacts import ArtifactRef, FileArtifactStore
 from short_drama.foundation import FilePointerStore
 from short_drama.llm import LLMClient, SemanticLLMProfile, load_semantic_profile
 
-from .chunking import ChunkManifest, ChunkPlanningProfile
-from .errors import StoryIntegrityError
+from .chunking import ChunkPlanningProfile
 from .extraction import StoryExtractionProfile, load_story_extraction_profile
 from .extraction_service import (
     DEFAULT_OUTPUT_SCHEMA_PATH,
     ChunkExtractionService,
 )
-from .persistence import chunk_pointer_id, load_source_document, source_pointer_id
 from .service import (
     DOCUMENT_ID,
-    _current_pointer,
     _load_profile,
     _load_project,
-    _require_current_source_validation,
-    _require_source_identity,
     _stores,
-    _validate_current_manifest_snapshot,
+    resolve_current_story_snapshot,
 )
 
 
@@ -132,81 +127,7 @@ class ChunkExtractionBatchSummary:
         }
 
 
-# ---------------------------------------------------------------------------
-# Current A1 / A2 resolution (reuses the existing project/persistence primitives)
-# ---------------------------------------------------------------------------
 
-
-def _resolve_current_source_ref(
-    store: FileArtifactStore,
-    pointers: FilePointerStore,
-    project_id: str,
-    document_id: str,
-) -> ArtifactRef:
-    """Resolve + verify the authoritative current A1 ``SourceDocument``.
-
-    Fails closed (``StoryIntegrityError``) before any provider call if the A1
-    source is not current, targets the wrong project/document, or is not backed
-    by its exact current A1 ``ValidationReport``.
-    """
-    source_pointer = source_pointer_id(project_id, document_id)
-    _source_pointer_ref, source_ref = _current_pointer(pointers, source_pointer)
-    if source_ref is None:
-        raise StoryIntegrityError(
-            "A1 SourceDocument is not current; run short-drama ingest-source first"
-        )
-    source = load_source_document(store, source_ref)
-    _require_source_identity(source, project_id=project_id, document_id=document_id)
-    _require_current_source_validation(store, source, source_ref)
-    return source_ref
-
-
-def _resolve_current_chunk_refs(
-    store: FileArtifactStore,
-    pointers: FilePointerStore,
-    source_ref: ArtifactRef,
-    project_id: str,
-    document_id: str,
-    chunk_profile: ChunkPlanningProfile,
-) -> tuple[ChunkManifest, tuple[ArtifactRef, ...]]:
-    """Resolve + verify the authoritative current A2 ``ChunkManifest`` for the
-    requested ``ChunkPlanningProfile`` and return its child chunk refs in the
-    exact deterministic manifest order.
-
-    Fails closed (``StoryIntegrityError``) before any provider call if the A2
-    manifest is not current, targets the wrong project/document/profile, is not
-    backed by its exact current A2 ``ValidationReport``, does not pin the
-    current A1 ``SourceDocument``, or does not match the requested profile.
-    """
-    profile_id = chunk_profile.profile_id
-    manifest_pointer = chunk_pointer_id(project_id, document_id, profile_id)
-    _manifest_pointer_ref, manifest_ref = _current_pointer(pointers, manifest_pointer)
-    if manifest_ref is None:
-        raise StoryIntegrityError(
-            "A2 ChunkManifest is not current for chunk profile "
-            f"{profile_id!r}; run short-drama plan-chunks first"
-        )
-    # A2 authority: identity + deterministic plan + exact A2 ValidationReport.
-    manifest, _pinned_source, _report_ref = _validate_current_manifest_snapshot(
-        store,
-        manifest_ref,
-        project_id=project_id,
-        document_id=document_id,
-        profile_id=profile_id,
-    )
-    # The current manifest must pin the CURRENT A1 source and the exact requested
-    # profile (a stale / superseded manifest fails closed rather than being run).
-    if manifest.source_document_ref != source_ref:
-        raise StoryIntegrityError(
-            "A2 ChunkManifest does not pin the current A1 SourceDocument; "
-            "the current manifest is stale relative to the current source"
-        )
-    if manifest.profile != chunk_profile:
-        raise StoryIntegrityError(
-            "requested chunk profile does not match the current ChunkManifest "
-            "profile"
-        )
-    return manifest, tuple(manifest.chunk_refs)
 
 
 # ---------------------------------------------------------------------------
@@ -265,17 +186,16 @@ class ChunkExtractionBatchService:
         invalid or any chunk cannot produce a validated extraction; in that case
         no successful summary is returned.
         """
-        source_ref = _resolve_current_source_ref(
-            self.store, self.pointers, project_id, document_id
-        )
-        _manifest, chunk_refs = _resolve_current_chunk_refs(
+        # A1/A2 resolution: single shared public authority (also used by A4E).
+        snapshot = resolve_current_story_snapshot(
             self.store,
             self.pointers,
-            source_ref,
-            project_id,
-            document_id,
-            chunk_profile,
+            project_id=project_id,
+            document_id=document_id,
+            chunk_profile=chunk_profile,
         )
+        source_ref = snapshot.source_document_ref
+        chunk_refs = snapshot.source_chunk_refs
 
         extraction_refs: list[ArtifactRef] = []
         validation_report_refs: list[ArtifactRef] = []

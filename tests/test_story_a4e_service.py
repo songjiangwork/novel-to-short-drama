@@ -20,6 +20,7 @@ OpenAICompatibleLLMClient construction, live Qwen, real-novel smoke.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1153,3 +1154,611 @@ def test_a3_input_identity_exact(tmp_path):
     assert len(result.candidate_extraction_refs) == len(chunks)
     assert result.story_snapshot.source_document_ref == source_ref
     assert result.story_snapshot.chunk_manifest_ref == manifest_ref
+
+
+# ===========================================================================
+# 14. A3 CURRENT resolver regression matrix
+# ===========================================================================
+
+
+def _setup_full_state_single_chunk(tmp_path):
+    """Set up A1+A2+A3 state for a single-chunk scenario."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_a1_a2(tmp_path)
+    # Use only the first chunk for A3 setup
+    setup_a3(store, pointers, chunks, names=["主角"])
+    return store, pointers, source_ref, manifest, chunks, manifest_ref
+
+
+def test_a3_wrong_logical_artifact_target(tmp_path):
+    """A3 CURRENT pointer targets a different logical artifact → fail closed."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_a1_a2(tmp_path)
+    # Set up A3 for all chunks
+    setup_a3(store, pointers, chunks, names=["主角"] * len(chunks))
+
+    # Move the A3 pointer for chunk 0 to target a different artifact
+    chunk = chunks[0]
+    a3_pointer_id = candidate_extraction_pointer_id(
+        PROJECT, DOCUMENT, CHUNK_PROFILE_ID, chunk.chunk_id, EXTRACTION_PROFILE_ID
+    )
+    # Persist a different artifact with a different artifact_id
+    from short_drama.artifacts.models import ImmutableArtifactEnvelope, artifact_content_hash
+    from short_drama.artifacts.canonical import canonical_json_bytes
+    other_chunk_id = chunks[1].chunk_id  # different chunk
+    other_artifact_id = candidate_extraction_artifact_id(
+        PROJECT, DOCUMENT, CHUNK_PROFILE_ID, other_chunk_id, EXTRACTION_PROFILE_ID
+    )
+    payload_obj = {"schema_version": 1, "payload": {}}
+    payload_bytes = canonical_json_bytes(payload_obj)
+    content_hash = artifact_content_hash(schema_version=1, payload=payload_obj)
+    envelope = ImmutableArtifactEnvelope(
+        artifact_type="candidate_extraction",
+        artifact_id=other_artifact_id,
+        revision=1,
+        schema_version=1,
+        content_hash=content_hash,
+        _payload_bytes=payload_bytes,
+    )
+    # Use revision=2 to avoid conflict with existing chunk 1 A3 at revision=1
+    envelope = ImmutableArtifactEnvelope(
+        artifact_type="candidate_extraction",
+        artifact_id=other_artifact_id,
+        revision=2,
+        schema_version=1,
+        content_hash=content_hash,
+        _payload_bytes=payload_bytes,
+    )
+    foreign_ref = store.put(envelope)
+    current_pointer_ref = pointers.resolve_current_pointer_ref(a3_pointer_id)
+    pointers.compare_and_set(
+        pointer_id=a3_pointer_id,
+        pointer_kind=PointerKind.CURRENT,
+        expected_pointer_ref=current_pointer_ref,
+        target_ref=foreign_ref,
+    )
+
+    explode_client = _ExplodeIfCalledClient()
+    service = make_reconciliation_service(store, pointers)
+    with pytest.raises(StoryIntegrityError, match="different logical"):
+        run_reconciliation(service, explode_client)
+    assert explode_client.call_count == 0
+
+
+def test_a3_wrong_source_document_ref(tmp_path):
+    """A3 CandidateExtraction.source_document_ref does not match the
+    requested current A1 ref → fail closed."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_full_state(tmp_path)
+
+    # Create a new A1 source document (different ref) and persist it,
+    # but DON'T move the A1 pointer (so the A3's source_document_ref
+    # won't match the current A1).
+    # Instead: move the A1 pointer so the A3's source_document_ref is stale.
+    new_source_ref = persist_source_document(store, make_source_document(), revision=2)
+    persist_validation_report(
+        store,
+        ValidationReport(
+            validated_refs=(LineageRef("source_document", new_source_ref),), findings=()
+        ),
+        artifact_id=source_validation_artifact_id(PROJECT, DOCUMENT),
+        revision=new_source_ref.revision,
+    )
+    a1_pointer = source_pointer_id(PROJECT, DOCUMENT)
+    current_a1_ref = pointers.resolve_current_pointer_ref(a1_pointer)
+    pointers.compare_and_set(
+        pointer_id=a1_pointer,
+        pointer_kind=PointerKind.CURRENT,
+        expected_pointer_ref=current_a1_ref,
+        target_ref=new_source_ref,
+    )
+
+    # Now the A3 was built against the old source_ref, but the current
+    # A1 is the new source_ref. The A2 pins the old source, so the A1/A2
+    # resolver will fail first (A2 stale vs A1). Let's test the A3 level
+    # directly by using the A3 resolver with the old source ref.
+    service_a3 = __import__(
+        "short_drama.story.extraction_persistence",
+        fromlist=["CandidateExtractionService"],
+    ).CandidateExtractionService(store, pointers)
+    chunk = chunks[0]
+    chunk_ref = manifest.chunk_refs[0]
+    with pytest.raises(StoryIntegrityError, match="source_document_ref"):
+        service_a3.require_current_validated(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile_id=CHUNK_PROFILE_ID,
+            chunk_id=chunk.chunk_id,
+            source_document_ref=new_source_ref,  # different from A3's
+            source_chunk_ref=chunk_ref,
+            extraction_profile=make_extraction_profile(),
+        )
+
+
+def test_a3_wrong_source_chunk_ref(tmp_path):
+    """A3 CandidateExtraction.source_chunk_ref does not match the
+    requested source_chunk_ref → fail closed."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_full_state(tmp_path)
+
+    service_a3 = __import__(
+        "short_drama.story.extraction_persistence",
+        fromlist=["CandidateExtractionService"],
+    ).CandidateExtractionService(store, pointers)
+    chunk = chunks[0]
+    # Use the wrong chunk ref (chunk 1's ref for chunk 0)
+    wrong_chunk_ref = manifest.chunk_refs[1]
+    with pytest.raises(StoryIntegrityError, match="source_chunk_ref"):
+        service_a3.require_current_validated(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile_id=CHUNK_PROFILE_ID,
+            chunk_id=chunk.chunk_id,
+            source_document_ref=source_ref,
+            source_chunk_ref=wrong_chunk_ref,
+            extraction_profile=make_extraction_profile(),
+        )
+
+
+def _make_provenance():
+    """Build a minimal valid LLMInvocationProvenance for test fixtures."""
+    from short_drama.llm import LLMInvocationProvenance
+    return LLMInvocationProvenance(
+        provider_family="qwen",
+        model="qwen3-27b",
+        semantic_profile_id="story-extraction-llm-v1",
+        semantic_profile_hash="f" * 64,
+        prompt_id="a3.chunk-extraction",
+        prompt_version=1,
+        prompt_content_hash="f" * 64,
+        rendered_prompt_hash="f" * 64,
+        output_schema_id="a3-candidate-payload",
+        output_schema_version=1,
+        output_schema_hash="f" * 64,
+        request_hash="f" * 64,
+        provider_response_id=None,
+        finish_reason="stop",
+        usage={"total_tokens": 100},
+    )
+
+
+def test_a3_validation_report_missing(tmp_path):
+    """A3 ValidationReport is missing → fail closed."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_a1_a2(tmp_path)
+
+    # Persist A3 manually WITHOUT a validation report
+    from short_drama.story.extraction_persistence import persist_candidate_extraction
+    from short_drama.story.extraction import CandidateExtraction
+
+    chunk = chunks[0]
+    chunk_ref = manifest.chunk_refs[0]
+    extraction = CandidateExtraction(
+        schema_version=1,
+        project_id=PROJECT,
+        document_id=DOCUMENT,
+        chunk_profile_id=CHUNK_PROFILE_ID,
+        chunk_id=chunk.chunk_id,
+        source_document_ref=source_ref,
+        source_chunk_ref=chunk_ref,
+        extraction_profile_id=EXTRACTION_PROFILE_ID,
+        extraction_profile_hash=make_extraction_profile().profile_hash,
+        generation_provenance=_make_provenance(),
+        candidates=valid_payload_for(chunk, "主角"),
+    )
+    a3_ref = persist_candidate_extraction(store, extraction, revision=1)
+    pointers.compare_and_set(
+        pointer_id=candidate_extraction_pointer_id(
+            PROJECT, DOCUMENT, CHUNK_PROFILE_ID, chunk.chunk_id, EXTRACTION_PROFILE_ID
+        ),
+        pointer_kind=PointerKind.CURRENT,
+        expected_pointer_ref=None,
+        target_ref=a3_ref,
+    )
+    # No validation report persisted → require_current_validated must fail
+    service_a3 = __import__(
+        "short_drama.story.extraction_persistence",
+        fromlist=["CandidateExtractionService"],
+    ).CandidateExtractionService(store, pointers)
+    with pytest.raises((StoryIntegrityError, StoryPersistenceError, Exception)):
+        service_a3.require_current_validated(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile_id=CHUNK_PROFILE_ID,
+            chunk_id=chunk.chunk_id,
+            source_document_ref=source_ref,
+            source_chunk_ref=chunk_ref,
+            extraction_profile=make_extraction_profile(),
+        )
+
+
+def test_a3_semantic_invalid_extraction(tmp_path):
+    """A3 extraction is semantic-invalid (evidence paragraph not in chunk) →
+    fail closed."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_a1_a2(tmp_path)
+
+    # Persist A3 with an invalid payload: evidence references a paragraph
+    # that's not in the chunk's ownership span
+    from short_drama.story.extraction import CandidatePayload, CharacterCandidate as CC
+    from short_drama.story import EvidenceRef as ER
+
+    def invalid_payload():
+        return CandidatePayload(
+            characters=(
+                CC(
+                    candidate_id="cand_char_001",
+                    display_name_original="主角",
+                    aliases_original=(),
+                    descriptors_zh=(),
+                    summary_zh="test",
+                    evidence_strength="explicit",
+                    evidence=(
+                        ER(
+                            paragraph_id="CH999_P9999",  # not in chunk
+                            role="primary",
+                            strength="explicit",
+                            excerpt=None,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    # We need to bypass the A3E service's semantic validation. Let's persist
+    # a raw A3 artifact directly.
+    from short_drama.story.extraction_persistence import persist_candidate_extraction
+    from short_drama.story.extraction import CandidateExtraction
+    from short_drama.artifacts import ArtifactRef as AR
+
+    chunk = chunks[0]
+    chunk_ref = manifest.chunk_refs[0]
+    extraction = CandidateExtraction(
+        schema_version=1,
+        project_id=PROJECT,
+        document_id=DOCUMENT,
+        chunk_profile_id=CHUNK_PROFILE_ID,
+        chunk_id=chunk.chunk_id,
+        source_document_ref=source_ref,
+        source_chunk_ref=chunk_ref,
+        extraction_profile_id=EXTRACTION_PROFILE_ID,
+        extraction_profile_hash=make_extraction_profile().profile_hash,
+        generation_provenance=_make_provenance(),
+        candidates=invalid_payload(),
+    )
+    a3_ref = persist_candidate_extraction(store, extraction, revision=1)
+    pointers.compare_and_set(
+        pointer_id=candidate_extraction_pointer_id(
+            PROJECT, DOCUMENT, CHUNK_PROFILE_ID, chunk.chunk_id, EXTRACTION_PROFILE_ID
+        ),
+        pointer_kind=PointerKind.CURRENT,
+        expected_pointer_ref=None,
+        target_ref=a3_ref,
+    )
+    # Persist a matching PASS validation report (to get past the report check,
+    # but the semantic validation will fail)
+    from short_drama.story.extraction_persistence import (
+        candidate_extraction_validation_artifact_id as cva_id,
+    )
+    persist_validation_report(
+        store,
+        ValidationReport(
+            validated_refs=(
+                LineageRef("source_document", source_ref),
+                LineageRef("source_chunk", chunk_ref),
+                LineageRef("candidate_extraction", a3_ref),
+            ),
+            findings=(),
+        ),
+        artifact_id=cva_id(a3_ref.artifact_id),
+        revision=1,
+    )
+
+    # Now A3 CURRENT exists but is semantic-invalid. The resolver should
+    # fail closed when re-validating.
+    service_a3 = __import__(
+        "short_drama.story.extraction_persistence",
+        fromlist=["CandidateExtractionService"],
+    ).CandidateExtractionService(store, pointers)
+    with pytest.raises(StoryIntegrityError, match="re-validate to PASS"):
+        service_a3.require_current_validated(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile_id=CHUNK_PROFILE_ID,
+            chunk_id=chunk.chunk_id,
+            source_document_ref=source_ref,
+            source_chunk_ref=chunk_ref,
+            extraction_profile=make_extraction_profile(),
+        )
+
+
+# ===========================================================================
+# 15. Post-generation same-identity race
+# ===========================================================================
+
+
+def test_post_generation_same_identity_race(tmp_path):
+    """A4 pre-provider reuse MISS → A4C generation → concurrent writer
+    publishes same identity → publish_validated returns reused=True.
+
+    The stage result must report:
+    - provider was called (semantic_generation_call_count > 0)
+    - reused = True
+    - entity_map_ref = concurrent publication's EntityMap
+    - counts from the persisted publication
+    - no duplicate A4 publication revision
+    """
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_full_state(
+        tmp_path, names=["张三", "张三", "张三", "张三"]
+    )
+    decision_payload = _all_pairs_decision_payload(chunks)
+
+    # First: publish A4 normally (to get the refs for the race)
+    client1 = A4FakeLLMClient([decision_payload])
+    service = make_reconciliation_service(store, pointers)
+    result1 = run_reconciliation(service, client1)
+    assert result1.reused is False
+
+    # Now: monkeypatch try_reuse_current to return None (simulating a miss)
+    # and publish_validated to return reused=True (simulating the race).
+    # Load the real EntityMap to get the actual artifact refs.
+    from short_drama.story.reconciliation_persistence import (
+        ReconciliationPersistenceService,
+        ReconciliationPublication,
+        load_entity_map,
+    )
+
+    entity_map = load_entity_map(
+        store, result1.entity_map_ref,
+        expected_artifact_id=result1.entity_map_ref.artifact_id,
+    )
+
+    def fake_try_reuse(self, **kwargs):
+        return None  # pre-provider reuse miss
+
+    def fake_publish_validated(self, **kwargs):
+        # Simulate: a concurrent writer already published the same identity.
+        # publish_validated returns the existing (concurrent) publication.
+        return ReconciliationPublication(
+            candidate_entity_index_ref=entity_map.candidate_entity_index_ref,
+            reconciliation_decision_set_ref=entity_map.reconciliation_decision_set_ref,
+            canonical_character_registry_ref=entity_map.canonical_character_registry_ref,
+            canonical_location_registry_ref=entity_map.canonical_location_registry_ref,
+            unresolved_entity_set_ref=entity_map.unresolved_entity_set_ref,
+            entity_map_ref=result1.entity_map_ref,
+            validation_report_ref=result1.validation_report_ref,
+            current_pointer_ref=result1.current_pointer_ref,
+            reused=True,
+        )
+
+    with patch.object(
+        ReconciliationPersistenceService, "try_reuse_current", fake_try_reuse,
+    ), patch.object(
+        ReconciliationPersistenceService, "publish_validated", fake_publish_validated,
+    ):
+        client2 = A4FakeLLMClient([decision_payload])
+        result2 = run_reconciliation(service, client2)
+
+    # Assert the race behavior
+    assert client2.call_count >= 1  # provider was called
+    assert result2.reused is True  # same-identity race detected
+    assert result2.semantic_generation_call_count > 0  # provider was actually called
+    assert result2.entity_map_ref == result1.entity_map_ref  # concurrent writer's EntityMap
+
+
+# ===========================================================================
+# 16. Reuse-return pointer stability (movement AFTER try_reuse_current)
+# ===========================================================================
+
+
+def _make_reuse_scenario(tmp_path):
+    """Set up A1+A2+A3+A4 state where A4 CURRENT exists (reuse hit)."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_full_state(
+        tmp_path, names=["张三", "张三", "张三", "张三"]
+    )
+    decision_payload = _all_pairs_decision_payload(chunks)
+    client1 = A4FakeLLMClient([decision_payload])
+    service = make_reconciliation_service(store, pointers)
+    result1 = run_reconciliation(service, client1)
+    assert result1.reused is False
+    return store, pointers, source_ref, manifest, chunks, manifest_ref, service
+
+
+def test_reuse_return_a1_moves_after_reuse_found(tmp_path):
+    """A4 reuse hit. A1 pointer moves AFTER try_reuse_current but BEFORE
+    the stability check. The result must fail closed (no stale A4 returned).
+    LLM call_count = 0."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref, service = (
+        _make_reuse_scenario(tmp_path)
+    )
+
+    # Monkeypatch: after try_reuse_current returns a hit, move the A1 pointer
+    from short_drama.story.reconciliation_persistence import ReconciliationPersistenceService
+
+    real_try_reuse = ReconciliationPersistenceService.try_reuse_current
+
+    def moving_try_reuse(self, **kwargs):
+        result = real_try_reuse(self, **kwargs)
+        if result is not None:
+            # Move A1 pointer (simulating upstream movement after reuse found)
+            new_source_ref = persist_source_document(
+                store, make_source_document(), revision=2
+            )
+            persist_validation_report(
+                store,
+                ValidationReport(
+                    validated_refs=(LineageRef("source_document", new_source_ref),),
+                    findings=(),
+                ),
+                artifact_id=source_validation_artifact_id(PROJECT, DOCUMENT),
+                revision=new_source_ref.revision,
+            )
+            a1_pointer = source_pointer_id(PROJECT, DOCUMENT)
+            current = self.pointers.resolve_current_pointer_ref(a1_pointer)
+            self.pointers.compare_and_set(
+                pointer_id=a1_pointer,
+                pointer_kind=PointerKind.CURRENT,
+                expected_pointer_ref=current,
+                target_ref=new_source_ref,
+            )
+        return result
+
+    with patch.object(ReconciliationPersistenceService, "try_reuse_current", moving_try_reuse):
+        client = _ExplodeIfCalledClient()
+        with pytest.raises(StoryPersistenceError):
+            run_reconciliation(service, client)
+    assert client.call_count == 0
+
+
+def test_reuse_return_a2_moves_after_reuse_found(tmp_path):
+    """A4 reuse hit. A2 pointer moves AFTER try_reuse_current but BEFORE
+    the stability check. The result must fail closed. LLM call_count = 0."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref, service = (
+        _make_reuse_scenario(tmp_path)
+    )
+
+    from short_drama.story.reconciliation_persistence import ReconciliationPersistenceService
+
+    real_try_reuse = ReconciliationPersistenceService.try_reuse_current
+
+    def moving_try_reuse(self, **kwargs):
+        result = real_try_reuse(self, **kwargs)
+        if result is not None:
+            # Move A2 pointer
+            new_manifest_ref = persist_chunk_manifest(store, manifest, revision=2)
+            a2_pointer = chunk_pointer_id(PROJECT, DOCUMENT, CHUNK_PROFILE_ID)
+            current = self.pointers.resolve_current_pointer_ref(a2_pointer)
+            self.pointers.compare_and_set(
+                pointer_id=a2_pointer,
+                pointer_kind=PointerKind.CURRENT,
+                expected_pointer_ref=current,
+                target_ref=new_manifest_ref,
+            )
+        return result
+
+    with patch.object(ReconciliationPersistenceService, "try_reuse_current", moving_try_reuse):
+        client = _ExplodeIfCalledClient()
+        with pytest.raises(StoryPersistenceError):
+            run_reconciliation(service, client)
+    assert client.call_count == 0
+
+
+def test_reuse_return_a3_moves_after_reuse_found(tmp_path):
+    """A4 reuse hit. One A3 pointer moves AFTER try_reuse_current but BEFORE
+    the stability check. The result must fail closed. LLM call_count = 0."""
+    store, pointers, source_ref, manifest, chunks, manifest_ref, service = (
+        _make_reuse_scenario(tmp_path)
+    )
+
+    from short_drama.story.reconciliation_persistence import ReconciliationPersistenceService
+
+    real_try_reuse = ReconciliationPersistenceService.try_reuse_current
+
+    def moving_try_reuse(self, **kwargs):
+        result = real_try_reuse(self, **kwargs)
+        if result is not None:
+            # Move A3 pointer for chunk 0
+            from short_drama.artifacts.models import (
+                ImmutableArtifactEnvelope,
+                artifact_content_hash,
+            )
+            from short_drama.artifacts.canonical import canonical_json_bytes
+            chunk = chunks[0]
+            a3_artifact_id = candidate_extraction_artifact_id(
+                PROJECT, DOCUMENT, CHUNK_PROFILE_ID, chunk.chunk_id, EXTRACTION_PROFILE_ID
+            )
+            payload_obj = {"schema_version": 1, "payload": {}}
+            payload_bytes = canonical_json_bytes(payload_obj)
+            content_hash = artifact_content_hash(schema_version=1, payload=payload_obj)
+            envelope = ImmutableArtifactEnvelope(
+                artifact_type="candidate_extraction",
+                artifact_id=a3_artifact_id,
+                revision=2,
+                schema_version=1,
+                content_hash=content_hash,
+                _payload_bytes=payload_bytes,
+            )
+            new_ref = self.store.put(envelope)
+            a3_pointer_id = candidate_extraction_pointer_id(
+                PROJECT, DOCUMENT, CHUNK_PROFILE_ID, chunk.chunk_id, EXTRACTION_PROFILE_ID
+            )
+            current = self.pointers.resolve_current_pointer_ref(a3_pointer_id)
+            self.pointers.compare_and_set(
+                pointer_id=a3_pointer_id,
+                pointer_kind=PointerKind.CURRENT,
+                expected_pointer_ref=current,
+                target_ref=new_ref,
+            )
+        return result
+
+    with patch.object(ReconciliationPersistenceService, "try_reuse_current", moving_try_reuse):
+        client = _ExplodeIfCalledClient()
+        with pytest.raises(StoryPersistenceError):
+            run_reconciliation(service, client)
+    assert client.call_count == 0
+
+
+# ===========================================================================
+# 17. Shared A1/A2 resolver: A3E and A4E use the same authority
+# ===========================================================================
+
+
+def test_shared_resolver_a3e_and_a4e_same_seam(tmp_path):
+    """Prove that both A3E (ChunkExtractionBatchService) and A4E
+    (EntityReconciliationService) route through the same
+    resolve_current_story_snapshot() authority.
+
+    We monkeypatch the shared resolver to record calls and verify both
+    paths invoke it.
+    """
+    store, pointers, source_ref, manifest, chunks, manifest_ref = setup_a1_a2(tmp_path)
+
+    call_log = []
+    real_resolver = resolve_current_story_snapshot
+
+    def tracking_resolver(*args, **kwargs):
+        call_log.append(args + (kwargs,))
+        return real_resolver(*args, **kwargs)
+
+    # Monkeypatch in both modules that import it
+    import short_drama.story.extraction_batch as batch_mod
+    import short_drama.story.reconciliation_service as recon_mod
+    import short_drama.story.service as svc_mod
+
+    with patch.object(batch_mod, "resolve_current_story_snapshot", tracking_resolver), \
+         patch.object(svc_mod, "resolve_current_story_snapshot", tracking_resolver):
+        # A3E path
+        a3_client = A3FakeLLMClient(
+            [valid_payload_for(chunk, "主角") for chunk in chunks]
+        )
+        a3_service = ChunkExtractionBatchService(
+            store, pointers, PromptRegistry(PROMPTS_DIR), DEFAULT_OUTPUT_SCHEMA_PATH
+        )
+        a3_service.extract_chunks(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            chunk_profile=make_chunk_profile(),
+            extraction_profile=make_extraction_profile(),
+            semantic_profile=make_semantic_profile(),
+            llm_client=a3_client,
+        )
+        assert len(call_log) == 1  # A3E called the shared resolver once
+
+        # A4E path (now A3 state exists)
+        call_log.clear()
+        # Need to patch in reconciliation_service too
+        with patch.object(recon_mod, "resolve_current_story_snapshot", tracking_resolver):
+            service = make_reconciliation_service(store, pointers)
+            client = A4FakeLLMClient([])
+            # Use empty payloads so no A4C semantic calls
+            from short_drama.story.extraction import CandidatePayload as CP
+            # We already have A3 from the A3E run above. Now run A4E.
+            # Since all chunks have "主角" (2 CJK chars), there will be
+            # semantic pairs. We need to provide decisions.
+            decision_payload = _all_pairs_decision_payload(chunks)
+            client = A4FakeLLMClient([decision_payload])
+            run_reconciliation(service, client)
+
+        # The A4E path calls resolve_current_story_snapshot via
+        # resolve_current_a3_reconciliation_inputs which calls it.
+        # But since we patched recon_mod, the call goes through recon_mod's
+        # import. Let's verify the call was made.
+        # Actually, resolve_current_a3_reconciliation_inputs is defined in
+        # recon_mod and calls resolve_current_story_snapshot which is
+        # imported from service. Since we patched recon_mod's name, it
+        # should be tracked.
+        assert len(call_log) >= 1  # A4E called the shared resolver

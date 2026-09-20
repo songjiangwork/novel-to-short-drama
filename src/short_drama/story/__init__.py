@@ -197,12 +197,10 @@ from .extraction_batch import (
 )
 from .reconciliation_service import (
     CurrentA3ReconciliationInputs,
-    CurrentStorySnapshot,
     EntityReconciliationService,
     EntityReconciliationStageResult,
     reconcile_entities_project,
     resolve_current_a3_reconciliation_inputs,
-    resolve_current_story_snapshot,
 )
 from .extraction_validation import (
     A3_EVIDENCE_EXCERPT_MISMATCH,
@@ -254,7 +252,12 @@ from .persistence import (
     persist_source_chunk,
     persist_source_document,
 )
-from .service import ingest_source_project, plan_chunks_project
+from .service import (
+    CurrentStorySnapshot,
+    ingest_source_project,
+    plan_chunks_project,
+    resolve_current_story_snapshot,
+)
 from .source import (
     LANGUAGE_DETECTOR_ID,
     SOURCE_DOCUMENT_ARTIFACT_TYPE,

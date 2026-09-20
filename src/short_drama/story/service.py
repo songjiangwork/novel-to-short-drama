@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,123 @@ from .persistence import (
 from .source import SourceDocument, base_language, build_source_document
 
 DOCUMENT_ID = "src_001"
+
+
+# ---------------------------------------------------------------------------
+# Public A1/A2 CURRENT resolver seam (shared by A3E and A4E)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentStorySnapshot:
+    """The fully validated current A1 + A2 story snapshot.
+
+    Carries the authoritative A1 ``SourceDocument``, A2 ``ChunkManifest``, and
+    every A2 ``SourceChunk`` in exact manifest order, along with their artifact
+    refs and the captured CURRENT pointer head refs for upstream stability.
+
+    This is an in-memory, non-persisted, reporting-internal value. It is NOT
+    an artifact, NOT a CURRENT pointer, and NOT a second canonical authority.
+    """
+
+    source_document: SourceDocument
+    source_document_ref: ArtifactRef
+    source_current_pointer_ref: ArtifactRef
+
+    chunk_manifest: ChunkManifest
+    chunk_manifest_ref: ArtifactRef
+    chunk_current_pointer_ref: ArtifactRef
+
+    source_chunks: tuple[SourceChunk, ...]
+    source_chunk_refs: tuple[ArtifactRef, ...]
+
+
+def resolve_current_story_snapshot(
+    store: FileArtifactStore,
+    pointers: FilePointerStore,
+    *,
+    project_id: str,
+    document_id: str,
+    chunk_profile: ChunkPlanningProfile,
+) -> CurrentStorySnapshot:
+    """Resolve + fully verify the current A1 SourceDocument and A2 ChunkManifest.
+
+    This is the single public A1/A2 CURRENT resolution authority, shared by
+    both A3E (batch chunk extraction) and A4E (entity reconciliation).
+
+    Reuses the existing A1/A2 validation authorities (exact project/document
+    identity, exact ValidationReport, deterministic manifest order, coverage,
+    SourceChunk refs, pointer heads) without duplicating them.
+
+    Fails closed (``StoryIntegrityError`` / ``StoryPersistenceError``) before
+    any provider call if the A1 or A2 state is invalid, stale, or missing.
+    """
+    # --- A1: resolve + verify current SourceDocument ---
+    source_pointer = source_pointer_id(project_id, document_id)
+    source_pointer_ref, source_ref = _current_pointer(pointers, source_pointer)
+    if source_ref is None or source_pointer_ref is None:
+        raise StoryIntegrityError(
+            "A1 SourceDocument is not current; "
+            "run short-drama ingest-source first"
+        )
+    source_document = load_source_document(store, source_ref)
+    _require_source_identity(
+        source_document, project_id=project_id, document_id=document_id
+    )
+    _require_current_source_validation(store, source_document, source_ref)
+
+    # --- A2: resolve + verify current ChunkManifest ---
+    profile_id = chunk_profile.profile_id
+    manifest_pointer = chunk_pointer_id(project_id, document_id, profile_id)
+    manifest_pointer_ref, manifest_ref = _current_pointer(pointers, manifest_pointer)
+    if manifest_ref is None or manifest_pointer_ref is None:
+        raise StoryIntegrityError(
+            f"A2 ChunkManifest is not current for chunk profile {profile_id!r}; "
+            "run short-drama plan-chunks first"
+        )
+
+    # A2 authority: identity + deterministic plan + exact A2 ValidationReport.
+    manifest, _pinned_source, _report_ref = _validate_current_manifest_snapshot(
+        store,
+        manifest_ref,
+        project_id=project_id,
+        document_id=document_id,
+        profile_id=profile_id,
+    )
+
+    # The current manifest must pin the CURRENT A1 source and the exact
+    # requested profile (a stale / superseded manifest fails closed).
+    if manifest.source_document_ref != source_ref:
+        raise StoryIntegrityError(
+            "A2 ChunkManifest does not pin the current A1 SourceDocument; "
+            "the current manifest is stale relative to the current source"
+        )
+    if manifest.profile != chunk_profile:
+        raise StoryIntegrityError(
+            "requested chunk profile does not match the current ChunkManifest "
+            "profile"
+        )
+
+    # Load every SourceChunk in exact manifest order (reuses A2 authority).
+    _validated_manifest, source_chunks = _validate_persisted_manifest(
+        store,
+        source=source_document,
+        source_ref=source_ref,
+        manifest_ref=manifest_ref,
+        expected_profile=chunk_profile,
+    )
+    source_chunk_refs = tuple(manifest.chunk_refs)
+
+    return CurrentStorySnapshot(
+        source_document=source_document,
+        source_document_ref=source_ref,
+        source_current_pointer_ref=source_pointer_ref,
+        chunk_manifest=manifest,
+        chunk_manifest_ref=manifest_ref,
+        chunk_current_pointer_ref=manifest_pointer_ref,
+        source_chunks=source_chunks,
+        source_chunk_refs=source_chunk_refs,
+    )
 
 
 def _load_project(

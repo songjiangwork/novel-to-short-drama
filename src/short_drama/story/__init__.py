@@ -195,6 +195,13 @@ from .extraction_batch import (
     ChunkExtractionBatchSummary,
     extract_chunks_project,
 )
+from .reconciliation_service import (
+    CurrentA3ReconciliationInputs,
+    EntityReconciliationService,
+    EntityReconciliationStageResult,
+    reconcile_entities_project,
+    resolve_current_a3_reconciliation_inputs,
+)
 from .extraction_validation import (
     A3_EVIDENCE_EXCERPT_MISMATCH,
     A3_EVIDENCE_OUTSIDE_CONTEXT,
@@ -217,6 +224,7 @@ from .extraction_validation import (
 from .extraction_persistence import (
     CandidateExtractionPublication,
     CandidateExtractionService,
+    ValidatedCandidateExtractionCurrent,
     candidate_extraction_artifact_id,
     candidate_extraction_pointer_id,
     candidate_extraction_validation_artifact_id,
@@ -244,7 +252,12 @@ from .persistence import (
     persist_source_chunk,
     persist_source_document,
 )
-from .service import ingest_source_project, plan_chunks_project
+from .service import (
+    CurrentStorySnapshot,
+    ingest_source_project,
+    plan_chunks_project,
+    resolve_current_story_snapshot,
+)
 from .source import (
     LANGUAGE_DETECTOR_ID,
     SOURCE_DOCUMENT_ARTIFACT_TYPE,
@@ -311,6 +324,14 @@ __all__ = [
     "candidate_extraction_validation_artifact_id",
     "extract_chunks_project",
     "extraction_semantic_identity",
+    "ValidatedCandidateExtractionCurrent",
+    "CurrentA3ReconciliationInputs",
+    "CurrentStorySnapshot",
+    "EntityReconciliationService",
+    "EntityReconciliationStageResult",
+    "reconcile_entities_project",
+    "resolve_current_a3_reconciliation_inputs",
+    "resolve_current_story_snapshot",
     "load_candidate_extraction",
     "next_candidate_extraction_revision",
     "persist_candidate_extraction",

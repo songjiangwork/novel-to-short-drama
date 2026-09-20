@@ -617,6 +617,21 @@ class CandidateExtractionPublication:
     reused: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedCandidateExtractionCurrent:
+    """The fully validated A3 CURRENT for one manifest chunk (A4E-A seam).
+
+    Carries the loaded CandidateExtraction, its artifact ref, the exact
+    matching PASS ValidationReport ref, and the captured CURRENT pointer ref.
+    This is an in-memory, non-persisted, reporting-internal value.
+    """
+
+    candidate_extraction: CandidateExtraction
+    candidate_extraction_ref: ArtifactRef
+    validation_report_ref: ArtifactRef
+    current_pointer_ref: ArtifactRef
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -639,6 +654,128 @@ class CandidateExtractionService:
     ) -> None:
         self.store = store
         self.pointers = pointers
+
+    # -- A4E-A public validated CURRENT resolver ---------------------------
+
+    def require_current_validated(
+        self,
+        *,
+        project_id: str,
+        document_id: str,
+        chunk_profile_id: str,
+        chunk_id: str,
+        source_document_ref: ArtifactRef,
+        source_chunk_ref: ArtifactRef,
+        extraction_profile: StoryExtractionProfile,
+    ) -> ValidatedCandidateExtractionCurrent:
+        """Resolve + fully verify the exact A3 CURRENT for one manifest chunk.
+
+        This is the A4E-A public seam: it requires (FAILS CLOSED if not met)
+        that the CURRENT exists, targets the exact logical identity, matches
+        the requested source refs and extraction profile identity, re-validates
+        to PASS, is in canonical form, is backed by its exact matching PASS
+        ValidationReport, and that the CURRENT pointer is unchanged during
+        verification.
+
+        Unlike :meth:`try_reuse_current` (which returns ``None`` on a semantic
+        identity mismatch), this method FAILS CLOSED on a missing CURRENT or
+        an extraction-profile mismatch because A4E requires the complete
+        validated A3 set as its input authority.
+        """
+        # Derive the pointer + logical identity from the requested profile.
+        profile_id = extraction_profile.profile_id
+        pointer_id = candidate_extraction_pointer_id(
+            project_id,
+            document_id,
+            chunk_profile_id,
+            chunk_id,
+            profile_id,
+        )
+        logical_artifact_id = candidate_extraction_artifact_id(
+            project_id,
+            document_id,
+            chunk_profile_id,
+            chunk_id,
+            profile_id,
+        )
+
+        # CURRENT must exist.
+        current_pointer_ref, current_extraction_ref = _current_pointer(
+            self.pointers, pointer_id
+        )
+        if current_extraction_ref is None or current_pointer_ref is None:
+            raise StoryIntegrityError(
+                f"A3 CandidateExtraction is not current for "
+                f"{project_id}/{document_id}/{chunk_profile_id}/{chunk_id}/"
+                f"{profile_id!r}; run short-drama extract-chunks first"
+            )
+
+        # CURRENT target artifact type/id exact.
+        if (
+            current_extraction_ref.artifact_type
+            != CANDIDATE_EXTRACTION_ARTIFACT_TYPE
+            or current_extraction_ref.artifact_id != logical_artifact_id
+        ):
+            raise StoryIntegrityError(
+                "A3 CURRENT pointer targets a different logical "
+                "CandidateExtraction"
+            )
+
+        # Load the CandidateExtraction.
+        extraction = load_candidate_extraction(self.store, current_extraction_ref)
+
+        # Exact identity checks.
+        if (
+            extraction.project_id != project_id
+            or extraction.document_id != document_id
+            or extraction.chunk_profile_id != chunk_profile_id
+            or extraction.chunk_id != chunk_id
+        ):
+            raise StoryIntegrityError(
+                "A3 CandidateExtraction logical identity does not match "
+                "the requested project/document/chunk_profile/chunk"
+            )
+        if extraction.source_document_ref != source_document_ref:
+            raise StoryIntegrityError(
+                "A3 CandidateExtraction.source_document_ref does not match "
+                "the requested source_document_ref"
+            )
+        if extraction.source_chunk_ref != source_chunk_ref:
+            raise StoryIntegrityError(
+                "A3 CandidateExtraction.source_chunk_ref does not match "
+                "the requested source_chunk_ref"
+            )
+        if extraction.extraction_profile_id != extraction_profile.profile_id:
+            raise StoryIntegrityError(
+                "A3 CandidateExtraction.extraction_profile_id "
+                f"{extraction.extraction_profile_id!r} does not match "
+                f"the requested extraction profile {extraction_profile.profile_id!r}"
+            )
+        if extraction.extraction_profile_hash != extraction_profile.profile_hash:
+            raise StoryIntegrityError(
+                "A3 CandidateExtraction.extraction_profile_hash does not "
+                "match the requested extraction profile hash"
+            )
+
+        # Full A3 semantic validation (reuses existing authority).
+        report_ref = self._verify_current_extraction(extraction, current_extraction_ref)
+
+        # Pointer stability: CURRENT must be unchanged during verification.
+        if (
+            self.pointers.resolve_current_pointer_ref(pointer_id)
+            != current_pointer_ref
+        ):
+            raise StoryPersistenceError(
+                "CandidateExtraction CURRENT pointer changed during "
+                "verification"
+            )
+
+        return ValidatedCandidateExtractionCurrent(
+            candidate_extraction=extraction,
+            candidate_extraction_ref=current_extraction_ref,
+            validation_report_ref=report_ref,
+            current_pointer_ref=current_pointer_ref,
+        )
 
     # -- pre-generation reuse ----------------------------------------------
 

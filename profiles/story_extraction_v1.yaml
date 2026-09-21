@@ -16,7 +16,7 @@ working_language: zh-CN
 
 # Extraction prompt identity pinned for this profile.
 prompt_id: a3.chunk-extraction
-prompt_version: 3
+prompt_version: 4
 
 # Structured-output schema identity pinned for this profile.
 output_schema_id: a3-candidate-payload

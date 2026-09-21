@@ -219,6 +219,7 @@ from .extraction_validation import (
     A3_SOURCE_REF_NOT_FOUND,
     CandidateValidationResult,
     canonicalize_candidate_payload,
+    sanitize_candidate_payload_excerpts,
     validate_candidate_payload,
 )
 from .extraction_persistence import (
@@ -296,6 +297,7 @@ __all__ = [
     "A3_SOURCE_REF_NOT_FOUND",
     "CandidateValidationResult",
     "canonicalize_candidate_payload",
+    "sanitize_candidate_payload_excerpts",
     "validate_candidate_payload",
     "ChunkContext",
     "ChunkExtractionBatchService",

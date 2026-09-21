@@ -483,3 +483,96 @@ def test_a3_chunk_extraction_v3_preserves_v2_rules():
     assert "UNRESOLVED IS VALID" in sys_text
     assert "NO EXTRA DECISIONS" in sys_text
     assert "OUTPUT FORMAT" in sys_text
+
+
+# ---------------------------------------------------------------------------
+# Tracked a3.chunk-extraction v4 (relationship distinct-entity + null-preferred
+# excerpt)
+# ---------------------------------------------------------------------------
+
+
+def test_a3_chunk_extraction_v4_loads_with_correct_hash():
+    """v4 loads and its content_hash matches the pinned value."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=4)
+    assert spec.version == 4
+    assert spec.content_hash == "e9c4578443040f061d2774d9cdbace6278d04ec0c69edf00652b490cb505a150"
+    assert spec.required_variables == (
+        "chunk_id",
+        "left_context_json",
+        "ownership_json",
+        "right_context_json",
+    )
+
+
+def test_a3_chunk_extraction_v4_pinned_hash_matches_computed():
+    """v4 pinned content_hash exactly matches compute_prompt_content_hash(...)."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=4)
+    assert spec.content_hash == compute_prompt_content_hash(
+        prompt_id="a3.chunk-extraction",
+        version=4,
+        system_template=spec.system_template,
+        user_template=spec.user_template,
+        required_variables=list(spec.required_variables),
+    )
+
+
+def test_a3_chunk_extraction_v4_relationship_distinct_entities():
+    """v4 contains explicit distinct-source/target relationship guidance."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=4)
+    sys_text = spec.system_template
+    assert "RELATIONSHIPS CONNECT TWO DISTINCT ENTITIES" in sys_text
+    assert "source_ref` and `target_ref` MUST reference different candidate IDs" in sys_text
+    assert "Never emit a self-referential relationship" in sys_text
+
+
+def test_a3_chunk_extraction_v4_reflexive_exclusion():
+    """v4 contains the reflexive speech/thought/action exclusion."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=4)
+    sys_text = spec.system_template
+    assert "Reflexive speech, thought, self-description, or self-directed action" in sys_text
+    assert "is not a relationship between entities" in sys_text
+
+
+def test_a3_chunk_extraction_v4_null_preferred_excerpt():
+    """v4 establishes null-preferred excerpt behavior."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=4)
+    sys_text = spec.system_template
+    assert "EXCERPT IS OPTIONAL AND NULL-PREFERRED" in sys_text
+    assert "When there is any doubt, use null" in sys_text
+    assert "paragraph_id` remains the source-evidence authority" in sys_text
+
+
+def test_a3_chunk_extraction_v4_preserves_v3_rules():
+    """v4 retains all core v3 rules (anti-ellipsis, anti-duplicate, etc.)."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=4)
+    sys_text = spec.system_template
+    assert "CHUNK-LOCAL ONLY" in sys_text
+    assert "SOURCE FIDELITY" in sys_text
+    assert "zh-CN" in sys_text
+    assert "EXCERPT IS ONE CONTIGUOUS SPAN" in sys_text
+    assert "SELF-CHECK" in sys_text
+    assert "NEVER BRIDGE WITH ELLIPSES" in sys_text
+    assert "NO SEMANTIC DUPLICATES" in sys_text
+    assert "LOCAL REFERENCES" in sys_text
+    assert "UNRESOLVED IS VALID" in sys_text
+    assert "NO EXTRA DECISIONS" in sys_text
+    assert "OUTPUT FORMAT" in sys_text
+
+
+def test_tracked_semantic_profile_max_output_tokens():
+    """Tracked story-extraction semantic profile has max_output_tokens == 32768."""
+    from short_drama.llm import load_semantic_profile
+
+    profile_path = PROMPTS_DIR.parent.parent / "profiles" / "story_extraction_llm_v1.yaml"
+    profile = load_semantic_profile(profile_path)
+    assert profile.profile_id == "story-extraction-llm-v1"
+    assert profile.max_output_tokens == 32768
+    assert profile.temperature == 0.0
+    assert profile.structured_output_mode == "json_schema"
+    assert profile.reasoning.enabled is False

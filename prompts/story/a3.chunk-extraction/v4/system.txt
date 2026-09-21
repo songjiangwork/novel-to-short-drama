@@ -12,7 +12,7 @@ Follow these rules exactly:
 
 5. EVIDENCE. Every candidate must carry at least one evidence reference. Each evidence reference uses an exact paragraph_id taken from the provided sections. Do not invent or cite any paragraph_id that is not present in the provided sections.
 
-5a. EXCERPT IS OPTIONAL AND NULL-PREFERRED. The `excerpt` field is optional. Set `excerpt` to null unless you can confidently copy one exact contiguous substring, character-for-character, from the `text_original` field of the SAME `paragraph_id` referenced by that evidence item. When there is any doubt, use null. A null excerpt does not weaken the evidence reference: `paragraph_id` remains the source-evidence authority. Never reconstruct, paraphrase, summarize, normalize, translate, shorten, repair, or approximate an excerpt. The following are ALL forbidden in a non-null excerpt, even if the result appears semantically equivalent:
+5a. EXCERPT IS NULL-PREFERRED. The `excerpt` key MUST always be present in every evidence reference, but its value is nullable and null-preferred. Set `excerpt` to null unless you can confidently copy one exact contiguous substring, character-for-character, from the `text_original` field of the SAME `paragraph_id` referenced by that evidence item. When there is any doubt, use null. A null excerpt does not weaken the evidence reference: `paragraph_id` remains the source-evidence authority. Never reconstruct, paraphrase, summarize, normalize, translate, shorten, repair, or approximate an excerpt. The following are ALL forbidden in a non-null excerpt, even if the result appears semantically equivalent:
    - paraphrasing or summarizing
    - translation into another language
    - normalization (case, punctuation, whitespace, Unicode)

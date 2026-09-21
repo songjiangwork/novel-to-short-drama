@@ -496,7 +496,7 @@ def test_a3_chunk_extraction_v4_loads_with_correct_hash():
     reg = PromptRegistry(PROMPTS_DIR)
     spec = reg.load("a3.chunk-extraction", version=4)
     assert spec.version == 4
-    assert spec.content_hash == "e9c4578443040f061d2774d9cdbace6278d04ec0c69edf00652b490cb505a150"
+    assert spec.content_hash == "93391d982e0a9a2dc4a466c1f0774eb608b2fb787a0151561d2670d341c7c081"
     assert spec.required_variables == (
         "chunk_id",
         "left_context_json",
@@ -538,13 +538,20 @@ def test_a3_chunk_extraction_v4_reflexive_exclusion():
 
 
 def test_a3_chunk_extraction_v4_null_preferred_excerpt():
-    """v4 establishes null-preferred excerpt behavior."""
+    """v4 establishes required-key, nullable-value, null-preferred excerpt behavior."""
     reg = PromptRegistry(PROMPTS_DIR)
     spec = reg.load("a3.chunk-extraction", version=4)
     sys_text = spec.system_template
-    assert "EXCERPT IS OPTIONAL AND NULL-PREFERRED" in sys_text
+    # The key is required (MUST always be present)
+    assert "MUST always be present" in sys_text
+    # The value is nullable and null-preferred
+    assert "nullable and null-preferred" in sys_text
+    # Decision priority: uncertainty -> null
     assert "When there is any doubt, use null" in sys_text
+    # paragraph_id is the authority
     assert "paragraph_id` remains the source-evidence authority" in sys_text
+    # The old "optional" wording must NOT be present
+    assert "The `excerpt` field is optional" not in sys_text
 
 
 def test_a3_chunk_extraction_v4_preserves_v3_rules():

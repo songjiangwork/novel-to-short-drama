@@ -44,6 +44,9 @@ from short_drama.paths import PROFILES_DIR, REPO_ROOT, SCHEMAS_DIR
 from short_drama.story import (
     A3InputIdentity,
     A4SemanticIdentity,
+    BLOCKING_POLICY_ID,
+    CANONICALIZATION_POLICY_ID,
+    NAME_NORMALIZATION_POLICY_ID,
     CandidateEntityIndex,
     CandidateEntityIndexEntry,
     CanonicalCharacterRegistry,
@@ -76,6 +79,7 @@ PROMPT_CONTENT_HASH = (
 )
 
 RECON_PROFILE_PATH = PROFILES_DIR / "entity_reconciliation_v1.yaml"
+RECON_PROFILE_V2_PATH = PROFILES_DIR / "entity_reconciliation_v2.yaml"
 A4_LLM_PROFILE_PATH = PROFILES_DIR / "entity_reconciliation_llm_v1.yaml"
 
 H = "a" * 64
@@ -480,6 +484,40 @@ class TestReconciliationProfile:
                 data, _schema("entity-reconciliation-profile.schema.json")
             )
             != []
+        )
+
+
+class TestActiveReconciliationProfileBlockingIdentity:
+    """The active tracked A4 profile (v2) must pin the production planner's
+    blocking identity.
+
+    Guards against a semantic-authority mismatch between the tracked
+    ``EntityReconciliationProfile`` and
+    ``reconciliation_planning.BLOCKING_POLICY_ID`` (the profile hash participates
+    in A4 semantic identity / reuse, so a stale blocking identity is a real
+    inconsistency, not a cosmetic one).
+    """
+
+    def test_active_v2_profile_pins_production_blocking_identity(self) -> None:
+        profile = load_entity_reconciliation_profile(RECON_PROFILE_V2_PATH)
+        assert profile.profile_id == "entity-reconciliation-v2"
+        # The active tracked profile pins the production planner identity ...
+        assert profile.blocking_policy_id == BLOCKING_POLICY_ID
+        # ... and that identity is a4-blocking-v2 (not the historical v1).
+        assert profile.blocking_policy_id == "a4-blocking-v2"
+        assert BLOCKING_POLICY_ID == "a4-blocking-v2"
+
+    def test_active_v2_profile_keeps_name_and_canonicalization_identity(self) -> None:
+        profile = load_entity_reconciliation_profile(RECON_PROFILE_V2_PATH)
+        assert (
+            profile.name_normalization_policy_id
+            == NAME_NORMALIZATION_POLICY_ID
+            == "a4-name-normalization-v1"
+        )
+        assert (
+            profile.canonicalization_policy_id
+            == CANONICALIZATION_POLICY_ID
+            == "a4-canonicalization-v1"
         )
 
 

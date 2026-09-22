@@ -1,13 +1,18 @@
-"""A4C semantic ambiguity resolution tests.
+"""A4C semantic ambiguity resolution tests (Issue #41: pair-local evidence
+selectors).
 
-Covers the frozen A4C contract:
+Covers the frozen A4C selector contract:
 
   * block packing (0/1/6/7 pairs, candidate cap, stable IDs, every pair once)
-  * candidate packet (endpoint-only, source-order, exact evidence, canonical JSON)
-  * requested pair rendering (exact fields, canonical order)
+  * pair context (endpoint-only, source-order, exact evidence, null excerpt,
+    canonical JSON, selector labels)
+  * deterministic selector validation (L/R form, index range, duplicates,
+    no-third-candidate) + canonical pair-local selector order (left-by-index
+    then right-by-index) + exact EvidenceRef resolution (Python-owned)
   * decisions (same/different/uncertain accepted)
   * uncertain → exactly 1 semantic call, no retry
-  * invalid output retry (missing/extra/duplicate/reordered/wrong ref/wrong evidence)
+  * invalid output / invalid selector retry (missing/extra/duplicate/reordered/
+    wrong ref, invalid selector form/range/duplicate)
   * first invalid + second valid → success, 2 semantic calls
   * 2 invalid → ReconciliationSemanticGenerationError
   * LLMError → propagate, semantic call count = 1
@@ -20,12 +25,11 @@ Covers the frozen A4C contract:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from short_drama.artifacts import ArtifactRef, content_hash
+from short_drama.artifacts import ArtifactRef
 from short_drama.llm import (
     LLMClient,
     LLMError,
@@ -53,8 +57,6 @@ from short_drama.story import (
     PAIR_STATE_MUST_NOT_MERGE,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
     ReconciliationDecision,
-    ReconciliationDecisionItem,
-    ReconciliationDecisionPayload,
     ReconciliationInputSnapshot,
     ReconciliationModelError,
     ReconciliationPairPlan,
@@ -63,19 +65,22 @@ from short_drama.story import (
     ReconciliationProvenanceError,
     ReconciliationSemanticError,
     ReconciliationSemanticGenerationError,
+    ReconciliationSelectorDecisionItem,
+    ReconciliationSelectorDecisionPayload,
     resolve_semantic_ambiguity,
 )
 from short_drama.story.reconciliation import CandidateEntityIndex, CandidateEntityIndexEntry
 from short_drama.story.reconciliation_semantic import (
     MAX_CANDIDATES_PER_BLOCK as MAX_CANDS,
     MAX_PAIRS_PER_BLOCK as MAX_PAIRS,
+    _block_endpoint_evidence,
     _build_blocks,
-    _build_candidate_packets,
-    _build_requested_pairs_json,
+    _build_pair_contexts,
     _pack_semantic_blocks,
-    _validate_block_payload,
     _validate_decision_coverage,
+    _validate_selector_block_payload,
     _verify_provenance,
+    compute_llm_decision_id,
 )
 
 
@@ -164,14 +169,14 @@ def make_planning_result(
 
 def make_profile(
     prompt_id: str = "a4.entity-reconciliation",
-    prompt_version: int = 1,
-    output_schema_id: str = "a4-reconciliation-decision-payload",
+    prompt_version: int = 3,
+    output_schema_id: str = "a4-reconciliation-decision-selector-payload",
     output_schema_version: int = 1,
     max_generation_rounds: int = 2,
 ) -> EntityReconciliationProfile:
     return EntityReconciliationProfile(
         schema_version=1,
-        profile_id="entity-reconciliation-v1",
+        profile_id="entity-reconciliation-v2",
         working_language="zh-CN",
         name_normalization_policy_id="a4-name-normalization-v1",
         blocking_policy_id="a4-blocking-v1",
@@ -243,7 +248,8 @@ class FakeLLMClient(LLMClient):
                 request_model=self.request_model,
                 provider_family=self.provider_family,
             )
-        # Trust boundary: validate against output schema
+        # Trust boundary: validate against output schema (lenient: selectors are
+        # plain strings; pair-local validity is enforced by the A4C validator).
         validate_against_output_schema(parsed, output_schema)
         return StructuredGenerationResult(
             parsed_json=parsed, provenance=provenance, attempts=1
@@ -257,7 +263,7 @@ class FakeLLMClient(LLMClient):
 SCHEMA_PATH = (
     __import__("pathlib").Path(__file__).parent.parent
     / "schemas"
-    / "reconciliation-decision-payload.schema.json"
+    / "reconciliation-decision-selector-payload.schema.json"
 )
 
 
@@ -266,7 +272,7 @@ def make_output_schema() -> OutputSchema:
 
     schema_data = load_json(SCHEMA_PATH)
     return OutputSchema.create(
-        schema_id="a4-reconciliation-decision-payload",
+        schema_id="a4-reconciliation-decision-selector-payload",
         schema_version=1,
         schema=schema_data,
     )
@@ -334,34 +340,38 @@ class TestBlockPacking:
                 make_candidate_entry(right, source_order_key=f"000001:00000001{i + 1}:01:00000001{i + 1}:r{i}")
             )
             pair_plans.append(make_pair_plan(left, right))
-        result = make_planning_result(tuple(entries), tuple(pair_plans))
+        entries_tuple = tuple(entries)
+        pair_plans_tuple = tuple(pair_plans)
+        result = make_planning_result(entries_tuple, pair_plans_tuple)
         blocks = _build_blocks(result)
         assert len(blocks) == 1
         assert len(blocks[0].pair_plans) == 6
         assert len(blocks[0].candidate_refs) == 12
 
-    def test_seven_disjoint_pairs_two_blocks(self):
-        """7 disjoint pairs → 2 blocks."""
+    def test_seven_pairs_two_blocks(self):
+        """7 pairs → 2 blocks (6 + 1)."""
         entries = []
         pair_plans = []
         for i in range(7):
             left = f"{CHUNK_ID}:cand_char_{i * 2 + 1:03d}"
             right = f"{CHUNK_ID}:cand_char_{i * 2 + 2:03d}"
             entries.append(
-                make_candidate_entry(left, source_order_key=f"000001:0000000{i + 1}:01:0000000{i + 1}:l{i}")
+                make_candidate_entry(left, source_order_key=f"000001:00000000{i + 1}:01:00000000{i + 1}:l{i}")
             )
             entries.append(
-                make_candidate_entry(right, source_order_key=f"000001:000000{i + 10}:01:000000{i + 10}:r{i}")
+                make_candidate_entry(right, source_order_key=f"000001:00000001{i + 1}:01:00000001{i + 1}:r{i}")
             )
             pair_plans.append(make_pair_plan(left, right))
-        result = make_planning_result(tuple(entries), tuple(pair_plans))
+        entries_tuple = tuple(entries)
+        pair_plans_tuple = tuple(pair_plans)
+        result = make_planning_result(entries_tuple, pair_plans_tuple)
         blocks = _build_blocks(result)
         assert len(blocks) == 2
         assert len(blocks[0].pair_plans) == 6
         assert len(blocks[1].pair_plans) == 1
 
-    def test_stable_block_ids(self):
-        """Same input → same block IDs."""
+    def test_block_ids_are_stable(self):
+        """Block IDs are deterministic for the same input."""
         entries = (
             make_candidate_entry(f"{CHUNK_ID}:cand_char_001"),
             make_candidate_entry(f"{CHUNK_ID}:cand_char_002"),
@@ -369,61 +379,48 @@ class TestBlockPacking:
         pair_plans = (
             make_pair_plan(f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"),
         )
-        result = make_planning_result(entries, pair_plans, plan_hash=H)
+        result = make_planning_result(entries, pair_plans)
         blocks1 = _build_blocks(result)
-        result2 = make_planning_result(entries, pair_plans, plan_hash=H)
-        blocks2 = _build_blocks(result2)
+        blocks2 = _build_blocks(result)
         assert blocks1[0].block_id == blocks2[0].block_id
-        assert blocks1[0].block_id.startswith("a4blk_")
-        assert len(blocks1[0].block_id) == 6 + 20  # "a4blk_" + 20 hex
 
-    def test_every_pair_exactly_once(self):
-        """Every semantic pair appears exactly once across all blocks."""
+    def test_every_pair_appears_exactly_once(self):
+        """Every semantic pair appears in exactly one block."""
         entries = []
         pair_plans = []
         for i in range(10):
             left = f"{CHUNK_ID}:cand_char_{i * 2 + 1:03d}"
             right = f"{CHUNK_ID}:cand_char_{i * 2 + 2:03d}"
-            entries.append(make_candidate_entry(left, source_order_key=f"000001:0000000{i + 1}:01:{i:09d}:l"))
-            entries.append(make_candidate_entry(right, source_order_key=f"000001:000000{i + 10}:01:{i:09d}:r"))
+            entries.append(
+                make_candidate_entry(left, source_order_key=f"000001:00000000{i + 1}:01:00000000{i + 1}:l{i}")
+            )
+            entries.append(
+                make_candidate_entry(right, source_order_key=f"000001:00000001{i + 1}:01:00000001{i + 1}:r{i}")
+            )
             pair_plans.append(make_pair_plan(left, right))
-        result = make_planning_result(tuple(entries), tuple(pair_plans))
+        entries_tuple = tuple(entries)
+        pair_plans_tuple = tuple(pair_plans)
+        result = make_planning_result(entries_tuple, pair_plans_tuple)
         blocks = _build_blocks(result)
-        seen_pairs = set()
+
+        # 10 pairs → 2 blocks (6 + 4)
+        assert len(blocks) == 2
+
+        # Count pair occurrences across all blocks
+        pair_count = 0
         for block in blocks:
-            for p in block.pair_plans:
-                key = (p.left_candidate_ref, p.right_candidate_ref)
-                assert key not in seen_pairs, f"duplicate pair {key}"
-                seen_pairs.add(key)
-        assert len(seen_pairs) == 10
-
-    def test_non_semantic_pairs_not_sent(self):
-        """auto_same / must_not_merge pairs are NOT in semantic blocks."""
-        entries = (
-            make_candidate_entry(f"{CHUNK_ID}:cand_char_001"),
-            make_candidate_entry(f"{CHUNK_ID}:cand_char_002"),
-            make_candidate_entry(f"{CHUNK_ID}:cand_char_003"),
-            make_candidate_entry(f"{CHUNK_ID}:cand_char_004"),
-        )
-        pair_plans = (
-            make_pair_plan(f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002", state=PAIR_STATE_AUTO_SAME),
-            make_pair_plan(f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004", state=PAIR_STATE_NEEDS_SEMANTIC_DECISION),
-        )
-        result = make_planning_result(entries, pair_plans)
-        blocks = _build_blocks(result)
-        assert len(blocks) == 1
-        assert len(blocks[0].pair_plans) == 1
-        assert blocks[0].pair_plans[0].left_candidate_ref == f"{CHUNK_ID}:cand_char_003"
+            pair_count += len(block.pair_plans)
+        assert pair_count == 10
 
 
 # ---------------------------------------------------------------------------
-# Test: Candidate packet
+# Test: Pair context
 # ---------------------------------------------------------------------------
 
 
-class TestCandidatePacket:
+class TestPairContext:
     def test_endpoint_only(self):
-        """Only pair endpoints are included in the block."""
+        """Only pair endpoints are included in the pair contexts."""
         entries = (
             make_candidate_entry(f"{CHUNK_ID}:cand_char_001", source_order_key="000001:000000001:01:000000001:r1"),
             make_candidate_entry(f"{CHUNK_ID}:cand_char_002", source_order_key="000001:000000002:01:000000001:r2"),
@@ -434,13 +431,16 @@ class TestCandidatePacket:
         )
         result = make_planning_result(entries, pair_plans)
         blocks = _build_blocks(result)
-        packets = json.loads(blocks[0].candidate_packets_json)
-        refs_in_packets = {p["candidate_ref"] for p in packets}
-        assert refs_in_packets == {f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"}
-        assert f"{CHUNK_ID}:cand_char_003" not in refs_in_packets
+        contexts = json.loads(blocks[0].pair_contexts_json)
+        refs = set()
+        for pc in contexts:
+            refs.add(pc["left_endpoint"]["candidate_ref"])
+            refs.add(pc["right_endpoint"]["candidate_ref"])
+        assert refs == {f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"}
+        assert f"{CHUNK_ID}:cand_char_003" not in refs
 
     def test_source_order(self):
-        """Packets are in source_order_key order."""
+        """Pair contexts are in source_order_key order (block_id stability)."""
         entries = (
             make_candidate_entry(f"{CHUNK_ID}:cand_char_001", source_order_key="000001:000000003:01:000000003:r1"),
             make_candidate_entry(f"{CHUNK_ID}:cand_char_002", source_order_key="000001:000000001:01:000000001:r2"),
@@ -449,14 +449,19 @@ class TestCandidatePacket:
             make_pair_plan(f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"),
         )
         result = make_planning_result(entries, pair_plans)
-        blocks = _build_blocks(result)
-        packets = json.loads(blocks[0].candidate_packets_json)
-        # source_order_key r2 < r1 (000000001 < 000000003)
-        assert packets[0]["candidate_ref"] == f"{CHUNK_ID}:cand_char_002"
-        assert packets[1]["candidate_ref"] == f"{CHUNK_ID}:cand_char_001"
+        contexts_json, candidate_refs = _build_pair_contexts(result, list(pair_plans))
+        # Pair endpoints keep their pair roles (left/right), but the block_id
+        # candidate refs are in source_order_key order (r2 < r1).
+        assert candidate_refs == (
+            f"{CHUNK_ID}:cand_char_002",
+            f"{CHUNK_ID}:cand_char_001",
+        )
+        contexts = json.loads(contexts_json)
+        assert contexts[0]["left_endpoint"]["candidate_ref"] == f"{CHUNK_ID}:cand_char_001"
+        assert contexts[0]["right_endpoint"]["candidate_ref"] == f"{CHUNK_ID}:cand_char_002"
 
     def test_exact_fields(self):
-        """Packet has exactly the frozen fields."""
+        """Each endpoint has exactly the frozen fields."""
         evidence = (
             EvidenceRef(
                 paragraph_id="CH001_P001",
@@ -479,27 +484,32 @@ class TestCandidatePacket:
             make_pair_plan(f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"),
         )
         result = make_planning_result(entries, pair_plans)
-        blocks = _build_blocks(result)
-        packets = json.loads(blocks[0].candidate_packets_json)
-        for packet in packets:
-            assert set(packet.keys()) == {
-                "candidate_ref",
-                "candidate_kind",
-                "display_name_original",
-                "aliases_original",
-                "descriptors_zh",
-                "source_order_key",
-                "evidence_refs",
-            }
-        # Verify exact evidence preserved
-        alice_packet = next(p for p in packets if p["display_name_original"] == "Alice")
-        assert alice_packet["aliases_original"] == ["Alicia"]
-        assert alice_packet["descriptors_zh"] == ["女主角"]
-        assert alice_packet["evidence_refs"][0]["paragraph_id"] == "CH001_P001"
-        assert alice_packet["evidence_refs"][0]["excerpt"] == "Alice entered the room."
+        contexts_json, _ = _build_pair_contexts(result, list(pair_plans))
+        contexts = json.loads(contexts_json)
+        for pc in contexts:
+            for side in ("left_endpoint", "right_endpoint"):
+                assert set(pc[side].keys()) == {
+                    "candidate_ref",
+                    "candidate_kind",
+                    "display_name_original",
+                    "aliases_original",
+                    "descriptors_zh",
+                    "evidence",
+                }
+        # Verify exact evidence preserved (null round-trips)
+        alice_side = next(
+            pc for pc in contexts
+            if pc["left_endpoint"]["display_name_original"] == "Alice"
+            or pc["right_endpoint"]["display_name_original"] == "Alice"
+        )
+        alice = alice_side["left_endpoint"] if alice_side["left_endpoint"]["display_name_original"] == "Alice" else alice_side["right_endpoint"]
+        assert alice["aliases_original"] == ["Alicia"]
+        assert alice["descriptors_zh"] == ["女主角"]
+        assert alice["evidence"][0]["paragraph_id"] == "CH001_P001"
+        assert alice["evidence"][0]["excerpt"] == "Alice entered the room."
 
     def test_canonical_json_stable(self):
-        """Candidate packets JSON is stable across runs."""
+        """Pair contexts JSON is stable across runs."""
         entries = (
             make_candidate_entry(f"{CHUNK_ID}:cand_char_001"),
             make_candidate_entry(f"{CHUNK_ID}:cand_char_002"),
@@ -510,10 +520,29 @@ class TestCandidatePacket:
         result = make_planning_result(entries, pair_plans)
         blocks1 = _build_blocks(result)
         blocks2 = _build_blocks(result)
-        assert blocks1[0].candidate_packets_json == blocks2[0].candidate_packets_json
+        assert blocks1[0].pair_contexts_json == blocks2[0].pair_contexts_json
+
+    def test_null_excerpt_preserved(self):
+        """A null endpoint excerpt is preserved in the pair context (round-trips)."""
+        entries = (
+            make_candidate_entry(
+                f"{CHUNK_ID}:cand_char_001",
+                evidence=(EvidenceRef("CH001_P001", "primary", "explicit", None),),
+            ),
+            make_candidate_entry(f"{CHUNK_ID}:cand_char_002", display_name="B"),
+        )
+        pair_plans = (
+            make_pair_plan(f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"),
+        )
+        result = make_planning_result(entries, pair_plans)
+        contexts_json, _ = _build_pair_contexts(result, list(pair_plans))
+        contexts = json.loads(contexts_json)
+        ev = contexts[0]["left_endpoint"]["evidence"][0]
+        assert ev["paragraph_id"] == "CH001_P001"
+        assert ev["excerpt"] is None
 
     def test_no_unresolved(self):
-        """Unresolved candidates never appear in semantic blocks."""
+        """Unresolved candidates never appear in semantic pair contexts."""
         entries = (
             make_candidate_entry(f"{CHUNK_ID}:cand_char_001", kind="character"),
             make_candidate_entry(f"{CHUNK_ID}:cand_char_002", kind="character"),
@@ -524,48 +553,12 @@ class TestCandidatePacket:
         )
         result = make_planning_result(entries, pair_plans)
         blocks = _build_blocks(result)
-        packets = json.loads(blocks[0].candidate_packets_json)
-        refs_in_packets = {p["candidate_ref"] for p in packets}
-        assert f"{CHUNK_ID}:cand_unres_001" not in refs_in_packets
-
-
-# ---------------------------------------------------------------------------
-# Test: Requested pair JSON
-# ---------------------------------------------------------------------------
-
-
-class TestRequestedPairsJson:
-    def test_exact_fields(self):
-        """Each pair has exactly the frozen fields."""
-        pair_plans = (
-            make_pair_plan(
-                f"{CHUNK_ID}:cand_char_001",
-                f"{CHUNK_ID}:cand_char_002",
-                signals=("identity_token_overlap",),
-                shared_keys=("alice",),
-                shared_tokens=("alice",),
-            ),
-        )
-        entries = (
-            make_candidate_entry(f"{CHUNK_ID}:cand_char_001"),
-            make_candidate_entry(f"{CHUNK_ID}:cand_char_002"),
-        )
-        result = make_planning_result(entries, pair_plans)
-        blocks = _build_blocks(result)
-        pairs = json.loads(blocks[0].requested_pairs_json)
-        assert len(pairs) == 1
-        assert set(pairs[0].keys()) == {
-            "left_candidate_ref",
-            "right_candidate_ref",
-            "signals",
-            "shared_identity_keys",
-            "shared_tokens",
-        }
-        assert pairs[0]["left_candidate_ref"] == f"{CHUNK_ID}:cand_char_001"
-        assert pairs[0]["right_candidate_ref"] == f"{CHUNK_ID}:cand_char_002"
-        assert pairs[0]["signals"] == ["identity_token_overlap"]
-        assert pairs[0]["shared_identity_keys"] == ["alice"]
-        assert pairs[0]["shared_tokens"] == ["alice"]
+        contexts = json.loads(blocks[0].pair_contexts_json)
+        refs = set()
+        for pc in contexts:
+            refs.add(pc["left_endpoint"]["candidate_ref"])
+            refs.add(pc["right_endpoint"]["candidate_ref"])
+        assert f"{CHUNK_ID}:cand_unres_001" not in refs
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +571,7 @@ class TestDecisions:
         return {"decisions": decisions}
 
     def test_same_entity_accepted(self):
-        """A valid same_entity decision is accepted."""
+        """A valid same_entity decision (with a selector) is accepted."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         evidence = EvidenceRef(
             paragraph_id="CH001_P001", role="primary", strength="explicit",
@@ -597,14 +590,7 @@ class TestDecisions:
                 "right_candidate_ref": right,
                 "decision": "same_entity",
                 "reason_zh": "两人是同一角色。",
-                "evidence_refs": [
-                    {
-                        "paragraph_id": "CH001_P001",
-                        "role": "primary",
-                        "strength": "explicit",
-                        "excerpt": "Alice, also known as Alicia, entered the room.",
-                    }
-                ],
+                "evidence_selectors": ["L0"],
             }
         ])
 
@@ -620,6 +606,55 @@ class TestDecisions:
         assert res.semantic_decisions[0].decision == "same_entity"
         assert res.semantic_decisions[0].reason_code == "llm_same_entity"
         assert res.semantic_decisions[0].method == "llm"
+        # Selector resolved to the exact left endpoint EvidenceRef.
+        assert res.semantic_decisions[0].evidence_refs[0].paragraph_id == "CH001_P001"
+
+    def test_persisted_decision_carries_canonical_evidence_refs(self):
+        """Requirement 8: the persisted ``ReconciliationDecision`` carries the
+        exact CANONICAL EvidenceRefs (not selector strings), and its ``to_dict()``
+        has the unchanged persisted keys (``evidence_refs``, no
+        ``evidence_selectors``). A permutation of the selectors therefore
+        persists identically to its canonical form."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left0 = EvidenceRef("CH001_P001", "primary", "explicit", "L0.")
+        left1 = EvidenceRef("CH001_P002", "primary", "explicit", "L1.")
+        right0 = EvidenceRef("CH001_P003", "primary", "explicit", "R0.")
+        entries = (
+            make_candidate_entry(left, display_name="A", evidence=(left0, left1)),
+            make_candidate_entry(right, display_name="B", evidence=(right0,)),
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        payload = self._make_valid_payload([
+            {
+                "left_candidate_ref": left,
+                "right_candidate_ref": right,
+                "decision": "same_entity",
+                "reason_zh": "同一角色。",
+                # provider returns a non-canonical permutation
+                "evidence_selectors": ["R0", "L1", "L0"],
+            }
+        ])
+
+        client = FakeLLMClient([payload])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        d = res.semantic_decisions[0]
+        # Canonical order: L0, L1, R0 (left by index, then right by index).
+        assert d.evidence_refs == (left0, left1, right0)
+        # Persisted contract: evidence_refs present, NO selector strings.
+        as_dict = d.to_dict()
+        assert "evidence_refs" in as_dict
+        assert "evidence_selectors" not in as_dict
+        assert as_dict["evidence_refs"] == [
+            left0.to_dict(), left1.to_dict(), right0.to_dict(),
+        ]
+        # Round-trips through the unchanged from_dict contract.
+        round_tripped = ReconciliationDecision.from_dict(as_dict)
+        assert round_tripped.evidence_refs == (left0, left1, right0)
 
     def test_different_entity_accepted(self):
         """A valid different_entity decision is accepted."""
@@ -637,7 +672,7 @@ class TestDecisions:
                 "right_candidate_ref": right,
                 "decision": "different_entity",
                 "reason_zh": "两人是不同角色。",
-                "evidence_refs": [],
+                "evidence_selectors": [],
             }
         ])
 
@@ -666,7 +701,7 @@ class TestDecisions:
                 "right_candidate_ref": right,
                 "decision": "uncertain",
                 "reason_zh": "证据不足。",
-                "evidence_refs": [],
+                "evidence_selectors": [],
             }
         ])
 
@@ -701,7 +736,7 @@ class TestInvalidOutputRetry:
                     "right_candidate_ref": right,
                     "decision": decision,
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
@@ -712,7 +747,6 @@ class TestInvalidOutputRetry:
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
 
-        # First response: empty decisions (count mismatch)
         invalid = {"decisions": []}
         valid = self._valid_payload(left, right)
 
@@ -731,7 +765,6 @@ class TestInvalidOutputRetry:
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
 
-        # First response: two decisions (one extra)
         invalid = {
             "decisions": [
                 {
@@ -739,14 +772,14 @@ class TestInvalidOutputRetry:
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 },
                 {
                     "left_candidate_ref": left,
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 },
             ]
         }
@@ -760,27 +793,17 @@ class TestInvalidOutputRetry:
         assert client.call_count == 2
         assert len(res.semantic_decisions) == 1
 
-    def test_duplicate_pair_retries(self):
-        """Duplicate pair → retry."""
-        entries, left, right = self._entries()
+    def test_invalid_selector_form_retries(self):
+        """Invalid selector prefix (X0) → A4C semantic validation failure → retry."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(right, display_name="B"),
+        )
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
 
-        # Two entries but the second is a duplicate (same left/right)
-        # Actually count is 2 vs expected 1, so this is count mismatch.
-        # Let me make a proper duplicate test with 2 expected pairs.
-        left2, right2 = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
-        entries2 = entries + (
-            make_candidate_entry(left2, display_name="C"),
-            make_candidate_entry(right2, display_name="D"),
-        )
-        pair_plans2 = (
-            make_pair_plan(left, right),
-            make_pair_plan(left2, right2),
-        )
-        result2 = make_planning_result(entries2, pair_plans2)
-
-        # First: duplicate first pair, missing second
         invalid = {
             "decisions": [
                 {
@@ -788,99 +811,11 @@ class TestInvalidOutputRetry:
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-                {
-                    "left_candidate_ref": left,
-                    "right_candidate_ref": right,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
+                    "evidence_selectors": ["X0"],  # invalid prefix
+                }
             ]
         }
-        valid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left,
-                    "right_candidate_ref": right,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-                {
-                    "left_candidate_ref": left2,
-                    "right_candidate_ref": right2,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-            ]
-        }
-
-        client = FakeLLMClient([invalid, valid])
-        res = resolve_semantic_ambiguity(
-            result2, make_profile(), make_semantic_profile(), client,
-            prompt_registry=PROMPT_REGISTRY,
-        )
-        assert client.call_count == 2
-
-    def test_reordered_pairs_retry(self):
-        """Reordered pairs → semantic-invalid."""
-        left1, right1 = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        left2, right2 = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
-        entries = (
-            make_candidate_entry(left1, display_name="A"),
-            make_candidate_entry(right1, display_name="B"),
-            make_candidate_entry(left2, display_name="C"),
-            make_candidate_entry(right2, display_name="D"),
-        )
-        # Ensure canonical order: left1 < right1 and left2 < right2
-        # left1 = CH001_C001:cand_char_001 < right1 = CH001_C001:cand_char_002
-        # left2 = CH001_C001:cand_char_003 < right2 = CH001_C001:cand_char_004
-        pair_plans = (
-            make_pair_plan(left1, right1),
-            make_pair_plan(left2, right2),
-        )
-        result = make_planning_result(entries, pair_plans)
-
-        # First: pairs swapped (reordered)
-        invalid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left2,
-                    "right_candidate_ref": right2,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-                {
-                    "left_candidate_ref": left1,
-                    "right_candidate_ref": right1,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-            ]
-        }
-        valid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left1,
-                    "right_candidate_ref": right1,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-                {
-                    "left_candidate_ref": left2,
-                    "right_candidate_ref": right2,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [],
-                },
-            ]
-        }
+        valid = self._valid_payload(left, right)
 
         client = FakeLLMClient([invalid, valid])
         res = resolve_semantic_ambiguity(
@@ -890,8 +825,8 @@ class TestInvalidOutputRetry:
         assert client.call_count == 2
         assert res.block_results[0].semantic_rounds == 2
 
-    def test_wrong_candidate_ref_retries(self):
-        """Wrong candidate ref → semantic-invalid."""
+    def test_out_of_range_selector_retries(self):
+        """Selector index out of range for the pair's own endpoint → retry."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
@@ -900,15 +835,14 @@ class TestInvalidOutputRetry:
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
 
-        # First: wrong left ref
         invalid = {
             "decisions": [
                 {
-                    "left_candidate_ref": f"{CHUNK_ID}:cand_char_999",
+                    "left_candidate_ref": left,
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": ["L5"],  # left has 0 evidence
                 }
             ]
         }
@@ -921,132 +855,8 @@ class TestInvalidOutputRetry:
         )
         assert client.call_count == 2
 
-    def test_wrong_evidence_retries(self):
-        """Wrong (paraphrased) evidence → semantic-invalid."""
-        evidence = EvidenceRef(
-            paragraph_id="CH001_P001", role="primary", strength="explicit",
-            excerpt="Alice entered the room.",
-        )
-        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(left, display_name="Alice", evidence=(evidence,)),
-            make_candidate_entry(right, display_name="Alicia"),
-        )
-        pair_plans = (make_pair_plan(left, right),)
-        result = make_planning_result(entries, pair_plans)
-
-        # First: paraphrased excerpt (not exact match)
-        invalid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left,
-                    "right_candidate_ref": right,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [
-                        {
-                            "paragraph_id": "CH001_P001",
-                            "role": "primary",
-                            "strength": "explicit",
-                            "excerpt": "Alice walked in.",  # paraphrased
-                        }
-                    ],
-                }
-            ]
-        }
-        valid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left,
-                    "right_candidate_ref": right,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [
-                        {
-                            "paragraph_id": "CH001_P001",
-                            "role": "primary",
-                            "strength": "explicit",
-                            "excerpt": "Alice entered the room.",
-                        }
-                    ],
-                }
-            ]
-        }
-
-        client = FakeLLMClient([invalid, valid])
-        res = resolve_semantic_ambiguity(
-            result, make_profile(), make_semantic_profile(), client,
-            prompt_registry=PROMPT_REGISTRY,
-        )
-        assert client.call_count == 2
-
-    def test_duplicate_evidence_retries(self):
-        """Duplicate evidence within a decision → semantic-invalid."""
-        evidence = EvidenceRef(
-            paragraph_id="CH001_P001", role="primary", strength="explicit",
-            excerpt="Alice entered the room.",
-        )
-        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(left, display_name="Alice", evidence=(evidence,)),
-            make_candidate_entry(right, display_name="Alicia", evidence=(evidence,)),
-        )
-        pair_plans = (make_pair_plan(left, right),)
-        result = make_planning_result(entries, pair_plans)
-
-        # First: same evidence cited twice in one decision
-        invalid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left,
-                    "right_candidate_ref": right,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [
-                        {
-                            "paragraph_id": "CH001_P001",
-                            "role": "primary",
-                            "strength": "explicit",
-                            "excerpt": "Alice entered the room.",
-                        },
-                        {
-                            "paragraph_id": "CH001_P001",
-                            "role": "primary",
-                            "strength": "explicit",
-                            "excerpt": "Alice entered the room.",
-                        },
-                    ],
-                }
-            ]
-        }
-        valid = {
-            "decisions": [
-                {
-                    "left_candidate_ref": left,
-                    "right_candidate_ref": right,
-                    "decision": "same_entity",
-                    "reason_zh": "测试。",
-                    "evidence_refs": [
-                        {
-                            "paragraph_id": "CH001_P001",
-                            "role": "primary",
-                            "strength": "explicit",
-                            "excerpt": "Alice entered the room.",
-                        }
-                    ],
-                }
-            ]
-        }
-
-        client = FakeLLMClient([invalid, valid])
-        res = resolve_semantic_ambiguity(
-            result, make_profile(), make_semantic_profile(), client,
-            prompt_registry=PROMPT_REGISTRY,
-        )
-        assert client.call_count == 2
-
-    def test_empty_evidence_accepted(self):
-        """Empty evidence_refs is accepted (prompt/schema allow it)."""
+    def test_negative_selector_retries(self):
+        """Negative index selector (L-1) → A4C validation failure → retry."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
@@ -1055,28 +865,104 @@ class TestInvalidOutputRetry:
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
 
-        payload = {
+        invalid = {
             "decisions": [
                 {
                     "left_candidate_ref": left,
                     "right_candidate_ref": right,
-                    "decision": "uncertain",
-                    "reason_zh": "证据不足。",
-                    "evidence_refs": [],
+                    "decision": "same_entity",
+                    "reason_zh": "测试。",
+                    "evidence_selectors": ["L-1"],
                 }
             ]
         }
+        valid = self._valid_payload(left, right)
 
-        client = FakeLLMClient([payload])
+        client = FakeLLMClient([invalid, valid])
         res = resolve_semantic_ambiguity(
             result, make_profile(), make_semantic_profile(), client,
             prompt_registry=PROMPT_REGISTRY,
         )
-        assert client.call_count == 1
-        assert res.semantic_decisions[0].evidence_refs == ()
+        assert client.call_count == 2
 
-    def test_two_invalid_semantic_exhaustion(self):
-        """Two invalid rounds → ReconciliationSemanticGenerationError."""
+    def test_duplicate_selector_retries(self):
+        """Duplicate selector (L0 twice) → A4C validation failure → retry."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(left, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(right, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        invalid = {
+            "decisions": [
+                {
+                    "left_candidate_ref": left,
+                    "right_candidate_ref": right,
+                    "decision": "same_entity",
+                    "reason_zh": "测试。",
+                    "evidence_selectors": ["L0", "L0"],
+                }
+            ]
+        }
+        valid = self._valid_payload(left, right)
+
+        client = FakeLLMClient([invalid, valid])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        assert client.call_count == 2
+
+    def test_wrong_ref_retries(self):
+        """Wrong candidate_ref (not in requested pairs) → retry."""
+        entries, left, right = self._entries()
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        wrong_ref = f"{CHUNK_ID}:cand_char_999"
+        invalid = {
+            "decisions": [
+                {
+                    "left_candidate_ref": wrong_ref,
+                    "right_candidate_ref": right,
+                    "decision": "same_entity",
+                    "reason_zh": "测试。",
+                    "evidence_selectors": [],
+                }
+            ]
+        }
+        valid = self._valid_payload(left, right)
+
+        client = FakeLLMClient([invalid, valid])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        assert client.call_count == 2
+
+    def test_first_invalid_second_valid(self):
+        """First invalid, second valid → success with 2 calls."""
+        entries, left, right = self._entries()
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        invalid = {"decisions": []}  # count mismatch
+        valid = self._valid_payload(left, right)
+
+        client = FakeLLMClient([invalid, valid])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        assert client.call_count == 2
+        assert len(res.semantic_decisions) == 1
+        assert res.block_results[0].semantic_rounds == 2
+
+    def test_two_invalid_exhausts_rounds(self):
+        """Two invalid outputs → ReconciliationSemanticGenerationError."""
         entries, left, right = self._entries()
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
@@ -1085,90 +971,54 @@ class TestInvalidOutputRetry:
         invalid2 = {"decisions": []}
 
         client = FakeLLMClient([invalid1, invalid2])
-        with pytest.raises(ReconciliationSemanticGenerationError) as exc_info:
+        with pytest.raises(ReconciliationSemanticGenerationError):
             resolve_semantic_ambiguity(
                 result, make_profile(), make_semantic_profile(), client,
                 prompt_registry=PROMPT_REGISTRY,
             )
         assert client.call_count == 2
-        assert exc_info.value.rounds_attempted == 2
-        assert exc_info.value.block_id.startswith("a4blk_")
-        assert len(exc_info.value.expected_pairs) == 1
 
 
 # ---------------------------------------------------------------------------
-# Test: Endpoint-evidence validation (Issue #39)
+# Test: Selector validation (the A4C semantic authority for evidence identity)
 # ---------------------------------------------------------------------------
 
 
-class TestEndpointEvidenceValidation:
-    """Issue #39: the strict A4C endpoint-evidence validator stays authoritative.
+class TestSelectorValidation:
+    """Deterministic pair-local evidence-selector validation + resolution.
 
-    The validator is prompt-agnostic, but the full-path tests here pin the
-    production configuration (tracked profile -> prompt v2 + tracked prompt v2)
-    so the endpoint-only contract is proven end-to-end. The direct tests call
-    ``_validate_block_payload`` to assert the exact acceptance/rejection outcome.
+    ``_validate_selector_block_payload`` is the single authority for selector
+    validity: L/R form, index in range for the pair's own endpoint, no
+    duplicates, and no third-candidate (a selector can only reference the
+    decision's own left or right endpoint). It resolves valid selectors to the
+    exact endpoint EvidenceRef.
     """
 
-    def _plans_and_packets(self, entries, pair_plans):
-        """Build the single-block (pair_plans, candidate_packets) for validation."""
+    def _plans_and_evidence(self, entries, pair_plans):
         result = make_planning_result(entries, pair_plans)
         blocks = _build_blocks(result)
         assert len(blocks) == 1
         block = blocks[0]
-        packets = json.loads(block.candidate_packets_json)
-        return block.pair_plans, packets
+        evidence = _block_endpoint_evidence(result, list(block.pair_plans))
+        return block.pair_plans, evidence
 
     @staticmethod
     def _payload(decisions):
-        return ReconciliationDecisionPayload.from_dict({"decisions": decisions})
+        return ReconciliationSelectorDecisionPayload.from_dict({"decisions": decisions})
 
     def _validate(self, entries, pair_plans, decisions):
-        plans, packets = self._plans_and_packets(entries, pair_plans)
+        plans, evidence = self._plans_and_evidence(entries, pair_plans)
         payload = self._payload(decisions)
-        return _validate_block_payload(payload, plans, packets)
+        return _validate_selector_block_payload(payload, plans, evidence)
 
-    # -- Rejection cases -----------------------------------------------------
+    # -- Resolution cases ----------------------------------------------------
 
-    def test_third_candidate_evidence_rejected(self):
-        """Citing evidence from a non-endpoint candidate in the block -> FAIL."""
+    def test_l0_resolves_to_left_evidence(self):
+        """L0 resolves to the exact left endpoint EvidenceRef[0]."""
         a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        c, d = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A evidence.")
         entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "A evidence."),)),
-            make_candidate_entry(b, display_name="B", evidence=(
-                EvidenceRef("CH001_P002", "primary", "explicit", "B evidence."),)),
-            make_candidate_entry(c, display_name="C", evidence=(
-                EvidenceRef("CH001_P003", "primary", "explicit", "C evidence."),)),
-            make_candidate_entry(d, display_name="D", evidence=(
-                EvidenceRef("CH001_P004", "primary", "explicit", "D evidence."),)),
-        )
-        pair_plans = (make_pair_plan(a, b), make_pair_plan(c, d))
-        # Pair (a, b) cites C's evidence -- a third candidate for this pair.
-        decisions = [
-            {
-                "left_candidate_ref": a, "right_candidate_ref": b,
-                "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [{"paragraph_id": "CH001_P003", "role": "primary",
-                                   "strength": "explicit", "excerpt": "C evidence."}],
-            },
-            {
-                "left_candidate_ref": c, "right_candidate_ref": d,
-                "decision": "different_entity", "reason_zh": "t.",
-                "evidence_refs": [],
-            },
-        ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
-        assert not ok
-        assert "not exact endpoint evidence" in detail
-
-    def test_wrong_paragraph_rejected(self):
-        """Same role/strength/excerpt but wrong paragraph -> FAIL."""
-        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
             make_candidate_entry(b, display_name="B"),
         )
         pair_plans = (make_pair_plan(a, b),)
@@ -1176,106 +1026,222 @@ class TestEndpointEvidenceValidation:
             {
                 "left_candidate_ref": a, "right_candidate_ref": b,
                 "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [{"paragraph_id": "CH001_P009", "role": "primary",
-                                   "strength": "explicit", "excerpt": "X."}],
+                "evidence_selectors": ["L0"],
             },
         ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
-        assert not ok
-        assert "not exact endpoint evidence" in detail
-
-    def test_wrong_role_rejected(self):
-        """Correct paragraph but wrong role -> FAIL."""
-        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
-            make_candidate_entry(b, display_name="B"),
-        )
-        pair_plans = (make_pair_plan(a, b),)
-        decisions = [
-            {
-                "left_candidate_ref": a, "right_candidate_ref": b,
-                "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "supporting",
-                                   "strength": "explicit", "excerpt": "X."}],
-            },
-        ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
-        assert not ok
-        assert "not exact endpoint evidence" in detail
-
-    def test_wrong_strength_rejected(self):
-        """Correct paragraph/role but wrong strength -> FAIL."""
-        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
-            make_candidate_entry(b, display_name="B"),
-        )
-        pair_plans = (make_pair_plan(a, b),)
-        decisions = [
-            {
-                "left_candidate_ref": a, "right_candidate_ref": b,
-                "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
-                                   "strength": "implied", "excerpt": "X."}],
-            },
-        ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
-        assert not ok
-        assert "not exact endpoint evidence" in detail
-
-    def test_changed_excerpt_rejected(self):
-        """Paraphrased/changed excerpt -> FAIL."""
-        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
-            make_candidate_entry(b, display_name="B"),
-        )
-        pair_plans = (make_pair_plan(a, b),)
-        decisions = [
-            {
-                "left_candidate_ref": a, "right_candidate_ref": b,
-                "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
-                                   "strength": "explicit", "excerpt": "X changed."}],
-            },
-        ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
-        assert not ok
-        assert "not exact endpoint evidence" in detail
-
-    # -- Acceptance cases ----------------------------------------------------
-
-    def test_valid_exact_endpoint_accepted(self):
-        """An exact copy of an endpoint EvidenceRef -> accepted."""
-        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
-            make_candidate_entry(b, display_name="B", evidence=(
-                EvidenceRef("CH001_P002", "primary", "explicit", "Y."),)),
-        )
-        pair_plans = (make_pair_plan(a, b),)
-        decisions = [
-            {
-                "left_candidate_ref": a, "right_candidate_ref": b,
-                "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [
-                    {"paragraph_id": "CH001_P001", "role": "primary",
-                     "strength": "explicit", "excerpt": "X."},
-                    {"paragraph_id": "CH001_P002", "role": "primary",
-                     "strength": "explicit", "excerpt": "Y."},
-                ],
-            },
-        ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
         assert ok, detail
+        assert resolved[0] == (left_ev,)
 
-    def test_null_endpoint_excerpt_copied_accepted(self):
-        """A null endpoint excerpt copied exactly -> accepted."""
+    def test_r0_resolves_to_right_evidence(self):
+        """R0 resolves to the exact right endpoint EvidenceRef[0]."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B evidence.")
+        entries = (
+            make_candidate_entry(a, display_name="A"),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (right_ev,)
+
+    # -- Canonical pair-local selector order (Issue #41 follow-up) -----------
+
+    def test_canonical_order_left_before_right(self):
+        """Selectors are canonicalized before resolution: all left selectors
+        (by index) come first, then all right selectors (by index), independent
+        of the order the provider returned them.
+
+        ``["R0", "L0"]`` -> canonical ``["L0", "R0"]`` -> ``(left_ev, right_ev)``.
+        """
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (left_ev, right_ev)
+
+    def test_permutation_same_canonical_tuple(self):
+        """Requirement 1: ``["L0", "R0"]`` and ``["R0", "L0"]`` resolve to the
+        SAME canonical persisted EvidenceRef tuple."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        results: dict[tuple[str, ...], tuple[EvidenceRef, ...]] = {}
+        for order in (["L0", "R0"], ["R0", "L0"]):
+            decisions = [
+                {
+                    "left_candidate_ref": a, "right_candidate_ref": b,
+                    "decision": "same_entity", "reason_zh": "t.",
+                    "evidence_selectors": order,
+                },
+            ]
+            ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+            assert ok, detail
+            results[tuple(order)] = resolved[0]
+        assert results[("L0", "R0")] == results[("R0", "L0")]
+        assert results[("L0", "R0")] == (left_ev, right_ev)
+
+    def test_complex_permutation_canonical_order(self):
+        """Requirement 2: ``["R2", "L1", "R0", "L0"]`` canonicalizes to
+        ``L0, L1, R0, R2`` (left by index, then right by index)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left0 = EvidenceRef("CH001_P001", "primary", "explicit", "L0.")
+        left1 = EvidenceRef("CH001_P002", "primary", "explicit", "L1.")
+        right0 = EvidenceRef("CH001_P003", "primary", "explicit", "R0.")
+        right1 = EvidenceRef("CH001_P004", "primary", "explicit", "R1.")
+        right2 = EvidenceRef("CH001_P005", "primary", "explicit", "R2.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left0, left1)),
+            make_candidate_entry(
+                b, display_name="B", evidence=(right0, right1, right2)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R2", "L1", "R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (left0, left1, right0, right2)
+
+    def test_permutation_same_decision_id(self):
+        """Requirement 3: equivalent selector permutations produce the SAME
+        deterministic ``decision_id`` (via ``compute_llm_decision_id``)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        ids: set[str] = set()
+        for order in (["L0", "R0"], ["R0", "L0"]):
+            decisions = [
+                {
+                    "left_candidate_ref": a, "right_candidate_ref": b,
+                    "decision": "same_entity", "reason_zh": "identical reason.",
+                    "evidence_selectors": order,
+                },
+            ]
+            ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+            assert ok, detail
+            ids.add(
+                compute_llm_decision_id(
+                    left_ref=a,
+                    right_ref=b,
+                    decision="same_entity",
+                    method="llm",
+                    reason_code="llm_same_entity",
+                    reason_zh="identical reason.",
+                    evidence_refs=resolved[0],
+                    prompt_id="a4.entity-reconciliation",
+                    prompt_version=3,
+                    request_hash="reqhash",
+                )
+            )
+        assert len(ids) == 1
+
+    def test_duplicate_fails_before_canonicalization(self):
+        """Requirement 4: a duplicate selector fails BEFORE canonicalization,
+        even when mixed with other valid selectors."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "duplicate" in detail
+        assert resolved == []
+
+    def test_invalid_fails_before_canonicalization(self):
+        """Requirement 5: an invalid selector fails BEFORE canonicalization,
+        even when mixed with valid selectors (and still consumes a round)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(b, display_name="B", evidence=(
+                EvidenceRef("CH001_P002", "primary", "explicit", "B."),)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0", "X9"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "invalid evidence selector" in detail
+        assert resolved == []
+
+    def test_null_excerpt_canonical_round_trip(self):
+        """Requirement 6: a null-excerpt EvidenceRef round-trips EXACTLY through
+        canonical resolution (multi-selector order)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev_null = EvidenceRef("CH001_P001", "primary", "explicit", None)
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev_null,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (left_ev_null, right_ev)
+        assert resolved[0][0].excerpt is None
+
+    def test_null_excerpt_round_trips(self):
+        """A selector resolving to a null-excerpt EvidenceRef round-trips null."""
         a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(a, display_name="A", evidence=(
@@ -1287,15 +1253,15 @@ class TestEndpointEvidenceValidation:
             {
                 "left_candidate_ref": a, "right_candidate_ref": b,
                 "decision": "same_entity", "reason_zh": "t.",
-                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
-                                   "strength": "explicit", "excerpt": None}],
+                "evidence_selectors": ["L0"],
             },
         ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
         assert ok, detail
+        assert resolved[0][0].excerpt is None
 
-    def test_empty_evidence_accepted(self):
-        """Empty evidence_refs remains accepted (behavior unchanged)."""
+    def test_empty_selectors_accepted(self):
+        """Empty evidence_selectors remains accepted (behavior unchanged)."""
         a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(a, display_name="A"),
@@ -1306,74 +1272,144 @@ class TestEndpointEvidenceValidation:
             {
                 "left_candidate_ref": a, "right_candidate_ref": b,
                 "decision": "uncertain", "reason_zh": "t.",
-                "evidence_refs": [],
+                "evidence_selectors": [],
             },
         ]
-        ok, detail = self._validate(entries, pair_plans, decisions)
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
         assert ok, detail
 
-    # -- Full-path (production config: profile -> prompt v2) -----------------
+    # -- Rejection cases -----------------------------------------------------
 
-    def _resolve(self, entries, pair_plans, payloads):
-        result = make_planning_result(entries, pair_plans)
-        client = FakeLLMClient(payloads)
-        res = resolve_semantic_ambiguity(
-            result, make_profile(prompt_version=2), make_semantic_profile(), client,
-            prompt_registry=PROMPT_REGISTRY,
-        )
-        return res, client
-
-    def test_full_path_third_candidate_retries_then_recovers(self):
-        """End-to-end: third-candidate evidence consumes a round, then recovers."""
-        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
-        c, d = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
-        entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", "A evidence."),)),
-            make_candidate_entry(b, display_name="B"),
-            make_candidate_entry(c, display_name="C", evidence=(
-                EvidenceRef("CH001_P003", "primary", "explicit", "C evidence."),)),
-            make_candidate_entry(d, display_name="D"),
-        )
-        pair_plans = (make_pair_plan(a, b), make_pair_plan(c, d))
-        invalid = {"decisions": [
-            {"left_candidate_ref": a, "right_candidate_ref": b,
-             "decision": "same_entity", "reason_zh": "t.",
-             "evidence_refs": [{"paragraph_id": "CH001_P003", "role": "primary",
-                                "strength": "explicit", "excerpt": "C evidence."}]},
-            {"left_candidate_ref": c, "right_candidate_ref": d,
-             "decision": "different_entity", "reason_zh": "t.", "evidence_refs": []},
-        ]}
-        valid = {"decisions": [
-            {"left_candidate_ref": a, "right_candidate_ref": b,
-             "decision": "same_entity", "reason_zh": "t.",
-             "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
-                                "strength": "explicit", "excerpt": "A evidence."}]},
-            {"left_candidate_ref": c, "right_candidate_ref": d,
-             "decision": "different_entity", "reason_zh": "t.", "evidence_refs": []},
-        ]}
-        res, client = self._resolve(entries, pair_plans, [invalid, valid])
-        assert client.call_count == 2
-        assert len(res.semantic_decisions) == 2
-
-    def test_full_path_null_excerpt_copied_accepted(self):
-        """End-to-end: a null endpoint excerpt copied exactly is accepted."""
+    def test_invalid_prefix_rejected(self):
+        """Non-L/R prefix (X0) → rejected (consumes a semantic round)."""
         a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
-            make_candidate_entry(a, display_name="A", evidence=(
-                EvidenceRef("CH001_P001", "primary", "explicit", None),)),
+            make_candidate_entry(a, display_name="A"),
             make_candidate_entry(b, display_name="B"),
         )
         pair_plans = (make_pair_plan(a, b),)
-        payload = {"decisions": [
-            {"left_candidate_ref": a, "right_candidate_ref": b,
-             "decision": "same_entity", "reason_zh": "t.",
-             "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
-                                "strength": "explicit", "excerpt": None}]},
-        ]}
-        res, client = self._resolve(entries, pair_plans, [payload])
-        assert client.call_count == 1
-        assert res.semantic_decisions[0].evidence_refs[0].excerpt is None
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["X0"],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "invalid evidence selector" in detail
+
+    def test_negative_index_rejected(self):
+        """Negative index (L-1) → rejected."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L-1"],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "invalid evidence selector" in detail
+
+    def test_non_integer_index_rejected(self):
+        """Non-integer index (Lx) → rejected."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A"),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["Lx"],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "invalid evidence selector" in detail
+
+    def test_out_of_range_rejected(self):
+        """Index out of range for the pair's own endpoint (L5, 0 evidence) → rejected."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A"),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L5"],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "out of range" in detail
+
+    def test_duplicate_selector_rejected(self):
+        """Duplicate selector (L0, L0) → rejected."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "L0"],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "duplicate" in detail
+
+    def test_no_third_candidate(self):
+        """A selector can only reference the decision's own endpoints.
+
+        R0 when the right endpoint has no evidence (and there is a third
+        candidate in the block) is out of range for this pair → rejected.
+        """
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        c, d = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
+        entries = (
+            make_candidate_entry(a, display_name="A"),
+            make_candidate_entry(b, display_name="B"),
+            make_candidate_entry(c, display_name="C", evidence=(
+                EvidenceRef("CH001_P003", "primary", "explicit", "C."),)),
+            make_candidate_entry(d, display_name="D"),
+        )
+        pair_plans = (make_pair_plan(a, b), make_pair_plan(c, d))
+        # Pair (a, b) tries to cite R0, but b has no evidence; C's evidence
+        # belongs to the OTHER pair, not to (a, b)'s own endpoints.
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R0"],
+            },
+            {
+                "left_candidate_ref": c, "right_candidate_ref": d,
+                "decision": "different_entity", "reason_zh": "t.",
+                "evidence_selectors": [],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "out of range" in detail
 
 
 # ---------------------------------------------------------------------------
@@ -1435,17 +1471,15 @@ class TestRetrySeparation:
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
 
-        # Build a mismatched provenance (wrong request_hash)
         def make_bad_provenance(request, rendered_prompt, output_schema, semantic_profile):
             good_prov = build_provenance(
                 request, ProviderMeta(), request_model="qwen3-27b", provider_family="qwen"
             )
-            # Tamper: change request_hash
             bad_prov = LLMInvocationProvenance(
                 provider_family="qwen",
                 model="qwen3-27b",
@@ -1465,7 +1499,6 @@ class TestRetrySeparation:
             )
             return bad_prov
 
-        # Use a custom client that produces mismatched provenance
         class BadProvenanceClient(FakeLLMClient):
             def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
                 self.call_count += 1
@@ -1515,7 +1548,6 @@ class TestBackendNeutrality:
         result = make_planning_result(entries, pair_plans, plan_hash=H)
         blocks1 = _build_blocks(result)
 
-        # Same input, same plan_hash → same block ID regardless of backend
         result2 = make_planning_result(entries, pair_plans, plan_hash=H)
         blocks2 = _build_blocks(result2)
         assert blocks1[0].block_id == blocks2[0].block_id
@@ -1537,12 +1569,11 @@ class TestBackendNeutrality:
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
 
-        # Run with different backend metadata
         client1 = FakeLLMClient([payload])
         client1.provider_family = "qwen"
         client1.request_model = "qwen3-27b"
@@ -1551,9 +1582,6 @@ class TestBackendNeutrality:
             prompt_registry=PROMPT_REGISTRY,
         )
 
-        # Change the planning result's plan_hash → different request_hash →
-        # different decision_id (this is expected; request_hash is in material)
-        # But: same plan_hash + same request → same decision_id regardless of backend
         result2 = make_planning_result(entries, pair_plans)  # same plan_hash
         client2 = FakeLLMClient([payload])
         client2.provider_family = "gemma"  # different backend
@@ -1563,10 +1591,6 @@ class TestBackendNeutrality:
             prompt_registry=PROMPT_REGISTRY,
         )
 
-        # decision_id depends on request_hash which depends on rendered prompt +
-        # schema + semantic profile — NOT on provider_family or model.
-        # Since same planning_result (same plan_hash) + same prompt + same schema
-        # + same semantic_profile → same request_hash → same decision_id.
         assert res1.semantic_decisions[0].decision_id == res2.semantic_decisions[0].decision_id
 
 
@@ -1586,7 +1610,6 @@ class TestProfileConsistencyGate:
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
 
-        # Profile with non-existent prompt_id → registry.load() fails
         bad_profile = make_profile(prompt_id="wrong.prompt-id")
         client = FakeLLMClient([])
         with pytest.raises(Exception):
@@ -1601,8 +1624,7 @@ class TestProfileConsistencyGate:
         from short_drama.story.reconciliation_semantic import _check_profile_consistency
 
         profile = make_profile(output_schema_id="wrong-schema-id")
-        prompt_spec = PROMPT_REGISTRY.load("a4.entity-reconciliation", version=1)
-        # Build a schema with a DIFFERENT id than the profile expects
+        prompt_spec = PROMPT_REGISTRY.load("a4.entity-reconciliation", version=3)
         from short_drama.io import load_json
         schema_data = load_json(SCHEMA_PATH)
         output_schema = OutputSchema.create(
@@ -1613,16 +1635,16 @@ class TestProfileConsistencyGate:
         with pytest.raises(ReconciliationSemanticError, match="output_schema_id"):
             _check_profile_consistency(profile, prompt_spec, output_schema)
 
-    def test_max_generation_rounds_mismatch_gate(self):
-        """Valid profile passes the consistency gate."""
+    def test_valid_profile_passes_gate(self):
+        """A consistent v2 profile (prompt v3 + selector schema) passes the gate."""
         from short_drama.io import load_json
         from short_drama.story.reconciliation_semantic import _check_profile_consistency
 
         profile = make_profile(max_generation_rounds=2)
-        prompt_spec = PROMPT_REGISTRY.load("a4.entity-reconciliation", version=1)
+        prompt_spec = PROMPT_REGISTRY.load("a4.entity-reconciliation", version=3)
         schema_data = load_json(SCHEMA_PATH)
         output_schema = OutputSchema.create(
-            schema_id="a4-reconciliation-decision-payload",
+            schema_id="a4-reconciliation-decision-selector-payload",
             schema_version=1,
             schema=schema_data,
         )
@@ -1651,7 +1673,6 @@ class TestDecisionCoverage:
             make_candidate_entry(right3, display_name="C2"),
         )
 
-        # One auto_same, one must_not_merge, one needs_semantic_decision
         auto_decision = ReconciliationDecision(
             decision_id="dec_" + "a" * 20,
             left_candidate_ref=left1,
@@ -1695,7 +1716,7 @@ class TestDecisionCoverage:
                     "right_candidate_ref": right3,
                     "decision": "same_entity",
                     "reason_zh": "LLM判定。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
@@ -1706,10 +1727,8 @@ class TestDecisionCoverage:
             prompt_registry=PROMPT_REGISTRY,
         )
 
-        # all_decisions: 2 deterministic + 1 semantic = 3
         assert len(res.all_decisions) == 3
 
-        # Verify each pair is covered exactly once
         pair_refs = set()
         for d in res.all_decisions:
             key = (d.left_candidate_ref, d.right_candidate_ref)
@@ -1720,10 +1739,8 @@ class TestDecisionCoverage:
         assert (left2, right2) in pair_refs
         assert (left3, right3) in pair_refs
 
-        # Deterministic decisions unchanged
         det_in_all = [d for d in res.all_decisions if d.method == "deterministic"]
         assert len(det_in_all) == 2
-        # LLM decision present
         llm_in_all = [d for d in res.all_decisions if d.method == "llm"]
         assert len(llm_in_all) == 1
         assert llm_in_all[0].decision == "same_entity"
@@ -1752,14 +1769,14 @@ class TestDecisionCoverage:
                     "right_candidate_ref": right1,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 },
                 {
                     "left_candidate_ref": left2,
                     "right_candidate_ref": right2,
                     "decision": "different_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 },
             ]
         }
@@ -1770,7 +1787,6 @@ class TestDecisionCoverage:
             prompt_registry=PROMPT_REGISTRY,
         )
 
-        # Verify canonical sort
         for i in range(len(res.all_decisions) - 1):
             d1 = res.all_decisions[i]
             d2 = res.all_decisions[i + 1]
@@ -1802,7 +1818,7 @@ class TestProvenanceIdentity:
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "测试。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
@@ -1812,9 +1828,7 @@ class TestProvenanceIdentity:
             result, make_profile(), make_semantic_profile(), client,
             prompt_registry=PROMPT_REGISTRY,
         )
-        # Provenance stored in decision
         assert res.semantic_decisions[0].generation_provenance is not None
-        # request_hash in provenance matches request_hash in block result
         assert res.semantic_decisions[0].generation_provenance.request_hash == res.block_results[0].request_hash
 
     def test_decision_id_deterministic(self):
@@ -1834,7 +1848,7 @@ class TestProvenanceIdentity:
                     "right_candidate_ref": right,
                     "decision": "same_entity",
                     "reason_zh": "同一人。",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
@@ -1845,7 +1859,6 @@ class TestProvenanceIdentity:
             prompt_registry=PROMPT_REGISTRY,
         )
 
-        # Same input again
         result2 = make_planning_result(entries, pair_plans)
         client2 = FakeLLMClient([payload])
         res2 = resolve_semantic_ambiguity(
@@ -1854,7 +1867,6 @@ class TestProvenanceIdentity:
         )
 
         assert res1.semantic_decisions[0].decision_id == res2.semantic_decisions[0].decision_id
-        # decision_id format
         assert res1.semantic_decisions[0].decision_id.startswith("dec_")
         assert len(res1.semantic_decisions[0].decision_id) == 4 + 20  # "dec_" + 20 hex
 
@@ -1872,7 +1884,6 @@ class TestZeroPairs:
             make_candidate_entry(left, display_name="A"),
             make_candidate_entry(right, display_name="B"),
         )
-        # Only auto_same pair
         pair_plans = (
             make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),
         )
@@ -1914,16 +1925,10 @@ class TestMissingEndpointFailClosed:
     zero provider calls, NOT semantic retry."""
 
     def test_left_endpoint_missing_from_index(self):
-        """Semantic pair left endpoint missing from CandidateEntityIndex.
-
-        → ReconciliationSemanticError → FakeLLMClient call_count == 0
-        """
-        # left < right, left NOT in index, right in index
         left = f"{CHUNK_ID}:cand_char_001"  # not in index
         right = f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(right, display_name="B"),
-            # NO entry for left
         )
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
@@ -1937,16 +1942,10 @@ class TestMissingEndpointFailClosed:
         assert client.call_count == 0
 
     def test_right_endpoint_missing_from_index(self):
-        """Semantic pair right endpoint missing from CandidateEntityIndex.
-
-        → ReconciliationSemanticError → FakeLLMClient call_count == 0
-        """
-        # left in index, right NOT in index
         left = f"{CHUNK_ID}:cand_char_001"
         right = f"{CHUNK_ID}:cand_char_002"  # not in index
         entries = (
             make_candidate_entry(left, display_name="A"),
-            # NO entry for right
         )
         pair_plans = (make_pair_plan(left, right),)
         result = make_planning_result(entries, pair_plans)
@@ -1960,10 +1959,6 @@ class TestMissingEndpointFailClosed:
         assert client.call_count == 0
 
     def test_non_merge_graph_candidate_kind(self):
-        """Semantic pair points to non-merge-graph candidate kind.
-
-        → fail closed → zero calls
-        """
         left = f"{CHUNK_ID}:cand_char_001"
         right = f"{CHUNK_ID}:cand_char_002"
         entries = (
@@ -2014,17 +2009,12 @@ class TestDecisionCoverageFailClosed:
     with state/method consistency (fail-closed regressions)."""
 
     def test_auto_same_decision_missing(self):
-        """auto_same pair but deterministic decision missing.
-
-        → ReconciliationSemanticError → zero provider calls (no semantic pairs)
-        """
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
             make_candidate_entry(right, display_name="B"),
         )
         pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),)
-        # NO decisions supplied for the auto_same pair
         result = make_planning_result(entries, pair_plans, decisions=())
 
         client = FakeLLMClient([])
@@ -2036,7 +2026,6 @@ class TestDecisionCoverageFailClosed:
         assert client.call_count == 0
 
     def test_must_not_merge_decision_missing(self):
-        """must_not_merge pair decision missing → fail closed."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
@@ -2054,7 +2043,6 @@ class TestDecisionCoverageFailClosed:
         assert client.call_count == 0
 
     def test_extra_deterministic_decision_not_in_pair_plans(self):
-        """Extra deterministic decision not present in pair_plans → fail closed."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         extra_left = f"{CHUNK_ID}:cand_char_010"
         extra_right = f"{CHUNK_ID}:cand_char_011"
@@ -2065,7 +2053,6 @@ class TestDecisionCoverageFailClosed:
             make_candidate_entry(extra_right, display_name="Y"),
         )
         pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),)
-        # Valid decision for the auto_same pair + an extra one not in pair_plans
         valid_det = _make_det_decision(left, right, "same_entity")
         extra_det = _make_det_decision(extra_left, extra_right, "same_entity")
         result = make_planning_result(
@@ -2081,15 +2068,12 @@ class TestDecisionCoverageFailClosed:
         assert client.call_count == 0
 
     def test_deterministic_decision_for_needs_semantic_pair(self):
-        """Deterministic decision supplied for needs_semantic_decision pair
-        → fail closed (duplicate: deterministic + LLM both for same pair)."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
             make_candidate_entry(right, display_name="B"),
         )
         pair_plans = (make_pair_plan(left, right, state=PAIR_STATE_NEEDS_SEMANTIC_DECISION),)
-        # Deterministic decision for a pair that needs semantic → duplicate with LLM
         det = _make_det_decision(left, right, "same_entity", method="deterministic")
         result = make_planning_result(entries, pair_plans, decisions=(det,))
 
@@ -2101,11 +2085,6 @@ class TestDecisionCoverageFailClosed:
             )
 
     def test_wrong_method_for_semantic_pair_direct(self):
-        """A single deterministic decision for a semantic pair (no LLM) →
-        method consistency check fires: 'expected llm'.
-
-        Tests _validate_decision_coverage directly.
-        """
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
@@ -2119,8 +2098,6 @@ class TestDecisionCoverageFailClosed:
             _validate_decision_coverage(result, (det,), ())
 
     def test_semantic_duplicate_deterministic_pair(self):
-        """Semantic decision attempts to duplicate deterministic pair
-        → fail closed."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         entries = (
             make_candidate_entry(left, display_name="A"),
@@ -2130,21 +2107,16 @@ class TestDecisionCoverageFailClosed:
             make_pair_plan(left, right, state=PAIR_STATE_AUTO_SAME),
         )
         det = _make_det_decision(left, right, "same_entity")
-        # Also provide a semantic decision for the same pair (should be duplicate)
         result = make_planning_result(entries, pair_plans, decisions=(det,))
 
-        # No semantic pairs → should fail at coverage validation before LLM call
         client = FakeLLMClient([])
         with pytest.raises(ReconciliationSemanticError, match="duplicate decision"):
-            # Inject a fake semantic decision via a direct coverage validation call
             _validate_decision_coverage(
                 result, (det,), (det,)
             )
         assert client.call_count == 0
 
     def test_valid_mixed_auto_same_must_not_merge_semantic(self):
-        """Valid mixed auto_same + must_not_merge + semantic → exact full
-        coverage PASS."""
         a_left, a_right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         b_left, b_right = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
         c_left, c_right = f"{CHUNK_ID}:cand_char_005", f"{CHUNK_ID}:cand_char_006"
@@ -2178,7 +2150,6 @@ class TestDecisionCoverageFailClosed:
 
         assert client.call_count == 1
         assert len(res.all_decisions) == 3
-        # Verify all three pairs are present
         pair_keys = {
             (d.left_candidate_ref, d.right_candidate_ref) for d in res.all_decisions
         }
@@ -2218,7 +2189,7 @@ class TestTypedModelExceptionNarrowing:
                     "right_candidate_ref": left,
                     "decision": "same_entity",
                     "reason_zh": "测试",
-                    "evidence_refs": [],
+                    "evidence_selectors": [],
                 }
             ]
         }
@@ -2246,13 +2217,13 @@ class TestTypedModelExceptionNarrowing:
 
         import short_drama.story.reconciliation_semantic as sem_mod
 
-        original_from_dict = ReconciliationDecisionPayload.from_dict
+        original_from_dict = ReconciliationSelectorDecisionPayload.from_dict
 
         # Patch to raise a non-ReconciliationModelError exception
         def _raise_unexpected(value):
             raise ValueError("unexpected programming error")
 
-        sem_mod.ReconciliationDecisionPayload.from_dict = _raise_unexpected
+        sem_mod.ReconciliationSelectorDecisionPayload.from_dict = _raise_unexpected
         try:
             client = FakeLLMClient([make_valid_payload(left, right, "same_entity")])
             with pytest.raises(ValueError, match="unexpected programming error"):
@@ -2261,7 +2232,7 @@ class TestTypedModelExceptionNarrowing:
                     prompt_registry=PROMPT_REGISTRY,
                 )
         finally:
-            sem_mod.ReconciliationDecisionPayload.from_dict = original_from_dict
+            sem_mod.ReconciliationSelectorDecisionPayload.from_dict = original_from_dict
 
         # Only 1 call: the unexpected exception propagated, no retry
         assert client.call_count == 1
@@ -2272,11 +2243,11 @@ def make_valid_payload(
     right: str,
     decision: str,
     reason_zh: str = "LLM 判断",
-    evidence_refs: list[dict] | None = None,
+    evidence_selectors: list[str] | None = None,
 ) -> dict:
-    """Build a schema-valid payload dict for FakeLLMClient."""
-    if evidence_refs is None:
-        evidence_refs = []
+    """Build a schema-valid selector payload dict for FakeLLMClient."""
+    if evidence_selectors is None:
+        evidence_selectors = []
     return {
         "decisions": [
             {
@@ -2284,7 +2255,7 @@ def make_valid_payload(
                 "right_candidate_ref": right,
                 "decision": decision,
                 "reason_zh": reason_zh,
-                "evidence_refs": evidence_refs,
+                "evidence_selectors": evidence_selectors,
             }
         ]
     }

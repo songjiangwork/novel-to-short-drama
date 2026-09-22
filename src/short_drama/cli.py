@@ -39,7 +39,7 @@ DEFAULT_EXTRACT_PROFILES = {
 # ``llm_local.example.yaml``); it is never committed.
 DEFAULT_RECONCILE_PROFILES = {
     "extraction_profile": REPO_ROOT / "profiles" / "story_extraction_v1.yaml",
-    "reconciliation_profile": REPO_ROOT / "profiles" / "entity_reconciliation_v1.yaml",
+    "reconciliation_profile": REPO_ROOT / "profiles" / "entity_reconciliation_v2.yaml",
     "runtime_config": REPO_ROOT / "profiles" / "llm_local.yaml",
     "llm_profile": REPO_ROOT / "profiles" / "entity_reconciliation_llm_v1.yaml",
 }

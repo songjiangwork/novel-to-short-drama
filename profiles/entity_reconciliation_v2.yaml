@@ -1,0 +1,59 @@
+# v1.2 A4A EntityReconciliationProfile — TRACKED.
+#
+# A model-independent orchestration profile for A4 entity reconciliation. It
+# carries NO runtime/LLM transport fields (no endpoint, credential, timeout,
+# concrete model, temperature, or reasoning) and NO backend routing identity
+# (no provider_family / request_model). Those remain A-I3 runtime config /
+# SemanticLLMProfile concerns (see profiles/entity_reconciliation_llm_v1.yaml).
+#
+# This profile's canonical hash (computed over to_dict() via the shared
+# content_hash) is the `reconciliation_profile_hash` that participates in A4
+# reuse identity. Changing any semantic field below changes that hash.
+#
+# v2 changes the provider evidence contract to PAIR-LOCAL SELECTORS: the
+# pinned prompt (v3) presents each pair with its own left/right endpoint
+# packet and the pinned output schema (the selector payload) accepts only
+# evidence selectors (L0/L1/... and R0/R1/...). A4C validates each selector
+# against that exact pair and resolves it to the exact endpoint EvidenceRef.
+# The persisted A4 decision contracts (ReconciliationDecision /
+# ReconciliationDecisionSet / EntityMap) are UNCHANGED. The v1 profile
+# (prompt v2 + raw-EvidenceRef payload) is preserved unchanged and can no
+# longer be mistaken for this contract: its prompt_version, prompt content
+# hash, output schema id/hash, and this profile id/hash all differ.
+schema_version: 1
+
+# Stable semantic identifier for this profile.
+profile_id: entity-reconciliation-v2
+
+# Working language for zh-CN reason text (reason_zh).
+working_language: zh-CN
+
+# A4 matching/blocking policy identities (deterministic, versioned). The
+# policies themselves are implemented in A4B; A4A only pins their identities.
+# Changing a policy's semantics MUST change its identity.
+name_normalization_policy_id: a4-name-normalization-v1
+blocking_policy_id: a4-blocking-v1
+canonicalization_policy_id: a4-canonicalization-v1
+
+# Reconciliation prompt identity pinned for this profile.
+#
+# v3 pairs each decision with its own left/right endpoint packet and instructs
+# the provider to cite evidence only by pair-local selectors (L0/L1/... for
+# the left endpoint, R0/R1/... for the right endpoint). The provider no longer
+# copies the underlying EvidenceRef fields. See
+# docs/v1.2-A4C-semantic-ambiguity-resolution-implementation-plan.md.
+prompt_id: a4.entity-reconciliation
+prompt_version: 3
+
+# Structured-output schema identity pinned for this profile.
+#
+# The selector payload schema: each decision carries left_candidate_ref,
+# right_candidate_ref, decision, reason_zh, and evidence_selectors (a list of
+# pair-local selectors). It is a distinct schema identity from the old
+# raw-EvidenceRef payload and must not be reused under the old id.
+output_schema_id: a4-reconciliation-decision-selector-payload
+output_schema_version: 1
+
+# Bounded semantic generation rounds (first generation + at most one
+# semantic-regeneration round). Frozen A-I5 v1 ceiling.
+max_generation_rounds: 2

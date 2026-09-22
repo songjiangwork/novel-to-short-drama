@@ -186,7 +186,7 @@ def test_reconcile_entities_profile_defaults_map_resolves_to_repo_root():
         REPO_ROOT / "profiles" / "story_extraction_v1.yaml"
     )
     assert cli.DEFAULT_RECONCILE_PROFILES["reconciliation_profile"] == (
-        REPO_ROOT / "profiles" / "entity_reconciliation_v1.yaml"
+        REPO_ROOT / "profiles" / "entity_reconciliation_v2.yaml"
     )
     assert cli.DEFAULT_RECONCILE_PROFILES["runtime_config"] == (
         REPO_ROOT / "profiles" / "llm_local.yaml"
@@ -225,7 +225,7 @@ def test_reconcile_entities_parser_defaults_flow_to_call(monkeypatch, capsys):
         REPO_ROOT / "profiles" / "story_extraction_v1.yaml"
     )
     assert captured["reconciliation_profile_path"] == (
-        REPO_ROOT / "profiles" / "entity_reconciliation_v1.yaml"
+        REPO_ROOT / "profiles" / "entity_reconciliation_v2.yaml"
     )
     assert captured["semantic_profile_path"] == (
         REPO_ROOT / "profiles" / "entity_reconciliation_llm_v1.yaml"

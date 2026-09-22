@@ -7,7 +7,8 @@ Covers the frozen A4C selector contract:
   * pair context (endpoint-only, source-order, exact evidence, null excerpt,
     canonical JSON, selector labels)
   * deterministic selector validation (L/R form, index range, duplicates,
-    no-third-candidate) + exact EvidenceRef resolution (Python-owned)
+    no-third-candidate) + canonical pair-local selector order (left-by-index
+    then right-by-index) + exact EvidenceRef resolution (Python-owned)
   * decisions (same/different/uncertain accepted)
   * uncertain → exactly 1 semantic call, no retry
   * invalid output / invalid selector retry (missing/extra/duplicate/reordered/
@@ -79,6 +80,7 @@ from short_drama.story.reconciliation_semantic import (
     _validate_decision_coverage,
     _validate_selector_block_payload,
     _verify_provenance,
+    compute_llm_decision_id,
 )
 
 
@@ -607,6 +609,53 @@ class TestDecisions:
         # Selector resolved to the exact left endpoint EvidenceRef.
         assert res.semantic_decisions[0].evidence_refs[0].paragraph_id == "CH001_P001"
 
+    def test_persisted_decision_carries_canonical_evidence_refs(self):
+        """Requirement 8: the persisted ``ReconciliationDecision`` carries the
+        exact CANONICAL EvidenceRefs (not selector strings), and its ``to_dict()``
+        has the unchanged persisted keys (``evidence_refs``, no
+        ``evidence_selectors``). A permutation of the selectors therefore
+        persists identically to its canonical form."""
+        left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left0 = EvidenceRef("CH001_P001", "primary", "explicit", "L0.")
+        left1 = EvidenceRef("CH001_P002", "primary", "explicit", "L1.")
+        right0 = EvidenceRef("CH001_P003", "primary", "explicit", "R0.")
+        entries = (
+            make_candidate_entry(left, display_name="A", evidence=(left0, left1)),
+            make_candidate_entry(right, display_name="B", evidence=(right0,)),
+        )
+        pair_plans = (make_pair_plan(left, right),)
+        result = make_planning_result(entries, pair_plans)
+
+        payload = self._make_valid_payload([
+            {
+                "left_candidate_ref": left,
+                "right_candidate_ref": right,
+                "decision": "same_entity",
+                "reason_zh": "同一角色。",
+                # provider returns a non-canonical permutation
+                "evidence_selectors": ["R0", "L1", "L0"],
+            }
+        ])
+
+        client = FakeLLMClient([payload])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        d = res.semantic_decisions[0]
+        # Canonical order: L0, L1, R0 (left by index, then right by index).
+        assert d.evidence_refs == (left0, left1, right0)
+        # Persisted contract: evidence_refs present, NO selector strings.
+        as_dict = d.to_dict()
+        assert "evidence_refs" in as_dict
+        assert "evidence_selectors" not in as_dict
+        assert as_dict["evidence_refs"] == [
+            left0.to_dict(), left1.to_dict(), right0.to_dict(),
+        ]
+        # Round-trips through the unchanged from_dict contract.
+        round_tripped = ReconciliationDecision.from_dict(as_dict)
+        assert round_tripped.evidence_refs == (left0, left1, right0)
+
     def test_different_entity_accepted(self):
         """A valid different_entity decision is accepted."""
         left, right = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
@@ -1004,8 +1053,15 @@ class TestSelectorValidation:
         assert ok, detail
         assert resolved[0] == (right_ev,)
 
-    def test_selector_order_preserved(self):
-        """Resolved evidence follows the provider's selector order."""
+    # -- Canonical pair-local selector order (Issue #41 follow-up) -----------
+
+    def test_canonical_order_left_before_right(self):
+        """Selectors are canonicalized before resolution: all left selectors
+        (by index) come first, then all right selectors (by index), independent
+        of the order the provider returned them.
+
+        ``["R0", "L0"]`` -> canonical ``["L0", "R0"]`` -> ``(left_ev, right_ev)``.
+        """
         a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
         left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
         right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
@@ -1023,7 +1079,166 @@ class TestSelectorValidation:
         ]
         ok, detail, resolved = self._validate(entries, pair_plans, decisions)
         assert ok, detail
-        assert resolved[0] == (right_ev, left_ev)
+        assert resolved[0] == (left_ev, right_ev)
+
+    def test_permutation_same_canonical_tuple(self):
+        """Requirement 1: ``["L0", "R0"]`` and ``["R0", "L0"]`` resolve to the
+        SAME canonical persisted EvidenceRef tuple."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        results: dict[tuple[str, ...], tuple[EvidenceRef, ...]] = {}
+        for order in (["L0", "R0"], ["R0", "L0"]):
+            decisions = [
+                {
+                    "left_candidate_ref": a, "right_candidate_ref": b,
+                    "decision": "same_entity", "reason_zh": "t.",
+                    "evidence_selectors": order,
+                },
+            ]
+            ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+            assert ok, detail
+            results[tuple(order)] = resolved[0]
+        assert results[("L0", "R0")] == results[("R0", "L0")]
+        assert results[("L0", "R0")] == (left_ev, right_ev)
+
+    def test_complex_permutation_canonical_order(self):
+        """Requirement 2: ``["R2", "L1", "R0", "L0"]`` canonicalizes to
+        ``L0, L1, R0, R2`` (left by index, then right by index)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left0 = EvidenceRef("CH001_P001", "primary", "explicit", "L0.")
+        left1 = EvidenceRef("CH001_P002", "primary", "explicit", "L1.")
+        right0 = EvidenceRef("CH001_P003", "primary", "explicit", "R0.")
+        right1 = EvidenceRef("CH001_P004", "primary", "explicit", "R1.")
+        right2 = EvidenceRef("CH001_P005", "primary", "explicit", "R2.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left0, left1)),
+            make_candidate_entry(
+                b, display_name="B", evidence=(right0, right1, right2)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R2", "L1", "R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (left0, left1, right0, right2)
+
+    def test_permutation_same_decision_id(self):
+        """Requirement 3: equivalent selector permutations produce the SAME
+        deterministic ``decision_id`` (via ``compute_llm_decision_id``)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        ids: set[str] = set()
+        for order in (["L0", "R0"], ["R0", "L0"]):
+            decisions = [
+                {
+                    "left_candidate_ref": a, "right_candidate_ref": b,
+                    "decision": "same_entity", "reason_zh": "identical reason.",
+                    "evidence_selectors": order,
+                },
+            ]
+            ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+            assert ok, detail
+            ids.add(
+                compute_llm_decision_id(
+                    left_ref=a,
+                    right_ref=b,
+                    decision="same_entity",
+                    method="llm",
+                    reason_code="llm_same_entity",
+                    reason_zh="identical reason.",
+                    evidence_refs=resolved[0],
+                    prompt_id="a4.entity-reconciliation",
+                    prompt_version=3,
+                    request_hash="reqhash",
+                )
+            )
+        assert len(ids) == 1
+
+    def test_duplicate_fails_before_canonicalization(self):
+        """Requirement 4: a duplicate selector fails BEFORE canonicalization,
+        even when mixed with other valid selectors."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev = EvidenceRef("CH001_P001", "primary", "explicit", "A.")
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "duplicate" in detail
+        assert resolved == []
+
+    def test_invalid_fails_before_canonicalization(self):
+        """Requirement 5: an invalid selector fails BEFORE canonicalization,
+        even when mixed with valid selectors (and still consumes a round)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(b, display_name="B", evidence=(
+                EvidenceRef("CH001_P002", "primary", "explicit", "B."),)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0", "X9"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "invalid evidence selector" in detail
+        assert resolved == []
+
+    def test_null_excerpt_canonical_round_trip(self):
+        """Requirement 6: a null-excerpt EvidenceRef round-trips EXACTLY through
+        canonical resolution (multi-selector order)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        left_ev_null = EvidenceRef("CH001_P001", "primary", "explicit", None)
+        right_ev = EvidenceRef("CH001_P002", "primary", "explicit", "B.")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(left_ev_null,)),
+            make_candidate_entry(b, display_name="B", evidence=(right_ev,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["R0", "L0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (left_ev_null, right_ev)
+        assert resolved[0][0].excerpt is None
 
     def test_null_excerpt_round_trips(self):
         """A selector resolving to a null-excerpt EvidenceRef round-trips null."""

@@ -18,6 +18,8 @@ This module implements the A4C semantic ambiguity-resolution slice:
         ↓
     exact pair + evidence-selector validation (fail closed, pair-scoped)
         ↓
+    canonical pair-local selector order (left-by-index, then right-by-index)
+        ↓
     selector -> exact endpoint EvidenceRef resolution (Python-owned identity)
         ↓
     ReconciliationDecision construction (method=llm)
@@ -40,11 +42,16 @@ It reuses existing authorities:
 The provider never reproduces paragraph_id / role / strength / excerpt: it
 returns pair-local evidence selectors (L0/L1/... for the decision's own left
 endpoint, R0/R1/... for its right endpoint). A4C validates each selector
-against that exact pair and resolves it to the exact endpoint EvidenceRef, so
-the provider can never cite a third candidate or alter an evidence field. An
-invalid selector fails the A4C semantic output validation and consumes a
-bounded semantic round exactly like the existing invalid-evidence behavior. The
-persisted A4 decision contracts are unchanged.
+against that exact pair (syntax, range, duplicates, no third candidate) and,
+after every selector in a decision is valid, canonicalizes the selector set to
+the frozen pair-local order (all left selectors by ascending index, then all
+right selectors by ascending index) before resolving it to the exact endpoint
+EvidenceRef objects. Canonicalizing means semantically equivalent selector
+permutations (e.g. ["L0","R0"] vs ["R0","L0"]) resolve to the SAME persisted
+EvidenceRef tuple and the SAME decision_id. An invalid selector fails the A4C
+semantic output validation and consumes a bounded semantic round exactly like
+the existing invalid-evidence behavior. The persisted A4 decision contracts are
+unchanged and selector strings never enter them.
 """
 
 from __future__ import annotations
@@ -590,6 +597,27 @@ def _block_endpoint_evidence(
     return out
 
 
+def _canonicalize_evidence_selectors(selectors: list[str]) -> list[str]:
+    """Canonicalize validated, unique pair-local selectors to the frozen order.
+
+    Frozen pair-local order (this order is authoritative for persistence):
+      1. all left selectors first, numeric index ascending;
+      2. then all right selectors, numeric index ascending.
+
+    ``["R2", "L1", "R0", "L0"]`` -> ``["L0", "L1", "R0", "R2"]``.
+
+    ``selectors`` must already be validated (``L<index>`` / ``R<index>`` form)
+    and duplicate-free; nothing is re-validated or dropped here. Canonicalizing
+    means semantically equivalent selector permutations resolve to the SAME
+    persisted EvidenceRef tuple (and therefore the SAME ``decision_id``),
+    independent of the order the provider returned them in. The endpoint
+    evidence order itself is NOT changed.
+    """
+    left = sorted((s for s in selectors if s[0] == "L"), key=lambda s: int(s[1:]))
+    right = sorted((s for s in selectors if s[0] == "R"), key=lambda s: int(s[1:]))
+    return left + right
+
+
 def _validate_selector_block_payload(
     payload: ReconciliationSelectorDecisionPayload,
     pair_plans: tuple[ReconciliationPairPlan, ...],
@@ -604,7 +632,8 @@ def _validate_selector_block_payload(
 
     Returns (is_valid, failure_detail, resolved_evidence). ``resolved_evidence``
     is aligned with ``payload.decisions`` when valid (each a tuple of the exact
-    endpoint EvidenceRefs, in the provider's selector order), otherwise empty.
+    endpoint EvidenceRefs in the CANONICAL pair-local selector order, see
+    :func:`_canonicalize_evidence_selectors`), otherwise empty.
 
     Checks (the exact pair order / ref checks are UNCHANGED from the prior
     endpoint-only validator):
@@ -615,6 +644,12 @@ def _validate_selector_block_payload(
       * no selector can reach a third candidate (L -> left endpoint, R -> right
         endpoint only)
       * no duplicate selector within a decision
+
+    Only AFTER every selector in a decision has passed syntax + range +
+    duplicate validation is the selector SET canonicalized (left selectors
+    first by index, then right selectors by index) and resolved to the exact
+    endpoint EvidenceRefs. Invalid / out-of-range / duplicate selectors always
+    fail BEFORE canonicalization and consume a bounded semantic round.
     """
     requested_pairs = [
         (p.left_candidate_ref, p.right_candidate_ref) for p in pair_plans
@@ -647,7 +682,7 @@ def _validate_selector_block_payload(
 
         left_evidence, right_evidence = endpoint_evidence[i]
         seen_selectors: set[str] = set()
-        decision_evidence: list[EvidenceRef] = []
+        validated_selectors: list[str] = []
         for selector in item.evidence_selectors:
             # Only L<index> / R<index> forms are legal (invalid prefix /
             # negative / non-integer index rejected here, at semantic time).
@@ -669,7 +704,6 @@ def _validate_selector_block_payload(
                         f"for the left endpoint "
                         f"({len(left_evidence)} evidence item(s))"
                     ), []
-                decision_evidence.append(left_evidence[index])
             else:  # "R"
                 if index >= len(right_evidence):
                     return False, (
@@ -677,6 +711,20 @@ def _validate_selector_block_payload(
                         f"for the right endpoint "
                         f"({len(right_evidence)} evidence item(s))"
                     ), []
+            validated_selectors.append(selector)
+
+        # All selectors for this decision are valid, unique, and in range.
+        # Canonicalize (left-by-index, then right-by-index) BEFORE resolving so
+        # semantically equivalent permutations persist identically.
+        canonical_selectors = _canonicalize_evidence_selectors(validated_selectors)
+
+        # Resolve the canonical selector sequence to exact endpoint EvidenceRefs.
+        decision_evidence: list[EvidenceRef] = []
+        for selector in canonical_selectors:
+            index = int(selector[1:])
+            if selector[0] == "L":
+                decision_evidence.append(left_evidence[index])
+            else:  # "R"
                 decision_evidence.append(right_evidence[index])
         resolved.append(tuple(decision_evidence))
 
@@ -745,9 +793,12 @@ def _convert_to_decision(
     """Convert a valid, selector-resolved decision to a ReconciliationDecision.
 
     ``evidence_refs`` are the exact endpoint EvidenceRefs resolved from the
-    provider's pair-local selectors (Python-owned identity). The persisted
+    provider's pair-local selectors in the canonical pair-local selector order
+    (left-by-index, then right-by-index; see
+    :func:`_canonicalize_evidence_selectors`). The persisted
     :class:`ReconciliationDecision` carries those exact EvidenceRefs -- no
-    selector strings ever appear in the persisted contract.
+    selector strings ever appear in the persisted contract, and the ordering is
+    canonical (independent of the order the provider returned the selectors).
     """
     reason_code = _REASON_CODE_MAP[decision]
     decision_id = compute_llm_decision_id(

@@ -71,7 +71,7 @@ from short_drama.story.reconciliation_validation import (
 from short_drama.foundation.validation import ValidationSeverity
 
 PROFILES = Path(__file__).resolve().parents[1] / "profiles"
-RECON_PROFILE_PATH = PROFILES / "entity_reconciliation_v1.yaml"
+RECON_PROFILE_PATH = PROFILES / "entity_reconciliation_v2.yaml"
 A4_LLM_PROFILE_PATH = PROFILES / "entity_reconciliation_llm_v1.yaml"
 
 H = "a" * 64

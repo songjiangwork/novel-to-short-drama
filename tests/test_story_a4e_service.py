@@ -186,8 +186,8 @@ def make_reconciliation_profile(**overrides) -> EntityReconciliationProfile:
         "blocking_policy_id": "a4-blocking-v1",
         "canonicalization_policy_id": "a4-canonicalization-v1",
         "prompt_id": "a4.entity-reconciliation",
-        "prompt_version": 1,
-        "output_schema_id": "a4-reconciliation-decision-payload",
+        "prompt_version": 3,
+        "output_schema_id": "a4-reconciliation-decision-selector-payload",
         "output_schema_version": 1,
         "max_generation_rounds": 2,
     }
@@ -429,20 +429,13 @@ def make_decision_payload(decisions: list[dict]) -> dict:
 def make_decision(
     left: str, right: str, decision: str = "same_entity", reason_zh: str = "测试理由。"
 ) -> dict:
-    """Build a single decision item dict."""
+    """Build a single decision item dict (pair-local evidence selector)."""
     return {
         "left_candidate_ref": left,
         "right_candidate_ref": right,
         "decision": decision,
         "reason_zh": reason_zh,
-        "evidence_refs": [
-            {
-                "paragraph_id": "CH001_P0001",
-                "role": "primary",
-                "strength": "explicit",
-                "excerpt": None,
-            }
-        ],
+        "evidence_selectors": ["L0"],
     }
 
 
@@ -503,26 +496,13 @@ def _make_decision_with_evidence(
     left: str, right: str, decision: str = "same_entity",
     left_paragraph: str = "CH001_P0001", right_paragraph: str = "CH001_P0001",
 ) -> dict:
-    """Build a decision item with per-candidate evidence."""
+    """Build a decision item citing both endpoints via pair-local selectors."""
     return {
         "left_candidate_ref": left,
         "right_candidate_ref": right,
         "decision": decision,
         "reason_zh": "测试理由。",
-        "evidence_refs": [
-            {
-                "paragraph_id": left_paragraph,
-                "role": "primary",
-                "strength": "explicit",
-                "excerpt": None,
-            },
-            {
-                "paragraph_id": right_paragraph,
-                "role": "primary",
-                "strength": "explicit",
-                "excerpt": None,
-            },
-        ],
+        "evidence_selectors": ["L0", "R0"],
     }
 
 

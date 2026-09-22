@@ -5,13 +5,12 @@ OpenAI-compatible server (llama.cpp / Qwen):
 
     synthetic in-memory A4B planning material (3 semantic pairs / 6 candidates)
       -> deterministic block packing (1 block)
-      -> candidate packet rendering
-      -> requested pair rendering
-      -> PromptRegistry rendering (a4.entity-reconciliation v1)
-      -> OutputSchema build (reconciliation-decision-payload.schema.json)
+      -> pair-context rendering (pair-local evidence selectors)
+      -> PromptRegistry rendering (a4.entity-reconciliation v3)
+      -> OutputSchema build (reconciliation-decision-selector-payload.schema.json)
       -> LLMClient.generate_structured(...)
-      -> typed payload validation
-      -> exact pair/evidence validation
+      -> typed selector payload validation
+      -> deterministic selector validation + exact EvidenceRef resolution
       -> provenance verification
       -> ReconciliationDecision construction
 
@@ -31,7 +30,7 @@ This smoke does NOT:
 Usage:
     python scripts/a4c_semantic_smoke.py \\
         --runtime-config profiles/llm_local.yaml \\
-        --reconciliation-profile profiles/entity_reconciliation_v1.yaml \\
+        --reconciliation-profile profiles/entity_reconciliation_v2.yaml \\
         --llm-profile profiles/entity_reconciliation_llm_v1.yaml
 
 Exit code 0 on success, 2 on failure.
@@ -403,7 +402,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--reconciliation-profile",
-        default="profiles/entity_reconciliation_v1.yaml",
+        default="profiles/entity_reconciliation_v2.yaml",
         help="Path to entity reconciliation profile YAML",
     )
     parser.add_argument(

@@ -164,6 +164,15 @@ MERGE_GRAPH_CANDIDATE_REF_PATTERN = (
 )
 _MERGE_GRAPH_CANDIDATE_REF_RE = re.compile(MERGE_GRAPH_CANDIDATE_REF_PATTERN)
 
+# Pair-local evidence selector (v3 provider contract). "L<index>" selects the
+# decision's own left endpoint evidence item at zero-based ``index`` and
+# "R<index>" selects the right endpoint evidence item at zero-based ``index``
+# (indices are positions in the pair's own left/right endpoint evidence lists,
+# in the order shown in the v3 prompt). This is a structural domain tightening
+# only; pair-scoped resolution (index in range, duplicate-free, no third
+# candidate) is A4C's responsibility, not A4A's.
+EVIDENCE_SELECTOR_PATTERN = r"^[LR][0-9]+$"
+
 # Canonical entity id namespaces (section 23): char_0001 / loc_0001 / unres_0001.
 _CANONICAL_ID_PATTERNS = {
     "character": re.compile(r"^char_[0-9]{4,}$"),
@@ -363,6 +372,36 @@ def _to_evidence_tuple(
             raise ReconciliationModelError(
                 f"{field_name} must contain EvidenceRef values"
             )
+    return items
+
+
+def _to_evidence_selector_tuple(
+    value: Any, field_name: str, *, min_items: int = 0
+) -> tuple[str, ...]:
+    """Normalize a pair-local evidence-selector collection (fail closed).
+
+    A4A validates only that the collection is a list of non-empty string
+    selectors. It does NOT enforce the ``L<index>`` / ``R<index>`` form, that an
+    index is in range for the pair, that selectors are duplicate-free, or that a
+    selector can reach a third candidate -- that pair-scoped semantic validation
+    is A4C's single authority (so an invalid selector fails the A4C semantic
+    output validation and consumes a bounded semantic round, exactly like the
+    existing invalid-evidence behavior).
+    """
+    if isinstance(value, str):
+        raise ReconciliationModelError(f"{field_name} must be a list of selectors")
+    try:
+        items = tuple(value)
+    except TypeError as exc:
+        raise ReconciliationModelError(
+            f"{field_name} must be a list of selectors"
+        ) from exc
+    if len(items) < min_items:
+        raise ReconciliationModelError(
+            f"{field_name} must contain at least {min_items} item(s)"
+        )
+    for item in items:
+        _require_text(item, field_name)
     return items
 
 
@@ -841,6 +880,168 @@ class ReconciliationDecisionPayload:
         return cls(
             decisions=tuple(
                 ReconciliationDecisionItem.from_dict(item)
+                for item in value["decisions"]
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# v3 pair-local evidence-selector provider payload
+#
+# The v3 provider evidence contract. The provider no longer copies the
+# underlying EvidenceRef fields (paragraph_id / role / strength / excerpt).
+# Each decision cites evidence only by pair-local selectors (L0/L1/... for the
+# decision's own left endpoint, R0/R1/... for its right endpoint); A4C
+# validates each selector against that exact pair and resolves it to the exact
+# endpoint EvidenceRef. The persisted A4 decision contracts (below) are
+# UNCHANGED.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSelectorDecisionItem:
+    """One identity decision as returned by the v3 provider (pair-local
+    evidence selectors).
+
+    ``evidence_selectors`` holds pair-local selectors: ``L<index>`` selects the
+    decision's own left endpoint evidence item at ``index`` and ``R<index>``
+    selects the right endpoint evidence item at ``index`` (both zero-based, in
+    the order shown in the v3 prompt). The host service (A4C) resolves each
+    selector to the exact endpoint EvidenceRef, so the provider can never cite
+    a third candidate or alter an evidence field.
+
+    A4A validates only the structural shape: canonical pair ordering, the
+    closed decision enum, and that every selector is a non-empty string. It
+    does NOT enforce the ``L<index>`` / ``R<index>`` form, that an index is in
+    range for the pair, that selectors are duplicate-free, or that a selector
+    can reach a third candidate -- that pair-scoped validation is A4C's single
+    authority (so an invalid selector fails the A4C semantic output validation
+    and consumes a bounded semantic round, exactly like invalid evidence).
+    """
+
+    left_candidate_ref: str
+    right_candidate_ref: str
+    decision: str
+    reason_zh: str
+    evidence_selectors: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "left_candidate_ref",
+            _require_merge_graph_candidate_ref(
+                self.left_candidate_ref,
+                "ReconciliationSelectorDecisionItem.left_candidate_ref",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "right_candidate_ref",
+            _require_merge_graph_candidate_ref(
+                self.right_candidate_ref,
+                "ReconciliationSelectorDecisionItem.right_candidate_ref",
+            ),
+        )
+        _require_pair_canonical_order(
+            self.left_candidate_ref,
+            self.right_candidate_ref,
+            left_name="left_candidate_ref",
+            right_name="right_candidate_ref",
+        )
+        _require_enum(self.decision, RECONCILIATION_DECISIONS,
+                      "ReconciliationSelectorDecisionItem.decision")
+        _require_text(self.reason_zh, "ReconciliationSelectorDecisionItem.reason_zh")
+        object.__setattr__(
+            self,
+            "evidence_selectors",
+            _to_evidence_selector_tuple(
+                self.evidence_selectors,
+                "ReconciliationSelectorDecisionItem.evidence_selectors",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "left_candidate_ref": self.left_candidate_ref,
+            "right_candidate_ref": self.right_candidate_ref,
+            "decision": self.decision,
+            "reason_zh": self.reason_zh,
+            "evidence_selectors": list(self.evidence_selectors),
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ReconciliationSelectorDecisionItem":
+        _require_exact_keys(
+            value,
+            {
+                "left_candidate_ref",
+                "right_candidate_ref",
+                "decision",
+                "reason_zh",
+                "evidence_selectors",
+            },
+            "ReconciliationSelectorDecisionItem",
+        )
+        if not isinstance(value["evidence_selectors"], list):
+            raise ReconciliationModelError(
+                "ReconciliationSelectorDecisionItem.evidence_selectors must be a list"
+            )
+        return cls(
+            left_candidate_ref=value["left_candidate_ref"],
+            right_candidate_ref=value["right_candidate_ref"],
+            decision=value["decision"],
+            reason_zh=value["reason_zh"],
+            evidence_selectors=tuple(value["evidence_selectors"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSelectorDecisionPayload:
+    """The v3 provider structured-output shape.
+
+    The provider returns ``{"decisions": [...]}`` where every requested pair
+    appears exactly once, each decision citing evidence only by pair-local
+    selectors. A4A validates only that each element is a well-formed selector
+    decision item; requested-pair coverage/uniqueness and pair-scoped selector
+    resolution are A4C validation.
+    """
+
+    decisions: tuple[ReconciliationSelectorDecisionItem, ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.decisions, ReconciliationSelectorDecisionItem):
+            raise ReconciliationModelError(
+                "ReconciliationSelectorDecisionPayload.decisions must be a list"
+            )
+        try:
+            items = tuple(self.decisions)
+        except TypeError as exc:
+            raise ReconciliationModelError(
+                "ReconciliationSelectorDecisionPayload.decisions must be a list"
+            ) from exc
+        for item in items:
+            if not isinstance(item, ReconciliationSelectorDecisionItem):
+                raise ReconciliationModelError(
+                    "ReconciliationSelectorDecisionPayload.decisions must contain "
+                    "ReconciliationSelectorDecisionItem values"
+                )
+        object.__setattr__(self, "decisions", items)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decisions": [decision.to_dict() for decision in self.decisions],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ReconciliationSelectorDecisionPayload":
+        _require_exact_keys(value, {"decisions"}, "ReconciliationSelectorDecisionPayload")
+        if not isinstance(value["decisions"], list):
+            raise ReconciliationModelError(
+                "ReconciliationSelectorDecisionPayload.decisions must be a list"
+            )
+        return cls(
+            decisions=tuple(
+                ReconciliationSelectorDecisionItem.from_dict(item)
                 for item in value["decisions"]
             ),
         )

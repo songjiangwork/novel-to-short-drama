@@ -102,7 +102,7 @@ from short_drama.story import (
 from short_drama.story.reconciliation_persistence import _verify_finalization_bundle
 
 PROFILES = Path(__file__).resolve().parents[1] / "profiles"
-RECON_PROFILE_PATH = PROFILES / "entity_reconciliation_v1.yaml"
+RECON_PROFILE_PATH = PROFILES / "entity_reconciliation_v2.yaml"
 A4_LLM_PROFILE_PATH = PROFILES / "entity_reconciliation_llm_v1.yaml"
 
 PROJECT = "proj"

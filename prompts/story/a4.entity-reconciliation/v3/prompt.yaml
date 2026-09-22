@@ -1,0 +1,38 @@
+# A4 entity reconciliation prompt — TRACKED (v1.2 A4A).
+#
+# A strict entity-identity decision prompt. It is given one reconciliation
+# block as a set of PAIR-LOCAL contexts (each pair owns its own left/right
+# endpoint packet), and returns a ReconciliationSelectorDecisionPayload with
+# exactly one decision (same_entity / different_entity / uncertain) per pair,
+# each carrying a zh-CN reason and a list of pair-local evidence selectors.
+#
+# v3 changes the provider evidence contract to PAIR-LOCAL SELECTORS. The
+# provider no longer copies or reproduces the underlying EvidenceRef fields
+# (paragraph_id / role / strength / excerpt). Instead, for each decision it
+# cites evidence only by selector: L0/L1/... selects from the decision's own
+# left endpoint evidence list (in the order shown in the prompt) and
+# R0/R1/... selects from the decision's own right endpoint evidence list (in
+# the order shown). The host service (A4C) validates every selector against
+# that exact pair and resolves it to the exact endpoint EvidenceRef, so the
+# provider can never cite a third candidate or alter an evidence field.
+#
+# The prompt is intentionally deterministic and conservative: it must judge
+# ONLY the requested pairs, preserve the given left/right candidate references
+# exactly, cite only pair-local selectors, and never merge on name similarity
+# alone (must-not-merge constraints are respected).
+#
+# The prompt is the identity-decision authority, not the merge/authority
+# authority: deterministic must-not-merge constraints and final graph
+# connected components remain the A4B/A4D authorities, and local JSON Schema
+# validation remains the schema authority.
+#
+# required_variables is EXACTLY the two block inputs. Their values are
+# deterministic canonical JSON strings built by Python (A4C). No
+# runtime/model/provider fields. v1 and v2 are preserved unchanged.
+schema_version: 1
+prompt_id: a4.entity-reconciliation
+version: 3
+required_variables:
+  - block_id
+  - pair_contexts_json
+content_hash: 82deab523546e824f4fd614f23197fccbf70365aa469a943be1cb1c93ec47f15

@@ -7,17 +7,18 @@ This module implements the A4C semantic ambiguity-resolution slice:
     deterministic semantic block packing (MAX_PAIRS_PER_BLOCK=6,
     MAX_CANDIDATES_PER_BLOCK=12)
         ↓
-    candidate packet rendering (endpoint-only, source-order)
+    pair-local context rendering (endpoint-only; each pair owns its own
+    left/right endpoint packet; evidence cited by pair-local selectors)
         ↓
-    requested pair rendering (needs_semantic_decision only)
+    PromptRegistry rendering (a4.entity-reconciliation v3)
         ↓
-    PromptRegistry rendering (a4.entity-reconciliation v1)
-        ↓
-    OutputSchema build (reconciliation-decision-payload.schema.json)
+    OutputSchema build (reconciliation-decision-selector-payload.schema.json)
         ↓
     LLMClient.generate_structured(...) — up to 2 semantic rounds per block
         ↓
-    exact pair/evidence validation
+    exact pair + evidence-selector validation (fail closed, pair-scoped)
+        ↓
+    selector -> exact endpoint EvidenceRef resolution (Python-owned identity)
         ↓
     ReconciliationDecision construction (method=llm)
         ↓
@@ -32,12 +33,23 @@ It reuses existing authorities:
   * A-I3 ``PromptRegistry`` / ``PromptSpec`` / ``RenderedPrompt`` for prompts;
   * A-I3 ``OutputSchema`` / ``LLMInvocationProvenance`` for structured output;
   * A-I3 ``SemanticLLMProfile`` for generation semantics;
-  * A4A ``ReconciliationDecision`` / ``EvidenceRef`` / ``ReconciliationDecisionPayload``.
+  * A4A ``ReconciliationDecision`` / ``EvidenceRef`` / the v3 pair-local
+    ``ReconciliationSelectorDecisionPayload`` (provider cites evidence only by
+    pair-local selectors; A4C resolves them to the exact endpoint EvidenceRefs).
+
+The provider never reproduces paragraph_id / role / strength / excerpt: it
+returns pair-local evidence selectors (L0/L1/... for the decision's own left
+endpoint, R0/R1/... for its right endpoint). A4C validates each selector
+against that exact pair and resolves it to the exact endpoint EvidenceRef, so
+the provider can never cite a third candidate or alter an evidence field. An
+invalid selector fails the A4C semantic output validation and consumes a
+bounded semantic round exactly like the existing invalid-evidence behavior. The
+persisted A4 decision contracts are unchanged.
 """
 
 from __future__ import annotations
 
-import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,10 +79,11 @@ from .errors import (
 )
 from .extraction import EvidenceRef
 from .reconciliation import (
+    EVIDENCE_SELECTOR_PATTERN,
     EntityReconciliationProfile,
     ReconciliationDecision,
-    ReconciliationDecisionItem,
-    ReconciliationDecisionPayload,
+    ReconciliationSelectorDecisionItem,
+    ReconciliationSelectorDecisionPayload,
 )
 from .reconciliation_planning import (
     PAIR_STATE_AUTO_SAME,
@@ -89,7 +102,10 @@ MAX_CANDIDATES_PER_BLOCK = 12
 
 # Default authorities (tracked prompt registry + tracked output schema).
 DEFAULT_PROMPT_BASE_DIR = REPO_ROOT / "prompts" / "story"
-DEFAULT_OUTPUT_SCHEMA_PATH = SCHEMAS_DIR / "reconciliation-decision-payload.schema.json"
+# The production A4C provider contract is the pair-local evidence-selector
+# payload (v3). The old raw-EvidenceRef payload schema is preserved for the
+# historical v1/v2 profiles but is no longer the default.
+DEFAULT_OUTPUT_SCHEMA_PATH = SCHEMAS_DIR / "reconciliation-decision-selector-payload.schema.json"
 
 # Reason code mapping: decision → reason_code
 _REASON_CODE_MAP = {
@@ -97,6 +113,15 @@ _REASON_CODE_MAP = {
     "different_entity": "llm_different_entity",
     "uncertain": "llm_uncertain",
 }
+
+# Pair-local evidence selector (v3 contract): "L<index>" selects the decision's
+# own left endpoint evidence item at zero-based ``index`` and "R<index>" selects
+# the right endpoint evidence item at ``index``. This is the single A4C authority
+# for selector validity (form, range, duplicates, no third candidate); the
+# tracked output schema is intentionally lenient (list of strings) so an invalid
+# selector reaches this semantic validation and consumes a bounded round, exactly
+# like the existing invalid-evidence behavior.
+_EVIDENCE_SELECTOR_RE = re.compile(EVIDENCE_SELECTOR_PATTERN)
 
 
 def llm_reason_code(decision: str) -> str:
@@ -128,8 +153,12 @@ class ReconciliationSemanticBlock:
     block_id: str
     pair_plans: tuple[ReconciliationPairPlan, ...]
     candidate_refs: tuple[str, ...]
-    candidate_packets_json: str
-    requested_pairs_json: str
+    # Pair-local contexts: one entry per requested pair, each carrying the pair's
+    # own left/right endpoint packet (the evidence-selection authority). The
+    # left endpoint's evidence items are the pair's L0/L1/... selectors (in
+    # order) and the right endpoint's evidence items are the R0/R1/... selectors
+    # (in order). No block-wide evidence pool is presented.
+    pair_contexts_json: str
 
 
 # ---------------------------------------------------------------------------
@@ -304,16 +333,54 @@ def _build_block_id(
     return f"a4blk_{content_hash(material)[:20]}"
 
 
-def _build_candidate_packets(
+def _endpoint_packet(entry: Any) -> dict[str, Any]:
+    """Build the pair-local endpoint packet for one candidate index entry.
+
+    The packet carries the endpoint identity material (name / aliases /
+    descriptors) and the endpoint's evidence items. The evidence items are the
+    pair's selector universe for this endpoint: index ``n`` is the selector
+    ``L<n>`` (for the left endpoint) or ``R<n>`` (for the right endpoint), in
+    the exact order of ``entry.evidence_refs``.
+
+    FAILS CLOSED (structurally) if an evidence excerpt is not a string or null.
+    """
+    evidence = []
+    for ev in entry.evidence_refs:
+        if ev.excerpt is not None and not isinstance(ev.excerpt, str):
+            raise ReconciliationSemanticError(
+                f"endpoint {entry.candidate_ref!r} has a non-string, non-null "
+                f"evidence excerpt; the tracked A3A corpus must be consistent "
+                f"for the endpoint-only evidence contract"
+            )
+        evidence.append(ev.to_dict())
+    return {
+        "candidate_ref": entry.candidate_ref,
+        "candidate_kind": entry.candidate_kind,
+        "display_name_original": entry.display_name_original,
+        "aliases_original": list(entry.aliases_original),
+        "descriptors_zh": list(entry.descriptors_zh),
+        "evidence": evidence,
+    }
+
+
+def _build_pair_contexts(
     planning_result: ReconciliationPlanningResult,
     pair_plans: list[ReconciliationPairPlan],
 ) -> tuple[str, tuple[str, ...]]:
-    """Build candidate packets for a block.
+    """Build pair-local contexts for a block.
 
-    Returns (candidate_packets_json, candidate_refs_tuple).
+    Returns (pair_contexts_json, candidate_refs_tuple).
 
-    Only includes endpoint candidates of the requested pairs, ordered by
-    source_order_key from CandidateEntityIndex.
+    Each pair context carries the pair's own left/right endpoint packet (the
+    evidence-selection authority) plus the pair signals / shared identity keys /
+    shared tokens. The left endpoint's evidence items are the pair's ``L0`` /
+    ``L1`` / ... selectors (in order) and the right endpoint's evidence items
+    are the ``R0`` / ``R1`` / ... selectors (in order). No block-wide evidence
+    pool is presented.
+
+    ``candidate_refs`` is the unique set of endpoint refs in source_order_key
+    order (the block_id material, unchanged from the prior candidate-packet
+    path so block ids stay stable).
 
     FAILS CLOSED if any endpoint ref is missing from the candidate index or
     has a non-merge-graph kind (not character/location).
@@ -342,52 +409,28 @@ def _build_candidate_packets(
             )
         endpoint_entries.append(entry)
 
-    # Sort by source_order_key (canonical A4B order)
+    # Sort by source_order_key (canonical A4B order) -> block_id candidate refs.
     endpoint_entries.sort(key=lambda e: e.source_order_key)
+    candidate_refs = tuple(e.candidate_ref for e in endpoint_entries)
 
-    # Build packet dicts (exact fields only)
-    packets = []
-    candidate_refs_ordered = []
-    for entry in endpoint_entries:
-        candidate_refs_ordered.append(entry.candidate_ref)
-        packet = {
-            "candidate_ref": entry.candidate_ref,
-            "candidate_kind": entry.candidate_kind,
-            "display_name_original": entry.display_name_original,
-            "aliases_original": list(entry.aliases_original),
-            "descriptors_zh": list(entry.descriptors_zh),
-            "source_order_key": entry.source_order_key,
-            "evidence_refs": [e.to_dict() for e in entry.evidence_refs],
-        }
-        packets.append(packet)
-
-    candidate_packets_json = canonical_json_bytes(packets).decode("utf-8")
-    return candidate_packets_json, tuple(candidate_refs_ordered)
-
-
-def _build_requested_pairs_json(
-    pair_plans: list[ReconciliationPairPlan],
-) -> str:
-    """Build the requested_pairs_json for a block.
-
-    Each pair exact fields from ReconciliationPairPlan:
-      left_candidate_ref, right_candidate_ref, signals,
-      shared_identity_keys, shared_tokens
-
-    Pairs are in the given order (already canonical-sorted by pack).
-    """
-    pairs_data = []
+    contexts = []
     for p in pair_plans:
-        pairs_data.append(
+        left = ref_to_entry[p.left_candidate_ref]
+        right = ref_to_entry[p.right_candidate_ref]
+        contexts.append(
             {
                 "left_candidate_ref": p.left_candidate_ref,
                 "right_candidate_ref": p.right_candidate_ref,
                 "signals": list(p.signals),
                 "shared_identity_keys": list(p.shared_identity_keys),
                 "shared_tokens": list(p.shared_tokens),
+                "left_endpoint": _endpoint_packet(left),
+                "right_endpoint": _endpoint_packet(right),
             }
         )
-    return canonical_json_bytes(pairs_data).decode("utf-8")
+
+    pair_contexts_json = canonical_json_bytes(contexts).decode("utf-8")
+    return pair_contexts_json, candidate_refs
 
 
 def _build_blocks(
@@ -398,10 +441,9 @@ def _build_blocks(
 
     blocks: list[ReconciliationSemanticBlock] = []
     for ordinal, pair_plans in enumerate(packed):
-        candidate_packets_json, candidate_refs = _build_candidate_packets(
+        pair_contexts_json, candidate_refs = _build_pair_contexts(
             planning_result, pair_plans
         )
-        requested_pairs_json = _build_requested_pairs_json(pair_plans)
         block_id = _build_block_id(
             planning_result.plan_hash,
             ordinal,
@@ -413,8 +455,7 @@ def _build_blocks(
                 block_id=block_id,
                 pair_plans=tuple(pair_plans),
                 candidate_refs=candidate_refs,
-                candidate_packets_json=candidate_packets_json,
-                requested_pairs_json=requested_pairs_json,
+                pair_contexts_json=pair_contexts_json,
             )
         )
 
@@ -522,27 +563,58 @@ def _verify_provenance(
 
 
 # ---------------------------------------------------------------------------
-# Pair/evidence validation
+# Pair/evidence-selector validation + resolution
 # ---------------------------------------------------------------------------
 
 
-def _validate_block_payload(
-    payload: ReconciliationDecisionPayload,
+def _block_endpoint_evidence(
+    planning_result: ReconciliationPlanningResult,
+    pair_plans: list[ReconciliationPairPlan],
+) -> list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]]:
+    """Per-pair endpoint evidence for selector resolution (aligned with plans).
+
+    Returns a list where element ``i`` is the pair ``i``'s
+    ``(left_endpoint_evidence, right_endpoint_evidence)`` -- each a tuple of the
+    exact endpoint EvidenceRefs in the SAME order shown in the pair context.
+    ``L<n>`` therefore resolves to ``left_endpoint_evidence[n]`` and ``R<n>`` to
+    ``right_endpoint_evidence[n]``. This is re-derived from the authoritative
+    candidate index so the resolved EvidenceRef is byte-for-byte the endpoint's
+    own EvidenceRef (exact identity, null excerpt preserved).
+    """
+    ref_to_entry = {e.candidate_ref: e for e in planning_result.candidate_index.entries}
+    out: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]] = []
+    for p in pair_plans:
+        left = ref_to_entry[p.left_candidate_ref]
+        right = ref_to_entry[p.right_candidate_ref]
+        out.append((left.evidence_refs, right.evidence_refs))
+    return out
+
+
+def _validate_selector_block_payload(
+    payload: ReconciliationSelectorDecisionPayload,
     pair_plans: tuple[ReconciliationPairPlan, ...],
-    candidate_packets: list[dict[str, Any]],
-) -> tuple[bool, str]:
-    """Validate a block's provider payload against exact requested pairs.
+    endpoint_evidence: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]],
+) -> tuple[bool, str, list[tuple[EvidenceRef, ...]]]:
+    """Validate a block's v3 provider payload against the exact requested pairs.
 
-    Returns (is_valid, failure_detail).
+    This is the single A4C authority for selector validity. ``endpoint_evidence``
+    is aligned with ``pair_plans``; ``L<n>`` resolves to the pair's own left
+    endpoint evidence item ``n`` and ``R<n>`` to the right endpoint evidence item
+    ``n`` (both zero-based, in the order shown in the pair context).
 
-    Checks:
-      * count exact
-      * order exact
-      * left/right refs exact
-      * no duplicate/missing/extra
-      * refs must be in block candidate packets
-      * evidence refs must be exact endpoint evidence
-      * no duplicate evidence within a decision
+    Returns (is_valid, failure_detail, resolved_evidence). ``resolved_evidence``
+    is aligned with ``payload.decisions`` when valid (each a tuple of the exact
+    endpoint EvidenceRefs, in the provider's selector order), otherwise empty.
+
+    Checks (the exact pair order / ref checks are UNCHANGED from the prior
+    endpoint-only validator):
+      * count exact, order exact, left/right refs exact
+      * each selector matches ``L<index>`` / ``R<index>`` (only these forms are
+        legal; invalid prefix / negative / non-integer index rejected)
+      * the index is in range for the pair's own endpoint (out-of-range rejected)
+      * no selector can reach a third candidate (L -> left endpoint, R -> right
+        endpoint only)
+      * no duplicate selector within a decision
     """
     requested_pairs = [
         (p.left_candidate_ref, p.right_candidate_ref) for p in pair_plans
@@ -555,67 +627,60 @@ def _validate_block_payload(
         return False, (
             f"decision count mismatch: expected {requested_count}, "
             f"got {len(decisions)}"
-        )
+        ), []
 
-    # Build the set of valid evidence per candidate ref
-    # For each candidate, collect its evidence_refs as tuples for comparison
-    candidate_evidence: dict[str, tuple[tuple, ...]] = {}
-    for packet in candidate_packets:
-        ref = packet["candidate_ref"]
-        ev_tuples = tuple(
-            (ev["paragraph_id"], ev["role"], ev["strength"], ev["excerpt"])
-            for ev in packet["evidence_refs"]
-        )
-        candidate_evidence[ref] = ev_tuples
-
+    resolved: list[tuple[EvidenceRef, ...]] = []
     for i, item in enumerate(decisions):
         expected_left, expected_right = requested_pairs[i]
 
-        # Order + ref exact
+        # Order + ref exact (UNCHANGED)
         if item.left_candidate_ref != expected_left:
             return False, (
                 f"pair {i}: left_candidate_ref mismatch: expected "
                 f"{expected_left!r}, got {item.left_candidate_ref!r}"
-            )
+            ), []
         if item.right_candidate_ref != expected_right:
             return False, (
                 f"pair {i}: right_candidate_ref mismatch: expected "
                 f"{expected_right!r}, got {item.right_candidate_ref!r}"
-            )
+            ), []
 
-        # Refs must be in block candidate packets
-        if item.left_candidate_ref not in candidate_evidence:
-            return False, (
-                f"pair {i}: left_candidate_ref {item.left_candidate_ref!r} "
-                f"not in block candidate packets"
-            )
-        if item.right_candidate_ref not in candidate_evidence:
-            return False, (
-                f"pair {i}: right_candidate_ref {item.right_candidate_ref!r} "
-                f"not in block candidate packets"
-            )
-
-        # Evidence validation
-        valid_evidence = set(
-            candidate_evidence[item.left_candidate_ref]
-            + candidate_evidence[item.right_candidate_ref]
-        )
-
-        seen_evidence: set[tuple] = set()
-        for ev in item.evidence_refs:
-            ev_tuple = (ev.paragraph_id, ev.role, ev.strength, ev.excerpt)
-            if ev_tuple not in valid_evidence:
+        left_evidence, right_evidence = endpoint_evidence[i]
+        seen_selectors: set[str] = set()
+        decision_evidence: list[EvidenceRef] = []
+        for selector in item.evidence_selectors:
+            # Only L<index> / R<index> forms are legal (invalid prefix /
+            # negative / non-integer index rejected here, at semantic time).
+            if _EVIDENCE_SELECTOR_RE.fullmatch(selector) is None:
                 return False, (
-                    f"pair {i}: evidence_ref not exact endpoint evidence: "
-                    f"{ev_tuple!r}"
-                )
-            if ev_tuple in seen_evidence:
+                    f"pair {i}: invalid evidence selector {selector!r}; only "
+                    f"L<index>/R<index> forms are legal"
+                ), []
+            if selector in seen_selectors:
                 return False, (
-                    f"pair {i}: duplicate evidence_ref: {ev_tuple!r}"
-                )
-            seen_evidence.add(ev_tuple)
+                    f"pair {i}: duplicate evidence selector: {selector!r}"
+                ), []
+            seen_selectors.add(selector)
+            index = int(selector[1:])
+            if selector[0] == "L":
+                if index >= len(left_evidence):
+                    return False, (
+                        f"pair {i}: evidence selector {selector!r} out of range "
+                        f"for the left endpoint "
+                        f"({len(left_evidence)} evidence item(s))"
+                    ), []
+                decision_evidence.append(left_evidence[index])
+            else:  # "R"
+                if index >= len(right_evidence):
+                    return False, (
+                        f"pair {i}: evidence selector {selector!r} out of range "
+                        f"for the right endpoint "
+                        f"({len(right_evidence)} evidence item(s))"
+                    ), []
+                decision_evidence.append(right_evidence[index])
+        resolved.append(tuple(decision_evidence))
 
-    return True, ""
+    return True, "", resolved
 
 
 # ---------------------------------------------------------------------------
@@ -667,35 +732,45 @@ def compute_llm_decision_id(
 
 
 def _convert_to_decision(
-    item: ReconciliationDecisionItem,
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
     request_hash: str,
     prompt_id: str,
     prompt_version: int,
     provenance: LLMInvocationProvenance,
 ) -> ReconciliationDecision:
-    """Convert a valid provider decision item to a ReconciliationDecision."""
-    reason_code = _REASON_CODE_MAP[item.decision]
+    """Convert a valid, selector-resolved decision to a ReconciliationDecision.
+
+    ``evidence_refs`` are the exact endpoint EvidenceRefs resolved from the
+    provider's pair-local selectors (Python-owned identity). The persisted
+    :class:`ReconciliationDecision` carries those exact EvidenceRefs -- no
+    selector strings ever appear in the persisted contract.
+    """
+    reason_code = _REASON_CODE_MAP[decision]
     decision_id = compute_llm_decision_id(
-        left_ref=item.left_candidate_ref,
-        right_ref=item.right_candidate_ref,
-        decision=item.decision,
+        left_ref=left_ref,
+        right_ref=right_ref,
+        decision=decision,
         method="llm",
         reason_code=reason_code,
-        reason_zh=item.reason_zh,
-        evidence_refs=item.evidence_refs,
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
         prompt_id=prompt_id,
         prompt_version=prompt_version,
         request_hash=request_hash,
     )
     return ReconciliationDecision(
         decision_id=decision_id,
-        left_candidate_ref=item.left_candidate_ref,
-        right_candidate_ref=item.right_candidate_ref,
-        decision=item.decision,
+        left_candidate_ref=left_ref,
+        right_candidate_ref=right_ref,
+        decision=decision,
         method="llm",
         reason_code=reason_code,
-        reason_zh=item.reason_zh,
-        evidence_refs=item.evidence_refs,
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
         prompt_id=prompt_id,
         prompt_version=prompt_version,
         generation_provenance=provenance,
@@ -767,8 +842,7 @@ def prepare_semantic_resolution(
     for block in blocks:
         variables = {
             "block_id": block.block_id,
-            "candidate_packets_json": block.candidate_packets_json,
-            "requested_pairs_json": block.requested_pairs_json,
+            "pair_contexts_json": block.pair_contexts_json,
         }
         rendered_prompt = render_prompt(prompt_spec, variables)
         request = build_structured_request(
@@ -862,8 +936,11 @@ def resolve_semantic_ambiguity(
         rendered_prompt = request.rendered_prompt
         output_schema = request.output_schema
 
-        # Parse candidate packets for evidence validation
-        candidate_packets = json.loads(block.candidate_packets_json)
+        # Per-pair endpoint evidence for selector resolution (re-derived from the
+        # authoritative candidate index; aligned with block.pair_plans).
+        endpoint_evidence = _block_endpoint_evidence(
+            planning_result, list(block.pair_plans)
+        )
 
         # Bounded semantic generation (max 2 rounds)
         max_rounds = profile.max_generation_rounds
@@ -891,24 +968,35 @@ def resolve_semantic_ambiguity(
 
             # Typed domain load (only typed-model rejection triggers retry)
             try:
-                payload = ReconciliationDecisionPayload.from_dict(result.parsed_json)
+                payload = ReconciliationSelectorDecisionPayload.from_dict(
+                    result.parsed_json
+                )
             except ReconciliationModelError:
                 last_failure = "typed payload load failed"
                 continue
 
-            # Exact pair/evidence validation
-            is_valid, failure_detail = _validate_block_payload(
-                payload, block.pair_plans, candidate_packets
+            # Exact pair + evidence-selector validation (pair-scoped, fail
+            # closed). An invalid selector reaches HERE (the tracked output
+            # schema is lenient) and consumes a bounded semantic round, exactly
+            # like the existing invalid-evidence behavior.
+            is_valid, failure_detail, resolved_evidence = (
+                _validate_selector_block_payload(
+                    payload, block.pair_plans, endpoint_evidence
+                )
             )
             if not is_valid:
                 last_failure = failure_detail
                 continue
 
-            # Valid: convert to decisions
-            for item in payload.decisions:
+            # Valid: resolve selectors to exact endpoint EvidenceRefs and convert
+            for item, resolved in zip(payload.decisions, resolved_evidence):
                 block_decisions.append(
                     _convert_to_decision(
-                        item,
+                        left_ref=item.left_candidate_ref,
+                        right_ref=item.right_candidate_ref,
+                        decision=item.decision,
+                        reason_zh=item.reason_zh,
+                        evidence_refs=resolved,
                         request_hash=request.request_hash,
                         prompt_id=rendered_prompt.prompt_id,
                         prompt_version=rendered_prompt.prompt_version,

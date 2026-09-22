@@ -70,9 +70,9 @@ from short_drama.story import (
 
 PROMPTS_STORY_DIR = REPO_ROOT / "prompts" / "story"
 A4_PROMPT_ID = "a4.entity-reconciliation"
-A4_PROMPT_VERSION = 1
+A4_PROMPT_VERSION = 2
 PROMPT_CONTENT_HASH = (
-    "e9bf883330e449f7b19553df4c21b3ff38c24e5f766a93ca1ce483bcf885bc1d"
+    "0e54ffd284e984a5b8d2932351744a4a9032c06248fa25a96225d743263ba7d9"
 )
 
 RECON_PROFILE_PATH = PROFILES_DIR / "entity_reconciliation_v1.yaml"
@@ -131,7 +131,7 @@ def make_provenance(**overrides) -> LLMInvocationProvenance:
         "semantic_profile_id": "entity-reconciliation-llm-v1",
         "semantic_profile_hash": H,
         "prompt_id": A4_PROMPT_ID,
-        "prompt_version": 1,
+        "prompt_version": A4_PROMPT_VERSION,
         "prompt_content_hash": PROMPT_CONTENT_HASH,
         "rendered_prompt_hash": H2,
         "output_schema_id": "a4-reconciliation-decision-payload",
@@ -190,7 +190,7 @@ def make_decision(**overrides) -> ReconciliationDecision:
         "reason_zh": "证据不足以判定同一或不同。",
         "evidence_refs": (make_evidence(),),
         "prompt_id": A4_PROMPT_ID,
-        "prompt_version": 1,
+        "prompt_version": A4_PROMPT_VERSION,
         "generation_provenance": make_provenance(),
     }
     values.update(overrides)
@@ -385,7 +385,7 @@ class TestReconciliationProfile:
         profile = load_entity_reconciliation_profile(RECON_PROFILE_PATH)
         assert profile.profile_id == "entity-reconciliation-v1"
         assert profile.prompt_id == A4_PROMPT_ID
-        assert profile.prompt_version == 1
+        assert profile.prompt_version == 2
         assert profile.max_generation_rounds == RECONCILIATION_MAX_GENERATION_ROUNDS_V1
 
     def test_profile_hash_is_stable(self) -> None:
@@ -592,7 +592,7 @@ class TestReconciliationDecision:
             make_decision(
                 method="deterministic",
                 prompt_id=A4_PROMPT_ID,
-                prompt_version=1,
+                prompt_version=A4_PROMPT_VERSION,
                 generation_provenance=make_provenance(),
             )
 
@@ -1153,6 +1153,116 @@ class TestTrackedA4Assets:
                     "candidate_packets_json": "[]",
                 },
             )
+
+
+class TestPromptV2Contract:
+    """Issue #39: prompt v2 aligns the provider evidence contract with the
+    strict A4C endpoint-only validator.
+
+    These are text-level contract assertions on the tracked prompt v2 (and the
+    tracked reconciliation profile that pins it). The strict validator itself
+    is covered in ``test_story_a4c_semantic.py``.
+    """
+
+    @staticmethod
+    def _system_text() -> str:
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        spec = registry.load(A4_PROMPT_ID, version=2)
+        assert spec.version == 2
+        # Collapse wrapping whitespace so phrase assertions are stable.
+        return " ".join(spec.system_template.split())
+
+    @staticmethod
+    def _user_text() -> str:
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        spec = registry.load(A4_PROMPT_ID, version=2)
+        return " ".join(spec.user_template.split())
+
+    def test_v1_preserved_unchanged(self) -> None:
+        """v1 is preserved and still carries its original pinned hash."""
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        v1 = registry.load(A4_PROMPT_ID, version=1)
+        assert (
+            v1.content_hash
+            == "e9bf883330e449f7b19553df4c21b3ff38c24e5f766a93ca1ce483bcf885bc1d"
+        )
+
+    def test_v2_pinned_hash_deterministic(self) -> None:
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        spec = registry.load(A4_PROMPT_ID, version=2)
+        assert spec.content_hash == PROMPT_CONTENT_HASH
+        assert tuple(spec.required_variables) == (
+            "block_id",
+            "candidate_packets_json",
+            "requested_pairs_json",
+        )
+
+    def test_requires_endpoint_only_evidence(self) -> None:
+        text = self._system_text()
+        assert "Evidence is PAIR-ENDPOINT-SCOPED" in text
+        assert "taken from those two endpoint packets" in text
+
+    def test_forbids_evidence_from_other_block_candidates(self) -> None:
+        text = self._system_text()
+        assert (
+            "No other candidate packet in this block may contribute an "
+            "evidence_ref to this decision"
+            in text
+        )
+
+    def test_locates_both_endpoint_packets(self) -> None:
+        text = self._system_text()
+        assert "exactly equals this decision's `left_candidate_ref`" in text
+        assert "exactly equals this decision's `right_candidate_ref`" in text
+
+    def test_requires_exact_four_field_copy(self) -> None:
+        text = self._system_text()
+        assert "Copy every selected evidence_ref's four fields EXACTLY" in text
+        for field in ("`paragraph_id`", "`role`", "`strength`", "`excerpt`"):
+            assert field in text
+        assert "Never paraphrase, normalize, shorten, expand, repair, or substitute" in text
+
+    def test_requires_self_verify_before_citing(self) -> None:
+        text = self._system_text()
+        assert "match EXACTLY one existing evidence item" in text
+        assert "If you cannot verify an exact match to an endpoint item, do not cite it" in text
+
+    def test_documents_null_excerpt(self) -> None:
+        text = self._system_text()
+        assert "`excerpt` may be a string OR null" in text
+        assert "`\"excerpt\": null`, copy `null` exactly" in text
+
+    def test_empty_evidence_still_allowed(self) -> None:
+        text = self._system_text()
+        assert "an empty `evidence_refs` list" in text
+
+    def test_preserves_pair_count_order_and_refs(self) -> None:
+        text = self._system_text()
+        assert "Emit exactly one decision per requested pair" in text
+        assert (
+            "preserving the given left and right candidate references exactly"
+            in text
+        )
+
+    def test_user_scope_is_pair_endpoint_scoped(self) -> None:
+        text = self._user_text()
+        assert (
+            "A decision may ONLY cite evidence from the two endpoint packets"
+            in text
+        )
+
+    def test_tracked_profile_pins_v2(self) -> None:
+        profile = load_entity_reconciliation_profile(RECON_PROFILE_PATH)
+        assert profile.prompt_id == A4_PROMPT_ID
+        assert profile.prompt_version == 2
+        # The pinned prompt must load deterministically at the pinned version
+        # and match the tracked content hash.
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        spec = registry.load(profile.prompt_id, version=profile.prompt_version)
+        assert spec.content_hash == PROMPT_CONTENT_HASH
+        # Profile hash is deterministic and reflects the pinned prompt version.
+        assert profile.profile_hash == content_hash(profile.to_dict())
+        assert len(profile.profile_hash) == 64
 
 
 class TestExports:

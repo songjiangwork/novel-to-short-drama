@@ -73,6 +73,7 @@ from short_drama.story.reconciliation_semantic import (
     _build_candidate_packets,
     _build_requested_pairs_json,
     _pack_semantic_blocks,
+    _validate_block_payload,
     _validate_decision_coverage,
     _verify_provenance,
 )
@@ -1093,6 +1094,286 @@ class TestInvalidOutputRetry:
         assert exc_info.value.rounds_attempted == 2
         assert exc_info.value.block_id.startswith("a4blk_")
         assert len(exc_info.value.expected_pairs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: Endpoint-evidence validation (Issue #39)
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointEvidenceValidation:
+    """Issue #39: the strict A4C endpoint-evidence validator stays authoritative.
+
+    The validator is prompt-agnostic, but the full-path tests here pin the
+    production configuration (tracked profile -> prompt v2 + tracked prompt v2)
+    so the endpoint-only contract is proven end-to-end. The direct tests call
+    ``_validate_block_payload`` to assert the exact acceptance/rejection outcome.
+    """
+
+    def _plans_and_packets(self, entries, pair_plans):
+        """Build the single-block (pair_plans, candidate_packets) for validation."""
+        result = make_planning_result(entries, pair_plans)
+        blocks = _build_blocks(result)
+        assert len(blocks) == 1
+        block = blocks[0]
+        packets = json.loads(block.candidate_packets_json)
+        return block.pair_plans, packets
+
+    @staticmethod
+    def _payload(decisions):
+        return ReconciliationDecisionPayload.from_dict({"decisions": decisions})
+
+    def _validate(self, entries, pair_plans, decisions):
+        plans, packets = self._plans_and_packets(entries, pair_plans)
+        payload = self._payload(decisions)
+        return _validate_block_payload(payload, plans, packets)
+
+    # -- Rejection cases -----------------------------------------------------
+
+    def test_third_candidate_evidence_rejected(self):
+        """Citing evidence from a non-endpoint candidate in the block -> FAIL."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        c, d = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A evidence."),)),
+            make_candidate_entry(b, display_name="B", evidence=(
+                EvidenceRef("CH001_P002", "primary", "explicit", "B evidence."),)),
+            make_candidate_entry(c, display_name="C", evidence=(
+                EvidenceRef("CH001_P003", "primary", "explicit", "C evidence."),)),
+            make_candidate_entry(d, display_name="D", evidence=(
+                EvidenceRef("CH001_P004", "primary", "explicit", "D evidence."),)),
+        )
+        pair_plans = (make_pair_plan(a, b), make_pair_plan(c, d))
+        # Pair (a, b) cites C's evidence -- a third candidate for this pair.
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [{"paragraph_id": "CH001_P003", "role": "primary",
+                                   "strength": "explicit", "excerpt": "C evidence."}],
+            },
+            {
+                "left_candidate_ref": c, "right_candidate_ref": d,
+                "decision": "different_entity", "reason_zh": "t.",
+                "evidence_refs": [],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "not exact endpoint evidence" in detail
+
+    def test_wrong_paragraph_rejected(self):
+        """Same role/strength/excerpt but wrong paragraph -> FAIL."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [{"paragraph_id": "CH001_P009", "role": "primary",
+                                   "strength": "explicit", "excerpt": "X."}],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "not exact endpoint evidence" in detail
+
+    def test_wrong_role_rejected(self):
+        """Correct paragraph but wrong role -> FAIL."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "supporting",
+                                   "strength": "explicit", "excerpt": "X."}],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "not exact endpoint evidence" in detail
+
+    def test_wrong_strength_rejected(self):
+        """Correct paragraph/role but wrong strength -> FAIL."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
+                                   "strength": "implied", "excerpt": "X."}],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "not exact endpoint evidence" in detail
+
+    def test_changed_excerpt_rejected(self):
+        """Paraphrased/changed excerpt -> FAIL."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
+                                   "strength": "explicit", "excerpt": "X changed."}],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "not exact endpoint evidence" in detail
+
+    # -- Acceptance cases ----------------------------------------------------
+
+    def test_valid_exact_endpoint_accepted(self):
+        """An exact copy of an endpoint EvidenceRef -> accepted."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "X."),)),
+            make_candidate_entry(b, display_name="B", evidence=(
+                EvidenceRef("CH001_P002", "primary", "explicit", "Y."),)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [
+                    {"paragraph_id": "CH001_P001", "role": "primary",
+                     "strength": "explicit", "excerpt": "X."},
+                    {"paragraph_id": "CH001_P002", "role": "primary",
+                     "strength": "explicit", "excerpt": "Y."},
+                ],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+
+    def test_null_endpoint_excerpt_copied_accepted(self):
+        """A null endpoint excerpt copied exactly -> accepted."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", None),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
+                                   "strength": "explicit", "excerpt": None}],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+
+    def test_empty_evidence_accepted(self):
+        """Empty evidence_refs remains accepted (behavior unchanged)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A"),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "uncertain", "reason_zh": "t.",
+                "evidence_refs": [],
+            },
+        ]
+        ok, detail = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+
+    # -- Full-path (production config: profile -> prompt v2) -----------------
+
+    def _resolve(self, entries, pair_plans, payloads):
+        result = make_planning_result(entries, pair_plans)
+        client = FakeLLMClient(payloads)
+        res = resolve_semantic_ambiguity(
+            result, make_profile(prompt_version=2), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        return res, client
+
+    def test_full_path_third_candidate_retries_then_recovers(self):
+        """End-to-end: third-candidate evidence consumes a round, then recovers."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        c, d = f"{CHUNK_ID}:cand_char_003", f"{CHUNK_ID}:cand_char_004"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A evidence."),)),
+            make_candidate_entry(b, display_name="B"),
+            make_candidate_entry(c, display_name="C", evidence=(
+                EvidenceRef("CH001_P003", "primary", "explicit", "C evidence."),)),
+            make_candidate_entry(d, display_name="D"),
+        )
+        pair_plans = (make_pair_plan(a, b), make_pair_plan(c, d))
+        invalid = {"decisions": [
+            {"left_candidate_ref": a, "right_candidate_ref": b,
+             "decision": "same_entity", "reason_zh": "t.",
+             "evidence_refs": [{"paragraph_id": "CH001_P003", "role": "primary",
+                                "strength": "explicit", "excerpt": "C evidence."}]},
+            {"left_candidate_ref": c, "right_candidate_ref": d,
+             "decision": "different_entity", "reason_zh": "t.", "evidence_refs": []},
+        ]}
+        valid = {"decisions": [
+            {"left_candidate_ref": a, "right_candidate_ref": b,
+             "decision": "same_entity", "reason_zh": "t.",
+             "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
+                                "strength": "explicit", "excerpt": "A evidence."}]},
+            {"left_candidate_ref": c, "right_candidate_ref": d,
+             "decision": "different_entity", "reason_zh": "t.", "evidence_refs": []},
+        ]}
+        res, client = self._resolve(entries, pair_plans, [invalid, valid])
+        assert client.call_count == 2
+        assert len(res.semantic_decisions) == 2
+
+    def test_full_path_null_excerpt_copied_accepted(self):
+        """End-to-end: a null endpoint excerpt copied exactly is accepted."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", None),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        payload = {"decisions": [
+            {"left_candidate_ref": a, "right_candidate_ref": b,
+             "decision": "same_entity", "reason_zh": "t.",
+             "evidence_refs": [{"paragraph_id": "CH001_P001", "role": "primary",
+                                "strength": "explicit", "excerpt": None}]},
+        ]}
+        res, client = self._resolve(entries, pair_plans, [payload])
+        assert client.call_count == 1
+        assert res.semantic_decisions[0].evidence_refs[0].excerpt is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,35 @@
+# A4 entity reconciliation prompt — TRACKED (v1.2 A4A).
+#
+# A strict entity-identity decision prompt. It is given one reconciliation
+# block (a small closed set of candidate character/location mentions) plus the
+# requested candidate pairs, and returns a ReconciliationDecisionPayload with
+# exactly one decision (same_entity / different_entity / uncertain) per pair,
+# each carrying a zh-CN reason and evidence_refs (chunk_id + quote_id).
+#
+# The prompt is intentionally deterministic and conservative: it must judge
+# ONLY the requested pairs, preserve the given left/right candidate references
+# exactly, cite evidence present in the candidate packets, and never merge on
+# name similarity alone (must-not-merge constraints are respected).
+#
+# v2 aligns the evidence contract with the strict A4C endpoint-only validator:
+# evidence for a decision is PAIR-ENDPOINT-SCOPED (only the decision's own
+# left/right endpoint packets), every selected EvidenceRef must copy all four
+# fields exactly, and `excerpt` may be a string or null (a null endpoint
+# excerpt is copied exactly). v1 is preserved unchanged.
+#
+# The prompt is the identity-decision authority, not the merge/authority
+# authority: deterministic must-not-merge constraints and final graph
+# connected components remain the A4B/A4D authorities, and local JSON Schema
+# validation remains the schema authority.
+#
+# required_variables is EXACTLY the three block inputs. Their values are
+# deterministic canonical JSON strings built by Python (A4C). No
+# runtime/model/provider fields.
+schema_version: 1
+prompt_id: a4.entity-reconciliation
+version: 2
+required_variables:
+  - block_id
+  - candidate_packets_json
+  - requested_pairs_json
+content_hash: 0e54ffd284e984a5b8d2932351744a4a9032c06248fa25a96225d743263ba7d9

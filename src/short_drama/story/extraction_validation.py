@@ -475,6 +475,102 @@ def _validate_candidate_evidence(
 
 
 # ---------------------------------------------------------------------------
+# Deterministic excerpt sanitization (Issue #37 amendment)
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_evidence(
+    evidence: tuple[EvidenceRef, ...],
+    paragraph_index: dict[str, Any],
+) -> tuple[EvidenceRef, ...]:
+    """Return a new evidence tuple with mismatched non-null excerpts nulled.
+
+    For each :class:`EvidenceRef`:
+      * ``excerpt is None`` is preserved;
+      * an unresolvable ``paragraph_id`` is left unchanged (the semantic
+        validator remains authoritative and still BLOCKS it);
+      * a non-null excerpt that IS an exact contiguous substring of the
+        referenced paragraph's ``text_original`` is preserved byte-for-byte;
+      * a non-null excerpt that is NOT an exact contiguous substring has only
+        its ``excerpt`` value replaced with ``None``.
+
+    No excerpt is inferred, normalized, fuzzy-matched, translated, shortened,
+    or rewritten, and no other evidence field is touched. Input is never
+    mutated.
+    """
+    sanitized: list[EvidenceRef] = []
+    for ref in evidence:
+        if ref.excerpt is not None:
+            paragraph = paragraph_index.get(ref.paragraph_id)
+            if paragraph is not None and ref.excerpt not in paragraph.text_original:
+                ref = replace(ref, excerpt=None)
+        sanitized.append(ref)
+    return tuple(sanitized)
+
+
+def sanitize_candidate_payload_excerpts(
+    payload: CandidatePayload,
+    source_document: SourceDocument,
+) -> CandidatePayload:
+    """Deterministic pre-validation excerpt sanitizer (Issue #37 amendment).
+
+    A service-boundary transformation applied to a typed
+    :class:`~short_drama.story.extraction.CandidatePayload` *before* normal A3B
+    semantic validation. It replaces only a non-null evidence ``excerpt`` that
+    is not an exact contiguous substring of its referenced paragraph's
+    ``text_original`` with ``None``.
+
+    ``paragraph_id`` remains the source-location authority. Exact non-null
+    excerpts are preserved byte-for-byte; already-null excerpts and
+    unresolvable ``paragraph_id``s are left unchanged, so every other semantic
+    violation (missing paragraph, evidence outside context, primary evidence
+    outside ownership, missing primary evidence, local-ref / namespace /
+    self-reference, ...) is untouched and still BLOCKS under
+    :func:`validate_candidate_payload`.
+
+    This is a deterministic, total transformation: it never mutates the input
+    and returns a new :class:`CandidatePayload` built with the repository's
+    existing model conventions. It never repairs, normalizes, or infers a
+    replacement excerpt, and it introduces no retry.
+    """
+    if not isinstance(payload, CandidatePayload):
+        raise StoryIntegrityError("payload must be a CandidatePayload")
+    if not isinstance(source_document, SourceDocument):
+        raise StoryIntegrityError(
+            "source_document must be an exact A1 SourceDocument"
+        )
+    paragraph_index = source_document.paragraph_index()
+    return CandidatePayload(
+        characters=tuple(
+            replace(c, evidence=_sanitize_evidence(c.evidence, paragraph_index))
+            for c in payload.characters
+        ),
+        locations=tuple(
+            replace(c, evidence=_sanitize_evidence(c.evidence, paragraph_index))
+            for c in payload.locations
+        ),
+        facts=tuple(
+            replace(c, evidence=_sanitize_evidence(c.evidence, paragraph_index))
+            for c in payload.facts
+        ),
+        events=tuple(
+            replace(c, evidence=_sanitize_evidence(c.evidence, paragraph_index))
+            for c in payload.events
+        ),
+        relationships=tuple(
+            replace(c, evidence=_sanitize_evidence(c.evidence, paragraph_index))
+            for c in payload.relationships
+        ),
+        unresolved_mentions=tuple(
+            replace(
+                c, evidence=_sanitize_evidence(c.evidence, paragraph_index)
+            )
+            for c in payload.unresolved_mentions
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Canonicalization
 # ---------------------------------------------------------------------------
 

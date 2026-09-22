@@ -178,6 +178,60 @@ def invalid_payload() -> CandidatePayload:
     )
 
 
+def mismatched_excerpt_payload() -> CandidatePayload:
+    """Otherwise-valid payload with ONE mismatched excerpt + one exact excerpt.
+
+    ``cand_char_001``'s excerpt is NOT a substring of its paragraph, so the
+    Issue #37 sanitizer nulls it; ``cand_char_002``'s excerpt IS an exact
+    substring and is preserved byte-for-byte. After sanitization the payload
+    passes A3B on semantic round 1 (no second generation call).
+    """
+    return CandidatePayload(
+        characters=(
+            make_character(
+                "cand_char_001",
+                "林晚",
+                (make_evidence("CH001_P0003", excerpt="不存在的文字"),),
+            ),
+            make_character(
+                "cand_char_002",
+                "老师",
+                (make_evidence("CH001_P0004", excerpt="老师正在"),),
+            ),
+        ),
+    )
+
+
+def non_excerpt_failure_payload() -> CandidatePayload:
+    """Genuine non-excerpt semantic failure (dangling local ref) + one
+    mismatched excerpt (which the sanitizer nulls away).
+
+    After sanitization the ONLY remaining finding is the dangling ref
+    (``A3_LOCAL_REF_NOT_FOUND``) -- no ``A3_EVIDENCE_EXCERPT_MISMATCH`` -- so
+    the existing bounded semantic-regeneration behavior still applies.
+    """
+    return CandidatePayload(
+        characters=(
+            make_character(
+                "cand_char_001",
+                "林晚",
+                (make_evidence("CH001_P0003", excerpt="不存在的文字"),),
+            ),
+        ),
+        facts=(
+            FactCandidate(
+                candidate_id="cand_fact_001",
+                fact_type="identity",
+                statement_zh="林晚是老李的女儿。",
+                subject_refs=("cand_char_999",),  # dangling local ref
+                object_refs=(),
+                evidence_strength="explicit",
+                evidence=(make_evidence("CH001_P0003"),),
+            ),
+        ),
+    )
+
+
 def uncertainty_payload() -> CandidatePayload:
     """A legitimate unresolved/uncertain payload that PASSES A3B (no retry)."""
     return CandidatePayload(
@@ -937,6 +991,76 @@ def test_typed_domain_rejection_twice_exhausts_without_findings(tmp_path):
     with pytest.raises(Exception):
         h.store.get("candidate_extraction", _extraction_artifact_id(), 1)
     assert _current_target_ref(h) is None
+
+
+# ===========================================================================
+# Issue #37: deterministic excerpt sanitization before semantic validation
+# ===========================================================================
+
+
+def test_one_mismatched_excerpt_sanitizes_and_passes_on_round1(tmp_path):
+    # An otherwise-valid payload whose only defect is one mismatched excerpt
+    # sanitizes (excerpt -> None) and passes on semantic round 1 with NO second
+    # generation call.
+    h = make_harness(tmp_path)
+    client = FakeLLMClient([_dict(mismatched_excerpt_payload())])
+    result = run(h, client)
+    assert client.call_count == 1
+    assert result.reused is False
+    assert result.candidate_extraction_ref.revision == 1
+
+
+def test_published_extraction_contains_null_for_sanitized_excerpt(tmp_path):
+    # Only the sanitized payload is published: the mismatched excerpt is
+    # persisted as ``null``; the exact excerpt is preserved byte-for-byte. The
+    # inaccurate source quote is never persisted.
+    h = make_harness(tmp_path)
+    run(h, FakeLLMClient([_dict(mismatched_excerpt_payload())]))
+    ref = _current_target_ref(h)
+    loaded = load_candidate_extraction(h.store, ref)
+    by_id = {
+        c.candidate_id: c for c in loaded.candidates.characters
+    }
+    assert by_id["cand_char_001"].evidence[0].excerpt is None
+    assert by_id["cand_char_002"].evidence[0].excerpt == "老师正在"
+    # and the persisted payload still re-validates to PASS
+    from short_drama.story import validate_candidate_payload
+
+    assert validate_candidate_payload(
+        loaded.candidates, h.source_document, h.source_chunk
+    ).is_valid is True
+
+
+def test_exact_rerun_reuses_sanitized_validated_current(tmp_path):
+    # An exact rerun of a chunk whose CURRENT was produced by sanitizing a
+    # mismatched excerpt reuses that validated CURRENT with zero provider calls.
+    h = make_harness(tmp_path)
+    first = run(h, FakeLLMClient([_dict(mismatched_excerpt_payload())]))
+    assert first.reused is False
+    second_client = FakeLLMClient([_dict(mismatched_excerpt_payload())])
+    second = run(h, second_client)
+    assert second.reused is True
+    assert second_client.call_count == 0
+    assert second.candidate_extraction_ref == first.candidate_extraction_ref
+    loaded = load_candidate_extraction(h.store, second.candidate_extraction_ref)
+    by_id = {c.candidate_id: c for c in loaded.candidates.characters}
+    assert by_id["cand_char_001"].evidence[0].excerpt is None
+
+
+def test_non_excerpt_failure_still_bounded_regeneration(tmp_path):
+    # A genuine non-excerpt semantic failure (dangling local ref) still drives
+    # the existing bounded regeneration: both rounds consume a call and exhaust,
+    # and the sanitizer removed the excerpt defect (no excerpt-mismatch finding).
+    h = make_harness(tmp_path)
+    client = FakeLLMClient(
+        [_dict(non_excerpt_failure_payload()), _dict(non_excerpt_failure_payload())]
+    )
+    with pytest.raises(ExtractionSemanticGenerationError) as exc_info:
+        run(h, client)
+    assert client.call_count == 2
+    codes = {f.code for f in exc_info.value.final_findings}
+    assert "A3_LOCAL_REF_NOT_FOUND" in codes
+    assert "A3_EVIDENCE_EXCERPT_MISMATCH" not in codes
 
 
 # ===========================================================================

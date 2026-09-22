@@ -90,7 +90,10 @@ from .extraction_persistence import (
     CandidateExtractionService,
     request_semantic_fields,
 )
-from .extraction_validation import validate_candidate_payload
+from .extraction_validation import (
+    sanitize_candidate_payload_excerpts,
+    validate_candidate_payload,
+)
 from .persistence import (
     load_source_chunk,
     load_source_document,
@@ -336,6 +339,16 @@ class ChunkExtractionService:
                 last_findings = ()
                 last_validation_result = None
                 continue
+            # 7c'. Deterministic excerpt sanitization (Issue #37): before
+            #     semantic validation, replace any non-null evidence excerpt
+            #     that is not an exact contiguous substring of its referenced
+            #     paragraph with None. ``paragraph_id`` remains the
+            #     source-location authority; unresolvable paragraph ids and all
+            #     other semantic content are left unchanged so the existing
+            #     validator remains authoritative and still BLOCKS every other
+            #     violation. The sanitized payload (not the raw provider
+            #     payload) is what is validated and published.
+            payload = sanitize_candidate_payload_excerpts(payload, source_document)
             # 7d. A3B semantic validation.
             validation = validate_candidate_payload(
                 payload, source_document, source_chunk

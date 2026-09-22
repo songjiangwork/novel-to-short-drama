@@ -32,7 +32,11 @@ working_language: zh-CN
 # policies themselves are implemented in A4B; A4A only pins their identities.
 # Changing a policy's semantics MUST change its identity.
 name_normalization_policy_id: a4-name-normalization-v1
-blocking_policy_id: a4-blocking-v1
+# v2 adopts the production A4B blocking-v2 identity (a4-blocking-v2:
+# blocking-only {the, of} token exclusion + supplemental cross-chunk
+# adjacency). Keep in lockstep with
+# reconciliation_planning.BLOCKING_POLICY_ID.
+blocking_policy_id: a4-blocking-v2
 canonicalization_policy_id: a4-canonicalization-v1
 
 # Reconciliation prompt identity pinned for this profile.

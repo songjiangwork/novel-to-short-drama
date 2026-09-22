@@ -1,0 +1,13 @@
+Reconciliation block: {{block_id}}
+
+Candidate packets (structured context for this block). A decision may ONLY cite
+evidence from the two endpoint packets named by that decision's own
+`left_candidate_ref` and `right_candidate_ref`, and must copy those four fields
+exactly:
+{{candidate_packets_json}}
+
+Requested pairs (judge every pair; preserve the given left/right references
+exactly):
+{{requested_pairs_json}}
+
+Return the ReconciliationDecisionPayload JSON now.

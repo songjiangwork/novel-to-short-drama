@@ -25,8 +25,13 @@ blocking_policy_id: a4-blocking-v1
 canonicalization_policy_id: a4-canonicalization-v1
 
 # Reconciliation prompt identity pinned for this profile.
+#
+# v2 aligns the provider evidence contract with the strict A4C endpoint-only
+# validator: evidence for a decision is pair-endpoint-scoped, every selected
+# EvidenceRef copies all four fields exactly, and excerpt may be null (copied
+# exactly). See docs/v1.2-A4C-semantic-ambiguity-resolution-implementation-plan.md.
 prompt_id: a4.entity-reconciliation
-prompt_version: 1
+prompt_version: 2
 
 # Structured-output schema identity pinned for this profile.
 output_schema_id: a4-reconciliation-decision-payload

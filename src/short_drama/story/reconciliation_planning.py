@@ -71,8 +71,19 @@ from .errors import ReconciliationPlanningError
 # ---------------------------------------------------------------------------
 
 NAME_NORMALIZATION_POLICY_ID = "a4-name-normalization-v1"
-BLOCKING_POLICY_ID = "a4-blocking-v1"
+BLOCKING_POLICY_ID = "a4-blocking-v2"
 CANONICALIZATION_POLICY_ID = "a4-canonicalization-v1"
+
+# ---------------------------------------------------------------------------
+# a4-blocking-v2 minimal function-word exclusion (frozen)
+# ---------------------------------------------------------------------------
+# This set belongs ONLY to identity-token blocking overlap (the
+# IDENTITY_TOKEN_OVERLAP signal and the shared_tokens recorded in a pair plan).
+# It is NOT a generic stopword list and must not be applied to
+# extract_identity_keys(), extract_blocking_tokens() (raw extraction),
+# is_strong_identity_key(), exact identity-key authority, or persisted
+# names/aliases. See docs/v1.2-A4B-blocking-v2-refinement-plan.md.
+_BLOCKING_TOKEN_EXCLUSIONS_V2: frozenset[str] = frozenset({"the", "of"})
 
 # ---------------------------------------------------------------------------
 # Category ordinals for source_order_key
@@ -229,6 +240,36 @@ def extract_blocking_tokens(identity_keys: tuple[str, ...]) -> tuple[str, ...]:
             if len(token) >= 2 and not token.isdigit():
                 tokens.add(token)
     return tuple(sorted(tokens))
+
+
+def effective_blocking_tokens(
+    raw_blocking_tokens: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Apply the a4-blocking-v2 minimal function-word exclusion.
+
+    Pipeline: raw identity tokens → remove the frozen set → effective tokens.
+
+    This filter belongs ONLY to identity-token blocking overlap (the
+    IDENTITY_TOKEN_OVERLAP signal and the shared_tokens recorded in a pair
+    plan). It must NOT change ``normalize_name()``, ``extract_identity_keys()``,
+    the raw token-extraction semantics used by strong-key classification,
+    ``is_strong_identity_key()``, exact identity-key authority, or persisted
+    names/aliases. The narrow seam is intentionally applied at the blocking
+    boundary (see ``_plan_from_candidate_index``), not inside
+    ``extract_blocking_tokens`` or ``is_strong_identity_key``.
+
+    Deterministic and idempotent: the result is the sorted, unique subset of
+    the input that excludes ``_BLOCKING_TOKEN_EXCLUSIONS_V2``.
+    """
+    return tuple(
+        sorted(
+            {
+                token
+                for token in raw_blocking_tokens
+                if token not in _BLOCKING_TOKEN_EXCLUSIONS_V2
+            }
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1105,7 +1146,7 @@ def _generate_blocked_pairs(
                     shared_tokens=(token,),
                 )
 
-    # --- Adjacent chunk windows (exact frozen policy) ---
+    # --- Same-chunk adjacency (a4-blocking-v2 generative recall safety net) ---
     # (entity_type, chunk_ordinal) → ordered candidate refs
     chunk_buckets: dict[tuple[str, int], list[str]] = {}
     for entry in merge_entries:
@@ -1118,7 +1159,11 @@ def _generate_blocked_pairs(
             chunk_buckets[bucket_key] = []
         chunk_buckets[bucket_key].append(entry.candidate_ref)
 
-    # Same chunk: generate combinations inside each bucket
+    # Same chunk: generate combinations inside each bucket (still generative).
+    # Two same-type candidates in the same chunk get a pair on source proximity
+    # alone, even with no exact identity key and no effective token overlap.
+    # This is a deliberate conservative recall safety net; v2 does NOT adopt
+    # Policy C (which would delete these pairs).
     for (entity_type, ordinal), refs in chunk_buckets.items():
         if len(refs) < 2:
             continue
@@ -1129,22 +1174,26 @@ def _generate_blocked_pairs(
                     SIGNAL_ADJACENT_CHUNK,
                 )
 
-    # Adjacent chunks: cross-product ordinal × (ordinal+1) only.
-    # Canonical iteration ensures each boundary is generated exactly once.
-    for (entity_type, ordinal), refs in chunk_buckets.items():
-        next_refs = chunk_buckets.get((entity_type, ordinal + 1))
-        if next_refs is None:
-            continue
-        for ref_a in refs:
-            for ref_b in next_refs:
-                _add_pair(
-                    ref_a, ref_b,
-                    SIGNAL_ADJACENT_CHUNK,
-                )
-
     # --- Hard must-not-merge constraints (already canonicalized at boundary) ---
     for (left, right) in must_not_merge:
         _add_pair(left, right, SIGNAL_HARD_MUST_NOT_MERGE)
+
+    # --- Cross-chunk adjacency is supplemental, NOT generative (a4-blocking-v2) ---
+    # Two candidates in chunks with ordinal distance exactly 1 do NOT create a
+    # pair on adjacency alone (cross-chunk adjacency-only → implicit
+    # not_compared). But if a pair already exists because of an exact identity
+    # key, an effective identity-token overlap, a same-chunk adjacency
+    # (distance 0), or a hard constraint, we additionally attach the
+    # adjacent_chunk deterministic signal. We iterate only over already-existing
+    # pairs (bounded by the explicit plan) — never a whole-document N² scan and
+    # never a cross-chunk candidate-bucket Cartesian product.
+    for (left, right) in pairs:
+        left_ordinal = chunk_ordinal_map.get(left)
+        right_ordinal = chunk_ordinal_map.get(right)
+        if left_ordinal is None or right_ordinal is None:
+            continue
+        if abs(left_ordinal - right_ordinal) == 1:
+            pairs[(left, right)]["signals"].add(SIGNAL_ADJACENT_CHUNK)
 
     return pairs
 
@@ -1254,7 +1303,14 @@ def _plan_from_candidate_index(
                 entry.display_name_original, entry.aliases_original
             )
             identity_keys_map[entry.candidate_ref] = keys
-            tokens_map[entry.candidate_ref] = extract_blocking_tokens(keys)
+            # a4-blocking-v2: raw identity tokens → blocking-only function-word
+            # filter → effective blocking tokens. Only this (filtered) token set
+            # feeds the IDENTITY_TOKEN_OVERLAP buckets and the recorded
+            # shared_tokens; strong-key classification still uses the raw
+            # extract_blocking_tokens() semantics.
+            tokens_map[entry.candidate_ref] = effective_blocking_tokens(
+                extract_blocking_tokens(keys)
+            )
         else:
             identity_keys_map[entry.candidate_ref] = ()
             tokens_map[entry.candidate_ref] = ()

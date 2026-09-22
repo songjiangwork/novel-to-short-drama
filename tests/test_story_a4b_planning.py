@@ -53,6 +53,7 @@ from short_drama.story import (
     SourceChapter,
     UnresolvedMentionCandidate,
     derive_must_not_merge_constraints,
+    effective_blocking_tokens,
     extract_blocking_tokens,
     extract_identity_keys,
     is_strong_identity_key,
@@ -1245,8 +1246,10 @@ class TestBlocking:
         assert SIGNAL_IDENTITY_TOKEN_OVERLAP in plan.signals
         assert "john" in plan.shared_tokens
 
-    def test_adjacent_chunk_produces_block(self):
-        """Characters in adjacent chunks get blocked by adjacency."""
+    def test_cross_chunk_adjacency_only_absent(self):
+        """Characters in adjacent chunks with no exact key and no effective
+        token overlap are NOT blocked (a4-blocking-v2: cross-chunk adjacency is
+        supplemental, not generative → implicit not_compared)."""
         source_doc_ref = make_source_document_ref()
         chunk_ref1 = make_source_chunk_ref("CH001_C001")
         chunk_ref2 = make_source_chunk_ref("CH001_C002")
@@ -1309,11 +1312,10 @@ class TestBlocking:
             ),
         )
         result = plan_reconciliation(snapshot)
-        assert len(result.pair_plans) == 1
-        plan = result.pair_plans[0]
-        assert SIGNAL_ADJACENT_CHUNK in plan.signals
-        assert SIGNAL_EXACT_IDENTITY_KEY not in plan.signals
-        assert SIGNAL_IDENTITY_TOKEN_OVERLAP not in plan.signals
+        # a4-blocking-v2: cross-chunk adjacency alone is NOT generative, so
+        # Alice (chunk 1) and Bob (chunk 2) with no exact key / no effective
+        # token overlap produce NO explicit pair (implicit not_compared).
+        assert len(result.pair_plans) == 0
 
     def test_distant_no_signal_absent(self):
         """Characters in chunks distance 2 apart with no shared signals → NOT blocked."""
@@ -1470,6 +1472,464 @@ class TestBlocking:
         plan = result.pair_plans[0]
         assert plan.signals == tuple(sorted(plan.signals))
         assert len(plan.signals) == len(set(plan.signals))
+
+
+# ===========================================================================
+# a4-blocking-v2 tests (token exclusion + adjacency semantics)
+# ===========================================================================
+
+
+def _build_char_snapshot_by_chunk(
+    chunk_order: list[str],
+    chunk_to_names: dict[str, list[str]],
+) -> ReconciliationInputSnapshot:
+    """Build a multi-chunk snapshot with specific character names per chunk.
+
+    Chunks are ordered by ``chunk_order``. Candidate ``i`` in a chunk uses the
+    chunk's i-th paragraph as evidence. A chunk not present in ``chunk_to_names``
+    (or with an empty list) yields an extraction with no candidates.
+    """
+    source_doc_ref = make_source_document_ref()
+    source_doc = make_source_document(num_paragraphs=len(chunk_order) * 5 + 5)
+    chunk_refs = [make_source_chunk_ref(cid) for cid in chunk_order]
+    chunks = [
+        make_source_chunk(
+            chunk_id=cid,
+            source_document_ref=source_doc_ref,
+            paragraph_ids=tuple(
+                f"CH001_P{i:04d}" for i in range(c * 5 + 1, c * 5 + 6)
+            ),
+        )
+        for c, cid in enumerate(chunk_order)
+    ]
+    exts = []
+    for c, (cid, cref) in enumerate(zip(chunk_order, chunk_refs)):
+        para_ids = tuple(f"CH001_P{i:04d}" for i in range(c * 5 + 1, c * 5 + 6))
+        names = chunk_to_names.get(cid, [])
+        chars = tuple(
+            make_character(
+                candidate_id=f"cand_char_{i + 1:03d}",
+                display_name_original=name,
+                evidence=make_evidence(para_ids[i]),
+            )
+            for i, name in enumerate(names)
+        )
+        exts.append(
+            make_extraction(
+                chunk_id=cid,
+                source_document_ref=source_doc_ref,
+                source_chunk_ref=cref,
+                characters=chars,
+            )
+        )
+    manifest = make_chunk_manifest(
+        chunk_refs=tuple(chunk_refs), source_document_ref=source_doc_ref
+    )
+    return ReconciliationInputSnapshot(
+        source_document=source_doc,
+        source_document_ref=source_doc_ref,
+        chunk_manifest=manifest,
+        source_chunks=tuple(chunks),
+        source_chunk_refs=tuple(chunk_refs),
+        candidate_extractions=tuple(exts),
+        candidate_extraction_refs=tuple(
+            make_extraction_ref(cid) for cid in chunk_order
+        ),
+        a3_validation_report_refs=tuple(
+            make_validation_report_ref(cid) for cid in chunk_order
+        ),
+    )
+
+
+class TestBlockingV2TokenExclusion:
+    """Direct tests of the a4-blocking-v2 blocking-only minimal token filter."""
+
+    def test_the_token_only_excluded(self):
+        assert effective_blocking_tokens(("the",)) == ()
+
+    def test_of_token_only_excluded(self):
+        assert effective_blocking_tokens(("of",)) == ()
+
+    def test_the_and_of_combined_excluded(self):
+        assert effective_blocking_tokens(("the", "of")) == ()
+
+    def test_meaningful_token_survives(self):
+        assert effective_blocking_tokens(("the", "white", "rabbit")) == (
+            "rabbit",
+            "white",
+        )
+
+    def test_filter_deterministic_and_idempotent(self):
+        raw = ("of", "the", "white", "rabbit", "white")
+        once = effective_blocking_tokens(raw)
+        twice = effective_blocking_tokens(once)
+        assert once == ("rabbit", "white")
+        assert once == twice
+        # sorted + unique
+        assert once == tuple(sorted(set(once)))
+
+    def test_raw_extraction_unchanged(self):
+        """extract_blocking_tokens() (raw) still emits 'the'/'of'; only the
+        blocking seam filters them. This is what keeps strong-key classification
+        (which reads raw tokens) stable."""
+        assert extract_blocking_tokens(("the white rabbit",)) == (
+            "rabbit",
+            "the",
+            "white",
+        )
+
+    def test_identity_keys_unchanged_by_filter(self):
+        """The filter must not touch normalized identity keys."""
+        assert extract_identity_keys("the", ()) == ("the",)
+        assert extract_identity_keys("the White Rabbit", ()) == ("the white rabbit",)
+        # ...yet it yields no effective blocking token for pure function-word key
+        assert effective_blocking_tokens(extract_blocking_tokens(("the",))) == ()
+
+    def test_strong_key_classification_unchanged_by_filter(self):
+        """A 2-token key containing 'the' remains strong even though 'the' is in
+        the exclusion set — strong/weak classification must not drift."""
+        assert is_strong_identity_key("the smith") is True
+        # raw tokens drive the classifier (2 tokens → strong)
+        assert extract_blocking_tokens(("the smith",)) == ("smith", "the")
+        # effective blocking tokens drop 'the' (1 token)
+        assert effective_blocking_tokens(("smith", "the")) == ("smith",)
+
+
+class TestBlockingV2PairGeneration:
+    """End-to-end pair generation under a4-blocking-v2 semantics."""
+
+    def test_the_token_only_does_not_create_lexical_block(self):
+        # Shared raw token == {the} only, candidates in chunks distance 2 apart
+        # (so no adjacency), no exact key → NO pair.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002", "CH001_C003"],
+            {"CH001_C001": ["the Alpha"], "CH001_C003": ["the Beta"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 0
+
+    def test_of_token_only_does_not_create_lexical_block(self):
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002", "CH001_C003"],
+            {"CH001_C001": ["of Alpha"], "CH001_C003": ["of Beta"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 0
+
+    def test_the_plus_of_token_only_does_not_create_lexical_block(self):
+        # Shared raw tokens == {the, of} only → NO effective overlap.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002", "CH001_C003"],
+            {
+                "CH001_C001": ["the Alpha of Gamma"],
+                "CH001_C003": ["the Beta of Delta"],
+            },
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 0
+
+    def test_meaningful_token_overlap_survives(self):
+        # White Rabbit <-> the White Rabbit: effective shared tokens rabbit+white.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002", "CH001_C003"],
+            {
+                "CH001_C001": ["the White Rabbit"],
+                "CH001_C003": ["White Rabbit"],
+            },
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 1
+        plan = result.pair_plans[0]
+        assert SIGNAL_IDENTITY_TOKEN_OVERLAP in plan.signals
+        # recorded shared_tokens are EFFECTIVE (no 'the'), deterministic + sorted
+        assert plan.shared_tokens == ("rabbit", "white")
+        assert "the" not in plan.shared_tokens
+        assert "of" not in plan.shared_tokens
+        # distance 2 → no supplemental adjacent_chunk
+        assert SIGNAL_ADJACENT_CHUNK not in plan.signals
+
+    def test_same_chunk_adjacency_only_survives(self):
+        # No exact key, no effective token overlap, but same chunk → adjacency.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"],
+            {"CH001_C001": ["Zebra", "Yak"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 1
+        plan = result.pair_plans[0]
+        assert plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
+        assert plan.signals == (SIGNAL_ADJACENT_CHUNK,)
+
+    def test_cross_chunk_adjacency_only_absent(self):
+        # Adjacent chunks, no exact key, no effective token overlap → NO pair.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["Zebra"], "CH001_C002": ["Yak"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 0
+
+    def test_cross_chunk_exact_key_pair_survives(self):
+        # Adjacent chunks, exact strong key → pair exists with exact signal.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["John Smith"], "CH001_C002": ["John Smith"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 1
+        plan = result.pair_plans[0]
+        assert SIGNAL_EXACT_IDENTITY_KEY in plan.signals
+        assert plan.shared_identity_keys == ("john smith",)
+
+    def test_cross_chunk_meaningful_token_pair_survives(self):
+        # Adjacent chunks, effective token overlap (no exact key) → pair exists.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["White Rabbit"], "CH001_C002": ["the White Rabbit"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 1
+        plan = result.pair_plans[0]
+        assert SIGNAL_IDENTITY_TOKEN_OVERLAP in plan.signals
+        assert plan.shared_tokens == ("rabbit", "white")
+        assert SIGNAL_EXACT_IDENTITY_KEY not in plan.signals
+
+    def test_supplemental_adjacent_chunk_on_existing_exact_key_pair(self):
+        # An already-existing cross-chunk exact-key pair in adjacent chunks gets
+        # the supplemental adjacent_chunk deterministic signal.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["John Smith"], "CH001_C002": ["John Smith"]},
+        )
+        result = plan_reconciliation(snapshot)
+        plan = result.pair_plans[0]
+        assert SIGNAL_EXACT_IDENTITY_KEY in plan.signals
+        assert SIGNAL_ADJACENT_CHUNK in plan.signals
+        assert plan.signals == tuple(sorted(plan.signals))
+
+    def test_supplemental_adjacent_chunk_on_existing_token_pair(self):
+        # An already-existing cross-chunk token pair in adjacent chunks gets the
+        # supplemental adjacent_chunk deterministic signal.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["White Rabbit"], "CH001_C002": ["the White Rabbit"]},
+        )
+        result = plan_reconciliation(snapshot)
+        plan = result.pair_plans[0]
+        assert SIGNAL_IDENTITY_TOKEN_OVERLAP in plan.signals
+        assert SIGNAL_ADJACENT_CHUNK in plan.signals
+
+    def test_same_chunk_adjacency_supplemental_not_duplicated(self):
+        # A same-chunk pair already has adjacent_chunk from the generative window;
+        # the supplemental step (distance 0) must not corrupt/duplicate signals.
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["Zebra", "Yak"], "CH001_C002": ["Fox"]},
+        )
+        result = plan_reconciliation(snapshot)
+        # only the same-chunk (Zebra,Yak) pair exists; (Fox,*) is cross-chunk-only
+        assert len(result.pair_plans) == 1
+        plan = result.pair_plans[0]
+        assert plan.signals == (SIGNAL_ADJACENT_CHUNK,)
+
+
+class TestBlockingV2UnchangedSemantics:
+    """Confirm v2 does not disturb exact-key / strong-weak / auto_same / scope."""
+
+    def test_exact_key_semantics_unchanged(self):
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"],
+            {"CH001_C001": ["John Smith", "John Smith"]},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 1
+        plan = result.pair_plans[0]
+        assert SIGNAL_EXACT_IDENTITY_KEY in plan.signals
+        assert plan.shared_identity_keys == ("john smith",)
+
+    def test_auto_same_semantics_unchanged(self):
+        # shared strong exact key → deterministic auto_same (unchanged by v2).
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"],
+            {"CH001_C001": ["John Smith", "John Smith"]},
+        )
+        result = plan_reconciliation(snapshot)
+        plan = result.pair_plans[0]
+        assert plan.state == PAIR_STATE_AUTO_SAME
+        assert len(result.decisions) == 1
+        assert result.decisions[0].reason_code == "same_strong_exact_identity_key"
+
+    def test_weak_key_stays_semantic(self):
+        # single-token exact key (weak) → needs_semantic_decision (unchanged).
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"],
+            {"CH001_C001": ["John", "John"]},
+        )
+        result = plan_reconciliation(snapshot)
+        plan = result.pair_plans[0]
+        assert plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
+
+    def test_char_location_still_absent(self):
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            characters=(
+                make_character(
+                    candidate_id="cand_char_001",
+                    display_name_original="White Rabbit",
+                    evidence=make_evidence("CH001_P0001"),
+                ),
+            ),
+            locations=(
+                make_location(
+                    candidate_id="cand_loc_001",
+                    display_name_original="White Rabbit",
+                    evidence=make_evidence("CH001_P0002"),
+                ),
+            ),
+        )
+        snapshot = build_single_chunk_snapshot(ext)
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 0
+
+    def test_unresolved_still_absent(self):
+        source_doc_ref = make_source_document_ref()
+        chunk_ref = make_source_chunk_ref("CH001_C001")
+        ext = make_extraction(
+            chunk_id="CH001_C001",
+            source_document_ref=source_doc_ref,
+            source_chunk_ref=chunk_ref,
+            characters=(
+                make_character(
+                    candidate_id="cand_char_001",
+                    display_name_original="White Rabbit",
+                    evidence=make_evidence("CH001_P0001"),
+                ),
+                make_character(
+                    candidate_id="cand_char_002",
+                    display_name_original="White Rabbit",
+                    evidence=make_evidence("CH001_P0002"),
+                ),
+            ),
+            unresolved=(
+                make_unresolved(
+                    candidate_id="cand_unres_001",
+                    mention_original="White Rabbit",
+                    evidence=make_evidence("CH001_P0003"),
+                ),
+            ),
+        )
+        snapshot = build_single_chunk_snapshot(ext)
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 1
+        for plan in result.pair_plans:
+            assert "cand_unres" not in plan.left_candidate_ref
+            assert "cand_unres" not in plan.right_candidate_ref
+
+
+class TestBlockingV2DeterministicIdentity:
+    """Policy identity + deterministic ordering/sorting/hash under v2."""
+
+    def test_blocking_policy_id_is_v2(self):
+        assert BLOCKING_POLICY_ID == "a4-blocking-v2"
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"], {"CH001_C001": ["Zebra", "Yak"]}
+        )
+        result = plan_reconciliation(snapshot)
+        assert result.blocking_policy_id == "a4-blocking-v2"
+
+    def test_pair_ordering_deterministic(self):
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"], {"CH001_C001": ["Zebra", "Yak", "Fox"]}
+        )
+        result1 = plan_reconciliation(snapshot)
+        result2 = plan_reconciliation(snapshot)
+        keys1 = [(p.left_candidate_ref, p.right_candidate_ref) for p in result1.pair_plans]
+        keys2 = [(p.left_candidate_ref, p.right_candidate_ref) for p in result2.pair_plans]
+        assert keys1 == keys2
+        assert keys1 == sorted(keys1)
+
+    def test_signals_deterministic_and_sorted(self):
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["White Rabbit"], "CH001_C002": ["the White Rabbit"]},
+        )
+        result = plan_reconciliation(snapshot)
+        for plan in result.pair_plans:
+            assert plan.signals == tuple(sorted(plan.signals))
+            assert len(plan.signals) == len(set(plan.signals))
+
+    def test_shared_tokens_deterministic_and_sorted(self):
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002", "CH001_C003"],
+            {
+                "CH001_C001": ["the White Rabbit"],
+                "CH001_C003": ["White Rabbit"],
+            },
+        )
+        result = plan_reconciliation(snapshot)
+        plan = result.pair_plans[0]
+        assert plan.shared_tokens == tuple(sorted(plan.shared_tokens))
+        assert plan.shared_tokens == ("rabbit", "white")
+
+    def test_plan_hash_deterministic(self):
+        snapshot1 = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["White Rabbit"], "CH001_C002": ["the White Rabbit"]},
+        )
+        snapshot2 = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": ["White Rabbit"], "CH001_C002": ["the White Rabbit"]},
+        )
+        assert plan_reconciliation(snapshot1).plan_hash == plan_reconciliation(snapshot2).plan_hash
+
+    def test_v2_identity_not_silently_equivalent_to_v1(self):
+        """plan_hash material embeds the v2 blocking policy id; reconstructing
+        the same material under a4-blocking-v1 yields a different hash."""
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001"], {"CH001_C001": ["Zebra", "Yak"]}
+        )
+        result = plan_reconciliation(snapshot)
+        sorted_plans = sorted(
+            result.pair_plans,
+            key=lambda p: (p.left_candidate_ref, p.right_candidate_ref),
+        )
+        base = {
+            "normalization_policy_id": result.normalization_policy_id,
+            "canonicalization_policy_id": result.canonicalization_policy_id,
+            "candidate_index": result.candidate_index.to_dict(),
+            "pair_plans": [p.to_dict() for p in sorted_plans],
+        }
+        material_v2 = dict(base, blocking_policy_id="a4-blocking-v2")
+        material_v1 = dict(base, blocking_policy_id="a4-blocking-v1")
+        assert content_hash(material_v2) == result.plan_hash
+        assert content_hash(material_v1) != result.plan_hash
+
+
+class TestBlockingV2Complexity:
+    """No whole-document N² / no cross-chunk Cartesian product under v2."""
+
+    def test_no_cross_chunk_cartesian_product(self):
+        """Two adjacent chunks, 3 distinct-name candidates each → exactly 6
+        same-chunk pairs (2 × C(3,2)). A cross-chunk Cartesian product would add
+        3×3 = 9 (total 15); a whole-document N² would give C(6,2) = 15 too."""
+        names_a = ["Zebra", "Yak", "Wombat"]
+        names_b = ["Koala", "Quokka", "Emu"]
+        snapshot = _build_char_snapshot_by_chunk(
+            ["CH001_C001", "CH001_C002"],
+            {"CH001_C001": names_a, "CH001_C002": names_b},
+        )
+        result = plan_reconciliation(snapshot)
+        assert len(result.pair_plans) == 6
+        # every pair is same-chunk
+        for plan in result.pair_plans:
+            left_chunk = plan.left_candidate_ref.split(":", 1)[0]
+            right_chunk = plan.right_candidate_ref.split(":", 1)[0]
+            assert left_chunk == right_chunk
+            assert plan.signals == (SIGNAL_ADJACENT_CHUNK,)
 
 
 # ===========================================================================
@@ -1673,12 +2133,17 @@ class TestMustNotMergeOverride:
 
 
 class TestNoN2:
-    def test_exact_adjacency_window_pair_count(self):
-        """5 chunks × 2 chars → exactly 21 adjacency-window pairs.
+    def test_same_chunk_adjacency_only_pair_count(self):
+        """5 chunks × 2 chars (all distinct names) → exactly 5 same-chunk
+        adjacency pairs (a4-blocking-v2).
 
         Same chunk: 5 × C(2,2) = 5
-        Adjacent boundaries: 4 × (2 × 2) = 16
-        Total: 21
+        Cross-chunk adjacency: NOT generative in v2, so 0 cross-chunk pairs.
+        Total: 5
+
+        This proves the planner uses indexed/same-chunk-window generation (not a
+        whole-document N² scan, and not a cross-chunk bucket Cartesian product):
+        N² would give C(10,2) = 45 and the v1 cross-chunk window would give 21.
         """
         source_doc_ref = make_source_document_ref()
         num_chunks = 5
@@ -1732,11 +2197,11 @@ class TestNoN2:
         )
         result = plan_reconciliation(snapshot)
 
-        # Exact count: 5 same-chunk + 16 adjacent = 21
-        assert len(result.pair_plans) == 21
+        # Exact count: 5 same-chunk only (v2: cross-chunk adjacency not generative)
+        assert len(result.pair_plans) == 5
 
-        # Verify every pair has distance <= 1
-        # Build chunk ordinal map from candidate refs
+        # Verify every pair is SAME chunk (distance 0): no cross-chunk pair is
+        # generated on adjacency alone, and no whole-document N² scan occurs.
         def get_chunk_ordinal(ref: str) -> int:
             chunk_id = ref.split(":", 1)[0]
             return chunk_ids.index(chunk_id) + 1
@@ -1744,10 +2209,10 @@ class TestNoN2:
         for plan in result.pair_plans:
             left_ord = get_chunk_ordinal(plan.left_candidate_ref)
             right_ord = get_chunk_ordinal(plan.right_candidate_ref)
-            assert abs(left_ord - right_ord) <= 1, (
+            assert left_ord == right_ord, (
                 f"pair {plan.left_candidate_ref} (ord {left_ord}) vs "
-                f"{plan.right_candidate_ref} (ord {right_ord}) has distance "
-                f">{1}"
+                f"{plan.right_candidate_ref} (ord {right_ord}) is cross-chunk; "
+                f"v2 cross-chunk adjacency must not be generative"
             )
             assert plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
             assert SIGNAL_ADJACENT_CHUNK in plan.signals

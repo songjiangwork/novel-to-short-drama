@@ -184,21 +184,21 @@ def _local_candidate_suffix(local_id: str) -> int:
 
 def _source_order_key(
     *, chunk_ordinal: int, para_ordinal: int, category_ordinal: int,
-    suffix: int, local_id: str,
+    suffix: int, global_ref: str,
 ) -> str:
     """Compute the A5B source-order key for one consolidation candidate.
 
-    Format (the A5B source-order authority)::
+    Format (the frozen A5B source-order authority)::
 
         {chunk_ordinal:06d}:{paragraph_ordinal:09d}:{category_ordinal:02d}:
         {candidate_suffix:09d}:{candidate_ref}
 
-    where ``candidate_ref`` is the exact A3 local candidate ref. All numeric
-    fields are zero-padded to a fixed width, so the lexicographic order of the
-    keys is exactly the total (chunk, paragraph, category, suffix) source
-    order. The key is derived from the exact source location (chunk position in
-    ``ChunkManifest.chunk_refs`` + the candidate's primary-source paragraph
-    within the chunk) -- never from the LLM payload order.
+    where ``candidate_ref`` is the exact A5 *global* candidate ref
+    (``<chunk_id>:<local_candidate_id>``). All numeric fields are zero-padded
+    to a fixed width, so the lexicographic order of the keys is exactly the
+    total (chunk, paragraph, category, suffix) source order; the embedded
+    global candidate ref is a deterministic final identity marker / tie-break
+    (never copied from the LLM payload order).
     """
     if chunk_ordinal < 1 or para_ordinal < 1 or category_ordinal < 1 or suffix < 1:
         raise StoryIntegrityError(
@@ -206,22 +206,65 @@ def _source_order_key(
         )
     return (
         f"{chunk_ordinal:06d}:{para_ordinal:09d}:{category_ordinal:02d}"
-        f":{suffix:09d}:{local_id}"
+        f":{suffix:09d}:{global_ref}"
     )
 
 
-def _primary_paragraph_id(evidence: tuple) -> str:
-    """Return the paragraph id of the candidate's first primary evidence.
+def _anchor_paragraph_ordinal(
+    evidence: tuple,
+    *,
+    paragraph_rank: dict[str, int],
+    candidate_ref: str,
+) -> int:
+    """Return the exact SourceDocument paragraph ordinal of a candidate anchor.
 
-    A3 guarantees >= 1 primary evidence per candidate; the first (in A3 order)
-    primary anchors the candidate's source paragraph.
+    The A5B source anchor is the earliest (by exact SourceDocument rank) among:
+
+      * the PRIMARY evidence refs, if there is at least one; otherwise
+      * all evidence refs (the frozen no-primary fallback).
+
+    Evidence-array order is NOT the source authority: the minimum SourceDocument
+    rank wins (frozen rule: earliest PRIMARY by source rank; else earliest
+    evidence). Fail closed when the candidate has no evidence, or an evidence
+    paragraph is absent from the exact SourceDocument (never inferred).
     """
-    for ref in evidence:
-        if ref.role == "primary":
-            return ref.paragraph_id
-    raise StoryIntegrityError(
-        "candidate has no primary evidence; cannot derive source-order key"
-    )
+    if not evidence:
+        raise StoryIntegrityError(
+            f"candidate {candidate_ref!r} has no evidence; cannot derive "
+            "source-order key"
+        )
+    primary = [ref for ref in evidence if ref.role == "primary"]
+    pool = primary if primary else list(evidence)
+    best: int | None = None
+    for ref in pool:
+        ordinal = paragraph_rank.get(ref.paragraph_id)
+        if ordinal is None:
+            raise StoryIntegrityError(
+                f"candidate {candidate_ref!r} evidence paragraph "
+                f"{ref.paragraph_id!r} is not in the exact SourceDocument; "
+                "source anchor is unresolvable"
+            )
+        if best is None or ordinal < best:
+            best = ordinal
+    assert best is not None
+    return best
+
+
+def _stable_dedupe(seq: tuple[str, ...]) -> tuple[str, ...]:
+    """Stable exact dedupe: preserve first occurrence, drop later duplicates.
+
+    The identity is the exact bound-ID string. This is NOT a lexical reorder
+    (upstream source order may carry semantic value) and it does NOT merge
+    distinct ``unres_*`` ids -- it only collapses exact duplicates produced by
+    A4 aliasing (multiple local refs binding to one A4 canonical id).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in seq:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return tuple(out)
 
 
 def _verify_ref_closure(
@@ -541,49 +584,58 @@ def build_consolidation_candidate_index(
     unres_kinds = {
         e.unresolved_id: e.entity_kind for e in snapshot.unresolved_entity_set.entities
     }
+    # Exact SourceDocument paragraph-rank authority: 1-based position in the
+    # exact SourceDocument.paragraphs (NOT the position within a SourceChunk).
+    # This is the single A5B source-order paragraph authority for every
+    # candidate anchor, derived from the exact A4-pinned SourceDocument.
+    paragraph_rank = {
+        paragraph.paragraph_id: index + 1
+        for index, paragraph in enumerate(snapshot.source_document.paragraphs)
+    }
 
     facts: list[IndexedFactCandidate] = []
     events: list[IndexedEventCandidate] = []
     relationships: list[IndexedRelationshipCandidate] = []
 
-    for chunk_ordinal, (source_chunk, extraction) in enumerate(
-        zip(snapshot.source_chunks, snapshot.candidate_extractions), start=1
+    for chunk_ordinal, extraction in enumerate(
+        snapshot.candidate_extractions, start=1
     ):
         chunk_id = extraction.chunk_id
-        para_ordinal = {
-            pid: index + 1 for index, pid in enumerate(source_chunk.paragraph_ids)
-        }
         ext_ref = snapshot.candidate_extraction_refs[chunk_ordinal - 1]
 
         def _key(local_id: str, category_ordinal: int, evidence: tuple) -> str:
-            para = _primary_paragraph_id(evidence)
-            if para not in para_ordinal:
-                raise StoryIntegrityError(
-                    f"chunk {chunk_id}: candidate {local_id!r} primary evidence "
-                    f"paragraph {para!r} is not a paragraph of the source chunk"
-                )
+            global_ref = f"{chunk_id}:{local_id}"
+            para_ordinal = _anchor_paragraph_ordinal(
+                evidence,
+                paragraph_rank=paragraph_rank,
+                candidate_ref=global_ref,
+            )
             return _source_order_key(
                 chunk_ordinal=chunk_ordinal,
-                para_ordinal=para_ordinal[para],
+                para_ordinal=para_ordinal,
                 category_ordinal=category_ordinal,
                 suffix=_local_candidate_suffix(local_id),
-                local_id=local_id,
+                global_ref=global_ref,
             )
 
         for fact in extraction.candidates.facts:
-            subject_refs = tuple(
-                _bind_local_ref(
-                    chunk_id=chunk_id, local_ref=ref, field=_FIELD_ANY,
-                    binding=binding, unres_kinds=unres_kinds,
+            subject_refs = _stable_dedupe(
+                tuple(
+                    _bind_local_ref(
+                        chunk_id=chunk_id, local_ref=ref, field=_FIELD_ANY,
+                        binding=binding, unres_kinds=unres_kinds,
+                    )
+                    for ref in fact.subject_refs
                 )
-                for ref in fact.subject_refs
             )
-            object_refs = tuple(
-                _bind_local_ref(
-                    chunk_id=chunk_id, local_ref=ref, field=_FIELD_ANY,
-                    binding=binding, unres_kinds=unres_kinds,
+            object_refs = _stable_dedupe(
+                tuple(
+                    _bind_local_ref(
+                        chunk_id=chunk_id, local_ref=ref, field=_FIELD_ANY,
+                        binding=binding, unres_kinds=unres_kinds,
+                    )
+                    for ref in fact.object_refs
                 )
-                for ref in fact.object_refs
             )
             facts.append(
                 IndexedFactCandidate(
@@ -604,19 +656,23 @@ def build_consolidation_candidate_index(
             )
 
         for event in extraction.candidates.events:
-            participants = tuple(
-                _bind_local_ref(
-                    chunk_id=chunk_id, local_ref=ref, field=_FIELD_PERSON,
-                    binding=binding, unres_kinds=unres_kinds,
+            participants = _stable_dedupe(
+                tuple(
+                    _bind_local_ref(
+                        chunk_id=chunk_id, local_ref=ref, field=_FIELD_PERSON,
+                        binding=binding, unres_kinds=unres_kinds,
+                    )
+                    for ref in event.participant_refs
                 )
-                for ref in event.participant_refs
             )
-            locations = tuple(
-                _bind_local_ref(
-                    chunk_id=chunk_id, local_ref=ref, field=_FIELD_LOCATION,
-                    binding=binding, unres_kinds=unres_kinds,
+            locations = _stable_dedupe(
+                tuple(
+                    _bind_local_ref(
+                        chunk_id=chunk_id, local_ref=ref, field=_FIELD_LOCATION,
+                        binding=binding, unres_kinds=unres_kinds,
+                    )
+                    for ref in event.location_refs
                 )
-                for ref in event.location_refs
             )
             events.append(
                 IndexedEventCandidate(

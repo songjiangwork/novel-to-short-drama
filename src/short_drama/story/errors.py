@@ -74,6 +74,18 @@ class ReconciliationModelError(StoryError):
     """
 
 
+class ConsolidationModelError(StoryError):
+    """A5 fact/event/relationship consolidation domain/profile contract is
+    structurally invalid.
+
+    This is the static, object-level domain error for A5A. It is deliberately
+    distinct from the A4A reconciliation model error, from A-I3 LLM errors
+    (transport/config/provenance), and from the later A5B-A5H consolidation
+    validation findings (blocking / semantic / canonical / coverage / reuse),
+    which belong to later slices.
+    """
+
+
 class ReconciliationPlanningError(StoryError):
     """A4B deterministic reconciliation planning failed.
 

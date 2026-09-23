@@ -1,0 +1,10 @@
+Event consolidation block: {{block_id}}
+
+Pair contexts (each pair owns its own left/right endpoint event packets;
+evidence selectors are pair-local). For each pair, cite evidence only from that
+pair's own endpoints using selectors L0, L1, ... (left endpoint evidence items,
+in the order shown) and R0, R1, ... (right endpoint evidence items, in the
+order shown):
+{{pair_contexts_json}}
+
+Return the event consolidation decision JSON now.

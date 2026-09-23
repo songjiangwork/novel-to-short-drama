@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/canonical-fact-set.schema.json",
+  "title": "v1.2 A5 CanonicalFactSet (A5A persisted, v1)",
+  "description": "A5 canonical fact set: canonical facts (stable fact_* ids, evidence-anchored, source-ordered) plus the canonical state transitions (trans_* ids) between them. A state transition records a genuine change of the same state (state_change / relationship_state_change / other) and points at the semantic decision that established it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "facts", "state_transitions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "facts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/canonical_fact" }
+    },
+    "state_transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/state_transition" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bound_entity_ref": {
+      "type": "string",
+      "pattern": "^(?:char|loc|unres)_[0-9]{4,}$"
+    },
+    "fact_id": {
+      "type": "string",
+      "pattern": "^fact_[0-9]{6,}$"
+    },
+    "fact_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_fact_[0-9]{3,}$"
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph_id", "role", "strength", "excerpt"],
+      "properties": {
+        "paragraph_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["primary", "supporting"] },
+        "strength": { "enum": ["explicit", "implied", "uncertain"] },
+        "excerpt": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "canonical_fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_id",
+        "fact_type",
+        "statement_zh",
+        "subject_refs",
+        "object_refs",
+        "candidate_fact_refs",
+        "evidence_refs",
+        "first_source_order",
+        "continuity_relevant"
+      ],
+      "properties": {
+        "fact_id": { "$ref": "#/$defs/fact_id" },
+        "fact_type": {
+          "enum": [
+            "appearance",
+            "continuity_relevant",
+            "identity",
+            "knowledge",
+            "location_state",
+            "other",
+            "possession",
+            "relationship_state",
+            "world_fact"
+          ]
+        },
+        "statement_zh": { "type": "string", "minLength": 1 },
+        "subject_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bound_entity_ref" }
+        },
+        "object_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bound_entity_ref" }
+        },
+        "candidate_fact_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fact_candidate_ref" }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "first_source_order": { "type": "string", "minLength": 1 },
+        "continuity_relevant": { "type": "boolean" }
+      }
+    },
+    "state_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transition_id",
+        "from_fact_id",
+        "to_fact_id",
+        "subject_refs",
+        "transition_kind",
+        "source_decision_ref",
+        "evidence_refs",
+        "narrative_order"
+      ],
+      "properties": {
+        "transition_id": {
+          "type": "string",
+          "pattern": "^trans_[0-9]{6,}$"
+        },
+        "from_fact_id": { "$ref": "#/$defs/fact_id" },
+        "to_fact_id": { "$ref": "#/$defs/fact_id" },
+        "subject_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bound_entity_ref" }
+        },
+        "transition_kind": {
+          "enum": ["state_change", "relationship_state_change", "other"]
+        },
+        "source_decision_ref": { "type": "string", "minLength": 1 },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "narrative_order": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

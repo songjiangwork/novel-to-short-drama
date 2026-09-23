@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/consolidation-decision-set.schema.json",
+  "title": "v1.2 A5 ConsolidationDecisionSet (A5A persisted, v1)",
+  "description": "A5 semantic decision set, distinguishing fact / event / relationship pair decisions. Each decision carries the pair's canonical-order global candidate refs, the domain decision, the method (deterministic / llm / manual), a zh-CN reason, the exact resolved evidence_refs, the prompt identity, and the A-I3 LLMInvocationProvenance. Method/provenance consistency is enforced at the schema level: an llm decision requires prompt identity + provenance; a deterministic/manual decision must carry null prompt identity + null provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fact_decisions", "event_decisions", "relationship_decisions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fact_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fact_decision" }
+    },
+    "event_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event_decision" }
+    },
+    "relationship_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/relationship_decision" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decision_id": { "type": "string", "minLength": 1 },
+    "reason_zh": { "type": "string", "minLength": 1 },
+    "evidence_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence_ref" }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph_id", "role", "strength", "excerpt"],
+      "properties": {
+        "paragraph_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["primary", "supporting"] },
+        "strength": { "enum": ["explicit", "implied", "uncertain"] },
+        "excerpt": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "llm_invocation_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_family",
+        "model",
+        "semantic_profile_id",
+        "semantic_profile_hash",
+        "prompt_id",
+        "prompt_version",
+        "prompt_content_hash",
+        "rendered_prompt_hash",
+        "output_schema_id",
+        "output_schema_version",
+        "output_schema_hash",
+        "request_hash",
+        "provider_response_id",
+        "finish_reason",
+        "usage"
+      ],
+      "properties": {
+        "provider_family": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "semantic_profile_id": { "type": "string", "minLength": 1 },
+        "semantic_profile_hash": { "$ref": "#/$defs/sha256" },
+        "prompt_id": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "integer", "minimum": 1 },
+        "prompt_content_hash": { "$ref": "#/$defs/sha256" },
+        "rendered_prompt_hash": { "$ref": "#/$defs/sha256" },
+        "output_schema_id": { "type": "string", "minLength": 1 },
+        "output_schema_version": { "type": "integer", "minimum": 1 },
+        "output_schema_hash": { "$ref": "#/$defs/sha256" },
+        "request_hash": { "$ref": "#/$defs/sha256" },
+        "provider_response_id": { "type": ["string", "null"], "minLength": 1 },
+        "finish_reason": { "type": ["string", "null"], "minLength": 1 },
+        "usage": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "integer" }
+        }
+      }
+    },
+    "fact_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_fact_[0-9]{3,}$"
+    },
+    "evt_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_evt_[0-9]{3,}$"
+    },
+    "rel_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_rel_[0-9]{3,}$"
+    },
+    "fact_decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id", "left_candidate_ref", "right_candidate_ref", "decision",
+            "method", "reason_zh", "evidence_refs", "prompt_id", "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "$ref": "#/$defs/decision_id" },
+            "left_candidate_ref": { "$ref": "#/$defs/fact_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/fact_ref" },
+            "decision": {
+              "enum": ["same_fact", "compatible_fact", "state_change",
+                       "conflict", "unrelated", "uncertain"]
+            },
+            "method": { "const": "llm" },
+            "reason_zh": { "$ref": "#/$defs/reason_zh" },
+            "evidence_refs": { "$ref": "#/$defs/evidence_refs" },
+            "prompt_id": { "type": "string", "minLength": 1 },
+            "prompt_version": { "type": "integer", "minimum": 1 },
+            "generation_provenance": { "$ref": "#/$defs/llm_invocation_provenance" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id", "left_candidate_ref", "right_candidate_ref", "decision",
+            "method", "reason_zh", "evidence_refs", "prompt_id", "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "$ref": "#/$defs/decision_id" },
+            "left_candidate_ref": { "$ref": "#/$defs/fact_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/fact_ref" },
+            "decision": {
+              "enum": ["same_fact", "compatible_fact", "state_change",
+                       "conflict", "unrelated", "uncertain"]
+            },
+            "method": { "enum": ["deterministic", "manual"] },
+            "reason_zh": { "$ref": "#/$defs/reason_zh" },
+            "evidence_refs": { "$ref": "#/$defs/evidence_refs" },
+            "prompt_id": { "type": "null" },
+            "prompt_version": { "type": "null" },
+            "generation_provenance": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "event_decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id", "left_candidate_ref", "right_candidate_ref", "decision",
+            "method", "reason_zh", "evidence_refs", "prompt_id", "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "$ref": "#/$defs/decision_id" },
+            "left_candidate_ref": { "$ref": "#/$defs/evt_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/evt_ref" },
+            "decision": { "enum": ["same_event", "different_event", "uncertain"] },
+            "method": { "const": "llm" },
+            "reason_zh": { "$ref": "#/$defs/reason_zh" },
+            "evidence_refs": { "$ref": "#/$defs/evidence_refs" },
+            "prompt_id": { "type": "string", "minLength": 1 },
+            "prompt_version": { "type": "integer", "minimum": 1 },
+            "generation_provenance": { "$ref": "#/$defs/llm_invocation_provenance" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id", "left_candidate_ref", "right_candidate_ref", "decision",
+            "method", "reason_zh", "evidence_refs", "prompt_id", "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "$ref": "#/$defs/decision_id" },
+            "left_candidate_ref": { "$ref": "#/$defs/evt_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/evt_ref" },
+            "decision": { "enum": ["same_event", "different_event", "uncertain"] },
+            "method": { "enum": ["deterministic", "manual"] },
+            "reason_zh": { "$ref": "#/$defs/reason_zh" },
+            "evidence_refs": { "$ref": "#/$defs/evidence_refs" },
+            "prompt_id": { "type": "null" },
+            "prompt_version": { "type": "null" },
+            "generation_provenance": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "relationship_decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id", "left_candidate_ref", "right_candidate_ref", "decision",
+            "method", "reason_zh", "evidence_refs", "prompt_id", "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "$ref": "#/$defs/decision_id" },
+            "left_candidate_ref": { "$ref": "#/$defs/rel_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/rel_ref" },
+            "decision": {
+              "enum": ["same_relationship", "different_relationship", "uncertain"]
+            },
+            "method": { "const": "llm" },
+            "reason_zh": { "$ref": "#/$defs/reason_zh" },
+            "evidence_refs": { "$ref": "#/$defs/evidence_refs" },
+            "prompt_id": { "type": "string", "minLength": 1 },
+            "prompt_version": { "type": "integer", "minimum": 1 },
+            "generation_provenance": { "$ref": "#/$defs/llm_invocation_provenance" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "decision_id", "left_candidate_ref", "right_candidate_ref", "decision",
+            "method", "reason_zh", "evidence_refs", "prompt_id", "prompt_version",
+            "generation_provenance"
+          ],
+          "properties": {
+            "decision_id": { "$ref": "#/$defs/decision_id" },
+            "left_candidate_ref": { "$ref": "#/$defs/rel_ref" },
+            "right_candidate_ref": { "$ref": "#/$defs/rel_ref" },
+            "decision": {
+              "enum": ["same_relationship", "different_relationship", "uncertain"]
+            },
+            "method": { "enum": ["deterministic", "manual"] },
+            "reason_zh": { "$ref": "#/$defs/reason_zh" },
+            "evidence_refs": { "$ref": "#/$defs/evidence_refs" },
+            "prompt_id": { "type": "null" },
+            "prompt_version": { "type": "null" },
+            "generation_provenance": { "type": "null" }
+          }
+        }
+      ]
+    }
+  }
+}

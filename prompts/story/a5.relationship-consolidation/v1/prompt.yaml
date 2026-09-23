@@ -1,0 +1,34 @@
+# A5 relationship consolidation prompt — TRACKED (v1.2 A5A).
+#
+# A strict relationship-consolidation decision prompt. It is given one
+# relationship consolidation block as a set of PAIR-LOCAL contexts (each pair
+# owns its own left/right endpoint relationship packet), and returns a
+# RelationshipSelectorDecisionPayload with exactly one decision per pair, each
+# carrying a zh-CN reason and a list of pair-local evidence selectors.
+#
+# The decision domain is the A5 relationship decision set:
+# same_relationship / different_relationship / uncertain.
+#
+# The provider evidence contract is PAIR-LOCAL SELECTORS (inherited from the
+# A4 v3 authority). The provider cites evidence only by selector: L0/L1/...
+# selects from the decision's own left endpoint evidence list and R0/R1/...
+# selects from the decision's own right endpoint evidence list (both in the
+# order shown in the prompt). The host service (A5C) validates every selector
+# against that exact pair and resolves it to the exact endpoint EvidenceRef, so
+# the provider can never cite a third candidate or alter an evidence field.
+#
+# The prompt is the relationship-decision authority, not the merge/authority
+# authority: canonical relationship allocation and relationship state history
+# remain the A5E authority, and local JSON Schema validation remains the schema
+# authority.
+#
+# required_variables is EXACTLY the two block inputs. Their values are
+# deterministic canonical JSON strings built by Python (A5C). No
+# runtime/model/provider fields.
+schema_version: 1
+prompt_id: a5.relationship-consolidation
+version: 1
+required_variables:
+  - block_id
+  - pair_contexts_json
+content_hash: 8ecc19b32ceaa7535e24bad8224c9016fdd5423e0aae0b022d8e8d8c9c175dae

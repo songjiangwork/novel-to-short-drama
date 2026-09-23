@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "left_candidate_ref",
+          "right_candidate_ref",
+          "decision",
+          "reason_zh",
+          "evidence_selectors"
+        ],
+        "properties": {
+          "left_candidate_ref": {
+            "type": "string",
+            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_fact_[0-9]{3,}$"
+          },
+          "right_candidate_ref": {
+            "type": "string",
+            "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_fact_[0-9]{3,}$"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "same_fact",
+              "compatible_fact",
+              "state_change",
+              "conflict",
+              "unrelated",
+              "uncertain"
+            ]
+          },
+          "reason_zh": { "type": "string", "minLength": 1 },
+          "evidence_selectors": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

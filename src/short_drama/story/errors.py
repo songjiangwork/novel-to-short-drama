@@ -86,6 +86,18 @@ class ConsolidationModelError(StoryError):
     """
 
 
+class ConsolidationCurrentMissingError(StoryError):
+    """A5 requires a current-eligible A4 CURRENT that does not exist.
+
+    A5B (and the A5 stage in general) consumes the A4 EntityMap strictly
+    through its CURRENT pointer. A missing A4 CURRENT is a structural A5
+    failure, not a normal cache miss: A4 is a hard dependency of A5, so the
+    absent CURRENT must fail closed rather than be treated as "not ready yet".
+    This is deliberately distinct from the A4 ``try_reuse_current`` cache-miss
+    (which returns ``None``) and from A5A/A5B domain-model errors.
+    """
+
+
 class ReconciliationPlanningError(StoryError):
     """A4B deterministic reconciliation planning failed.
 

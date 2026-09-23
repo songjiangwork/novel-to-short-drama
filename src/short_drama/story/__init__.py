@@ -222,6 +222,7 @@ from .reconciliation_persistence import (
     UNRESOLVED_ENTITY_SET_ARTIFACT_TYPE,
     ReconciliationPersistenceService,
     ReconciliationPublication,
+    ValidatedEntityMapCurrent,
     a4_base_artifact_id,
     a4_pointer_id,
     a4_validation_artifact_id,
@@ -246,6 +247,14 @@ from .reconciliation_persistence import (
     reconciliation_decision_set_artifact_id,
     unresolved_entity_set_artifact_id,
     validate_a4_semantic_identity_binding,
+)
+from .consolidation_planning import (
+    ConsolidationCurrentMissingError,
+    ConsolidationInputSnapshot,
+    ConsolidationPlanningResult,
+    build_consolidation_candidate_index,
+    build_consolidation_input_snapshot,
+    build_consolidation_planning,
 )
 from .extraction_batch import (
     ChunkExtractionBatchService,
@@ -503,6 +512,13 @@ __all__ = [
     "UNRESOLVED_ENTITY_SET_ARTIFACT_TYPE",
     "ReconciliationPersistenceService",
     "ReconciliationPublication",
+    "ValidatedEntityMapCurrent",
+    "ConsolidationCurrentMissingError",
+    "ConsolidationInputSnapshot",
+    "ConsolidationPlanningResult",
+    "build_consolidation_candidate_index",
+    "build_consolidation_input_snapshot",
+    "build_consolidation_planning",
     "a4_base_artifact_id",
     "a4_pointer_id",
     "a4_validation_artifact_id",

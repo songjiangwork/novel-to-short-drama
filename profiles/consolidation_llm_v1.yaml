@@ -1,0 +1,44 @@
+# v1.2 A5A A5 Semantic LLM profile — TRACKED.
+#
+# Describes result-affecting generation semantics ONLY for the A5 semantic
+# passes (fact / event / relationship consolidation decisions). It carries no
+# endpoint, timeout, credential, hostname, or backend routing identity (no
+# `provider_family` / no concrete `model`), so its hash is a stable,
+# backend-neutral semantic identity that is NOT invalidated by runtime
+# transport or backend changes. Switching the backend (e.g. Qwen -> Gemma)
+# does not change this profile's hash; it only changes the model the transport
+# requests and the declared routing metadata in the provenance.
+#
+# A5 deliberately uses its OWN tracked semantic profile identity (it does not
+# reuse the A4 profile identity, even if the current backend happens to be the
+# same). The generation semantics are inherited from A4 (deterministic,
+# bounded, structured-output, reasoning disabled) because the A5 semantic
+# decisions (fact / event / relationship pair decisions) have the same
+# generation requirements as the A4 ambiguity decision. The per-domain prompts
+# and output schemas differ and are pinned separately in the A5 consolidation
+# profile (see profiles/consolidation_v1.yaml).
+schema_version: 2
+
+# Stable semantic identifier for this profile (part of the semantic identity).
+profile_id: consolidation-llm-v1
+
+# Deterministic generation for the consolidation pair decisions.
+temperature: 0.0
+
+# Bounded decision-output budget. A5 fact / event / relationship blocks request
+# a small set of candidate pairs and return a selector decision payload; 4096
+# is a bounded headroom for the decision output. If a real smoke proves this
+# insufficient, it is an explicit semantic-contract change.
+max_output_tokens: 4096
+
+# Structured-output generation constraint (a generation constraint only; local
+# JSON Schema validation remains the authority).
+structured_output_mode: json_schema
+
+# Reasoning settings (semantic; affect output). Disabled reasoning is
+# explicitly mapped by the adapter to the provider request
+# reasoning_effort: "none", so the server startup default never silently
+# decides behavior.
+reasoning:
+  enabled: false
+  effort: null

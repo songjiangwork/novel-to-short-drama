@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/canonical-event-set.schema.json",
+  "title": "v1.2 A5 CanonicalEventSet (A5A persisted, v1)",
+  "description": "A5 canonical event set: canonical events (stable evt_* ids, evidence-anchored) with a deterministic narrative_order (derived from the earliest source order; NOT chronological time).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "events"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/canonical_event" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bound_entity_ref": {
+      "type": "string",
+      "pattern": "^(?:char|loc|unres)_[0-9]{4,}$"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt_[0-9]{6,}$"
+    },
+    "event_candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_evt_[0-9]{3,}$"
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph_id", "role", "strength", "excerpt"],
+      "properties": {
+        "paragraph_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["primary", "supporting"] },
+        "strength": { "enum": ["explicit", "implied", "uncertain"] },
+        "excerpt": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "canonical_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "narrative_order",
+        "summary_zh",
+        "participants",
+        "locations",
+        "temporal_mode",
+        "candidate_event_refs",
+        "evidence_refs",
+        "first_source_order"
+      ],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/event_id" },
+        "narrative_order": { "type": "integer", "minimum": 1 },
+        "summary_zh": { "type": "string", "minLength": 1 },
+        "participants": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bound_entity_ref" }
+        },
+        "locations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bound_entity_ref" }
+        },
+        "temporal_mode": {
+          "enum": ["dream", "flashback", "flashforward", "memory", "normal", "unknown"]
+        },
+        "candidate_event_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/event_candidate_ref" }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "first_source_order": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

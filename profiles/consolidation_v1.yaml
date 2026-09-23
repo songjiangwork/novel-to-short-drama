@@ -1,0 +1,59 @@
+# v1.2 A5A A5 consolidation orchestration profile — TRACKED.
+#
+# Model-independent orchestration profile for fact / event / relationship
+# consolidation (A5B-A5G). It pins the three A5 semantic passes (fact /
+# event / relationship), each of which references a tracked A5 semantic LLM
+# profile (the generation semantics), a tracked A5 prompt, and a tracked A5
+# output schema (pair-local selector payloads).
+#
+# This profile deliberately carries NO endpoint, timeout, credential,
+# hostname, or backend routing identity, and NO blocking algorithm parameters
+# (fuzzy-similarity threshold, stopword list, source-distance cutoff,
+# token-overlap threshold, semantic-pair thresholds). A5B freezes those
+# blocking parameters separately and binds them to `blocking_policy_id`; A5A
+# only provides the versioned contract/extension slot so the production
+# consolidation profile can record the exact blocking identity it used
+# without pre-deciding it here.
+schema_version: 1
+
+# Stable orchestration identifier.
+profile_id: consolidation-v1
+
+# Working language for the consolidation output (mirrors the A3/A4 authority).
+working_language: zh
+
+# Versioned slot for the A5 deterministic blocking policy identity. A5B binds
+# this to the audited production blocking identity (the frozen fuzzy-similarity
+# threshold, stopword list, source-distance cutoff, token-overlap threshold,
+# and semantic-pair thresholds). A5A leaves it as a tracked contract/extension
+# slot and does not pre-decide any algorithm parameters.
+blocking_policy_id: consolidation-blocking-v1
+
+# A5 fact semantic pass. The generation semantics come from the tracked A5
+# semantic LLM profile (consolidation-llm-v1); the fact prompt and the fact
+# selector-payload output schema are pinned here.
+fact:
+  semantic_profile_id: consolidation-llm-v1
+  prompt_id: a5.fact-consolidation
+  prompt_version: 1
+  output_schema_id: consolidation-fact-selector-payload
+  output_schema_version: 1
+
+# A5 event semantic pass (three-way decision domain).
+event:
+  semantic_profile_id: consolidation-llm-v1
+  prompt_id: a5.event-consolidation
+  prompt_version: 1
+  output_schema_id: consolidation-event-selector-payload
+  output_schema_version: 1
+
+# A5 relationship semantic pass (three-way decision domain).
+relationship:
+  semantic_profile_id: consolidation-llm-v1
+  prompt_id: a5.relationship-consolidation
+  prompt_version: 1
+  output_schema_id: consolidation-relationship-selector-payload
+  output_schema_version: 1
+
+# Maximum generation rounds before a semantic pass gives up and defers (A5E).
+max_generation_rounds: 2

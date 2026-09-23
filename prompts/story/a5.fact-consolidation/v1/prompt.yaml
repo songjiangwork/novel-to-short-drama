@@ -1,0 +1,36 @@
+# A5 fact consolidation prompt — TRACKED (v1.2 A5A).
+#
+# A strict fact-consolidation decision prompt. It is given one fact
+# consolidation block as a set of PAIR-LOCAL contexts (each pair owns its own
+# left/right endpoint fact packet), and returns a FactSelectorDecisionPayload
+# with exactly one decision per pair, each carrying a zh-CN reason and a list
+# of pair-local evidence selectors.
+#
+# The decision domain is the A5 fact decision set: same_fact /
+# compatible_fact / state_change / conflict / unrelated / uncertain.
+#
+# The provider evidence contract is PAIR-LOCAL SELECTORS (inherited from the
+# A4 v3 authority). The provider no longer copies or reproduces the underlying
+# EvidenceRef fields (paragraph_id / role / strength / excerpt). Instead, for
+# each decision it cites evidence only by selector: L0/L1/... selects from the
+# decision's own left endpoint evidence list (in the order shown in the prompt)
+# and R0/R1/... selects from the decision's own right endpoint evidence list
+# (in the order shown). The host service (A5C) validates every selector against
+# that exact pair and resolves it to the exact endpoint EvidenceRef, so the
+# provider can never cite a third candidate or alter an evidence field.
+#
+# The prompt is the fact-decision authority, not the merge/authority authority:
+# canonical fact allocation, state transitions, and story conflicts remain the
+# A5E/A5F authorities, and local JSON Schema validation remains the schema
+# authority.
+#
+# required_variables is EXACTLY the two block inputs. Their values are
+# deterministic canonical JSON strings built by Python (A5C). No
+# runtime/model/provider fields.
+schema_version: 1
+prompt_id: a5.fact-consolidation
+version: 1
+required_variables:
+  - block_id
+  - pair_contexts_json
+content_hash: bb505266f990b018287ef841c9a99c1778c0160b9b9758fcc5b6ccc7cd256b7f

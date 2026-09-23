@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/story-conflict-set.schema.json",
+  "title": "v1.2 A5 StoryConflictSet (A5A persisted, v1)",
+  "description": "A5 story conflict set: explicit, unresolved story-level conflicts (conf_* ids). A conflict is never silently dropped; it references the global candidates, canonical fact/relationship ids, and semantic decisions involved, and always carries the exact evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "conflicts"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "conflicts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/story_conflict" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fact_id": {
+      "type": "string",
+      "pattern": "^fact_[0-9]{6,}$"
+    },
+    "relationship_id": {
+      "type": "string",
+      "pattern": "^rel_[0-9]{6,}$"
+    },
+    "candidate_ref": {
+      "type": "string",
+      "pattern": "^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:fact|evt|rel)_[0-9]{3,}$"
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paragraph_id", "role", "strength", "excerpt"],
+      "properties": {
+        "paragraph_id": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["primary", "supporting"] },
+        "strength": { "enum": ["explicit", "implied", "uncertain"] },
+        "excerpt": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "story_conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conflict_id",
+        "conflict_kind",
+        "fact_ids",
+        "relationship_ids",
+        "candidate_refs",
+        "decision_refs",
+        "evidence_refs",
+        "status"
+      ],
+      "properties": {
+        "conflict_id": {
+          "type": "string",
+          "pattern": "^conf_[0-9]{6,}$"
+        },
+        "conflict_kind": {
+          "enum": ["fact_conflict", "relationship_state_conflict", "other"]
+        },
+        "fact_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fact_id" }
+        },
+        "relationship_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relationship_id" }
+        },
+        "candidate_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/candidate_ref" }
+        },
+        "decision_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "status": { "const": "unresolved" }
+      }
+    }
+  }
+}

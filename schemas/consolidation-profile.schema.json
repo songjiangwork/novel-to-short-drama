@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/consolidation-profile.schema.json",
+  "title": "v1.2 A5 ConsolidationProfile (A5A persisted, v1)",
+  "description": "A5 consolidation orchestration profile. Pins the three A5 semantic passes (fact / event / relationship), each referencing a tracked A5 semantic LLM profile, a tracked A5 prompt, and a tracked A5 selector-payload output schema. It carries NO endpoint/timeout/credential/hostname/backend routing identity and NO blocking algorithm parameters; the deterministic blocking policy is a versioned slot bound by A5B.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "working_language",
+    "blocking_policy_id",
+    "fact",
+    "event",
+    "relationship",
+    "max_generation_rounds"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "profile_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "working_language": { "type": "string", "minLength": 1 },
+    "blocking_policy_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "fact": { "$ref": "#/$defs/semantic_pass" },
+    "event": { "$ref": "#/$defs/semantic_pass" },
+    "relationship": { "$ref": "#/$defs/semantic_pass" },
+    "max_generation_rounds": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "semantic_pass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_profile_id",
+        "prompt_id",
+        "prompt_version",
+        "output_schema_id",
+        "output_schema_version"
+      ],
+      "properties": {
+        "semantic_profile_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "prompt_id": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "integer", "minimum": 1 },
+        "output_schema_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "output_schema_version": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

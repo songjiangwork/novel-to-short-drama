@@ -76,7 +76,7 @@ CONSOLIDATION_METHODS: frozenset[str] = frozenset(
     {"deterministic", "llm", "manual"}
 )
 STATE_TRANSITION_KINDS: frozenset[str] = frozenset(
-    {"state_change", "reassertion", "clarification", "correction"}
+    {"state_change", "relationship_state_change", "other"}
 )
 STORY_CONFLICT_KINDS: frozenset[str] = frozenset(
     {"fact_conflict", "relationship_state_conflict", "other"}
@@ -105,14 +105,23 @@ CONSOLIDATION_CANDIDATE_REF_PATTERN = (
     r"^CH[0-9]{3,}_C[0-9]{3,}:cand_(?:fact|evt|rel)_[0-9]{3,}$"
 )
 
-# A5 pair-local evidence selector (L0 / R0 / L1 / ...).
-A5_EVIDENCE_SELECTOR_PATTERN = r"^LR[0-9]+$"
+# A5 pair-local evidence selector (L0 / R0 / L1 / ...). Left-side selectors
+# start with 'L' and right-side selectors start with 'R', followed by a
+# non-negative integer selector index. (A5A pins the shape only; pair-scoped
+# selector resolution / range / duplicate validation is A5C/A5D.)
+A5_EVIDENCE_SELECTOR_PATTERN = r"^[LR][0-9]+$"
 
 # Candidate ref namespaces keyed by local-id prefix.
 _NAMESPACE_BY_LOCAL_PREFIX = {
     "cand_fact": ("fact", _FACT_LOCAL_ID),
     "cand_evt": ("event", _EVENT_LOCAL_ID),
     "cand_rel": ("relationship", _REL_LOCAL_ID),
+}
+# Reverse mapping: namespace -> local candidate id prefix.
+_LOCAL_PREFIX_BY_NAMESPACE = {
+    "fact": "cand_fact",
+    "event": "cand_evt",
+    "relationship": "cand_rel",
 }
 
 _FACT_ID_RE = re.compile(FACT_ID_PATTERN)
@@ -121,8 +130,11 @@ _REL_ID_RE = re.compile(RELATIONSHIP_ID_PATTERN)
 _TRANSITION_ID_RE = re.compile(STATE_TRANSITION_ID_PATTERN)
 _CONFLICT_ID_RE = re.compile(STORY_CONFLICT_ID_PATTERN)
 _HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
-# Bound entity ids from A2/A4 (entity map): char / loc / obj, zero-padded.
-_BOUND_ENTITY_RE = re.compile(r"(?:char|loc|obj)_[0-9]{4,}")
+# Bound entity ids from A2/A4 (canonical entity map / unresolved set):
+# char / loc / unres, zero-padded. A5 has no obj_* canonical namespace, so
+# obj_* must be rejected. Kept in lockstep with the A4 authority
+# (char_[0-9]{4,} / loc_[0-9]{4,} / unres_[0-9]{4,}).
+_BOUND_ENTITY_RE = re.compile(r"(?:char|loc|unres)_[0-9]{4,}")
 
 
 # ---------------------------------------------------------------------------
@@ -192,21 +204,6 @@ def _require_text_tuple(
     return tuple(items)
 
 
-def _require_text_or_null_tuple(
-    value: object, name: str
-) -> tuple[str | None, ...]:
-    if not isinstance(value, (list, tuple)):
-        raise ConsolidationModelError(f"{name} must be a list")
-    items: list[str | None] = []
-    for item in value:
-        if item is None:
-            items.append(None)
-        else:
-            _require_text(item, f"{name}[]")
-            items.append(item)
-    return tuple(items)
-
-
 def _to_evidence_tuple(value: object, name: str) -> tuple[Any, ...]:
     """Normalize an EvidenceRef collection to a validated tuple (fail closed).
 
@@ -233,9 +230,28 @@ def _to_evidence_tuple(value: object, name: str) -> tuple[Any, ...]:
 def _require_bound_entity(value: object, name: str) -> str:
     if not isinstance(value, str) or not _BOUND_ENTITY_RE.fullmatch(value):
         raise ConsolidationModelError(
-            f"{name} must reference a bound entity id (char_/loc_/obj_ + zero-padded digits)"
+            f"{name} must reference a bound entity id "
+            "(char_/loc_/unres_ + zero-padded digits)"
         )
     return value
+
+
+def _require_bound_entity_tuple(
+    value: object, name: str, *, allow_empty: bool = True
+) -> tuple[str, ...]:
+    """Normalize a bound-entity-ref collection to a validated tuple.
+
+    Every item must be a bound entity id (char_ / loc_ / unres_ + digits);
+    arbitrary strings and nonexistent namespaces (including obj_*) fail
+    closed. An empty tuple is allowed by default (matches the A3 upstream
+    universe, which permits empty participant / object ref tuples).
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ConsolidationModelError(f"{name} must be a list of bound entity refs")
+    items: list[str] = [_require_bound_entity(item, f"{name}[]") for item in value]
+    if not allow_empty and not items:
+        raise ConsolidationModelError(f"{name} must be non-empty")
+    return tuple(items)
 
 
 def _require_id_pattern(value: object, pattern: re.Pattern[str], name: str) -> str:
@@ -271,28 +287,41 @@ def _to_llm_provenance(value: object, name: str) -> LLMInvocationProvenance | No
     return LLMInvocationProvenance.from_dict(value)
 
 
-def _validate_candidate_identity(
+def _require_indexed_candidate_identity(
     *,
     global_candidate_ref: object,
     chunk_id: object,
     local_candidate_id: object,
-    candidate_extraction_ref: object,
-    evidence_refs: object,
-    evidence_strength: object,
+    namespace: str,
     name: str,
-) -> tuple[Any, ...]:
-    """Validate the shared fields of every indexed candidate."""
-    _require_text(global_candidate_ref, f"{name}.global_candidate_ref")
+) -> None:
+    """Validate an indexed candidate's identity against the canonical A5
+    candidate-ref contract AND the domain-specific candidate namespace.
+
+    ``global_candidate_ref`` must be a valid ``CH###_C###:cand_<domain>_###``
+    ref (parsed via the ``ConsolidationCandidateRef`` authority) that belongs
+    to ``namespace``. The supplied ``chunk_id`` and ``local_candidate_id`` must
+    exactly match the parsed ref parts, so they must themselves satisfy the
+    candidate-ref contract rather than merely be non-empty strings.
+    """
+    ref = ConsolidationCandidateRef.parse(global_candidate_ref)
+    if ref.namespace != namespace:
+        raise ConsolidationModelError(
+            f"{name}.global_candidate_ref must be a {namespace} candidate "
+            f"({_LOCAL_PREFIX_BY_NAMESPACE[namespace]}_*), got "
+            f"namespace {ref.namespace!r}"
+        )
     _require_text(chunk_id, f"{name}.chunk_id")
     _require_text(local_candidate_id, f"{name}.local_candidate_id")
-    # The composite ref must be exactly chunk_id:local_candidate_id.
-    expected = f"{chunk_id}:{local_candidate_id}"
-    if global_candidate_ref != expected:
+    if chunk_id != ref.chunk_id:
         raise ConsolidationModelError(
-            f"{name}.global_candidate_ref must be 'chunk_id:local_candidate_id'"
+            f"{name}.chunk_id must match global_candidate_ref ({ref.chunk_id!r})"
         )
-    _require_text(chunk_id, f"{name}.source_order_key")
-    return _to_evidence_tuple(evidence_refs, f"{name}.evidence_refs")
+    if local_candidate_id != ref.local_candidate_id:
+        raise ConsolidationModelError(
+            f"{name}.local_candidate_id must match global_candidate_ref "
+            f"({ref.local_candidate_id!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +440,33 @@ def _require_consolidation_candidate_ref(
             f"{name} must reference a {namespace} candidate, got {ref.namespace!r}"
         )
     return ref
+
+
+def _require_candidate_ref_tuple(
+    value: object,
+    name: str,
+    *,
+    namespace: str | None = None,
+    allow_empty: bool = True,
+) -> tuple[str, ...]:
+    """Validate a collection of consolidation candidate refs.
+
+    Every item is parsed via the ``ConsolidationCandidateRef`` authority
+    (arbitrary strings fail closed). When ``namespace`` is given, every ref
+    must belong to that domain (fact / event / relationship); otherwise any
+    consolidation-candidate namespace is accepted (used by cross-domain
+    fields such as ``StoryConflict.candidate_refs``). Returns the normalized
+    tuple of global candidate refs.
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ConsolidationModelError(f"{name} must be a list of candidate refs")
+    items: list[str] = []
+    for item in value:
+        ref = _require_consolidation_candidate_ref(item, f"{name}[]", namespace=namespace)
+        items.append(ref.global_candidate_ref)
+    if not allow_empty and not items:
+        raise ConsolidationModelError(f"{name} must be non-empty")
+    return tuple(items)
 
 
 def _require_pair_canonical_order(
@@ -581,26 +637,24 @@ class IndexedFactCandidate:
     fact_type: str
     statement_zh: str
     subject_refs: tuple[str, ...]
-    object_refs: tuple[str | None, ...]
+    object_refs: tuple[str, ...]
     evidence_strength: str
     evidence_refs: tuple[Any, ...]
     candidate_extraction_ref: ArtifactRef
 
     def __post_init__(self) -> None:
-        _require_text(self.global_candidate_ref, "global_candidate_ref")
-        _require_text(self.chunk_id, "chunk_id")
-        _require_text(self.local_candidate_id, "local_candidate_id")
-        expected = f"{self.chunk_id}:{self.local_candidate_id}"
-        if self.global_candidate_ref != expected:
-            raise ConsolidationModelError(
-                f"global_candidate_ref {self.global_candidate_ref!r} is inconsistent "
-                f"with chunk_id/local_candidate_id ({expected!r})"
-            )
+        _require_indexed_candidate_identity(
+            global_candidate_ref=self.global_candidate_ref,
+            chunk_id=self.chunk_id,
+            local_candidate_id=self.local_candidate_id,
+            namespace="fact",
+            name="IndexedFactCandidate",
+        )
         _require_text(self.source_order_key, "source_order_key")
         _require_enum(self.fact_type, FACT_TYPES, "fact_type")
         _require_text(self.statement_zh, "statement_zh")
-        subjects = _require_text_tuple(self.subject_refs, "subject_refs")
-        objects = _require_text_or_null_tuple(self.object_refs, "object_refs")
+        subjects = _require_bound_entity_tuple(self.subject_refs, "subject_refs")
+        objects = _require_bound_entity_tuple(self.object_refs, "object_refs")
         _require_enum(self.evidence_strength, EVIDENCE_STRENGTHS, "evidence_strength")
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
         if not evidence:
@@ -679,21 +733,17 @@ class IndexedEventCandidate:
     candidate_extraction_ref: ArtifactRef
 
     def __post_init__(self) -> None:
-        _require_text(self.global_candidate_ref, "global_candidate_ref")
-        _require_text(self.chunk_id, "chunk_id")
-        _require_text(self.local_candidate_id, "local_candidate_id")
-        expected = f"{self.chunk_id}:{self.local_candidate_id}"
-        if self.global_candidate_ref != expected:
-            raise ConsolidationModelError(
-                f"global_candidate_ref {self.global_candidate_ref!r} is inconsistent "
-                f"with chunk_id/local_candidate_id ({expected!r})"
-            )
+        _require_indexed_candidate_identity(
+            global_candidate_ref=self.global_candidate_ref,
+            chunk_id=self.chunk_id,
+            local_candidate_id=self.local_candidate_id,
+            namespace="event",
+            name="IndexedEventCandidate",
+        )
         _require_text(self.source_order_key, "source_order_key")
         _require_text(self.summary_zh, "summary_zh")
-        participants = _require_text_tuple(self.participants, "participants")
-        if not participants:
-            raise ConsolidationModelError("participants must be non-empty")
-        locations = _require_text_tuple(self.locations, "locations")
+        participants = _require_bound_entity_tuple(self.participants, "participants")
+        locations = _require_bound_entity_tuple(self.locations, "locations")
         _require_enum(self.temporal_mode, TEMPORAL_MODES, "temporal_mode")
         _require_enum(self.evidence_strength, EVIDENCE_STRENGTHS, "evidence_strength")
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
@@ -774,15 +824,13 @@ class IndexedRelationshipCandidate:
     candidate_extraction_ref: ArtifactRef
 
     def __post_init__(self) -> None:
-        _require_text(self.global_candidate_ref, "global_candidate_ref")
-        _require_text(self.chunk_id, "chunk_id")
-        _require_text(self.local_candidate_id, "local_candidate_id")
-        expected = f"{self.chunk_id}:{self.local_candidate_id}"
-        if self.global_candidate_ref != expected:
-            raise ConsolidationModelError(
-                f"global_candidate_ref {self.global_candidate_ref!r} is inconsistent "
-                f"with chunk_id/local_candidate_id ({expected!r})"
-            )
+        _require_indexed_candidate_identity(
+            global_candidate_ref=self.global_candidate_ref,
+            chunk_id=self.chunk_id,
+            local_candidate_id=self.local_candidate_id,
+            namespace="relationship",
+            name="IndexedRelationshipCandidate",
+        )
         _require_text(self.source_order_key, "source_order_key")
         _require_bound_entity(self.source_entity_ref, "source_entity_ref")
         _require_bound_entity(self.target_entity_ref, "target_entity_ref")
@@ -1567,7 +1615,7 @@ class CanonicalFact:
     fact_type: str
     statement_zh: str
     subject_refs: tuple[str, ...]
-    object_refs: tuple[str | None, ...]
+    object_refs: tuple[str, ...]
     candidate_fact_refs: tuple[str, ...]
     evidence_refs: tuple[Any, ...]
     first_source_order: str
@@ -1577,13 +1625,14 @@ class CanonicalFact:
         _require_id_pattern(self.fact_id, _FACT_ID_RE, "fact_id")
         _require_enum(self.fact_type, FACT_TYPES, "fact_type")
         _require_text(self.statement_zh, "statement_zh")
-        subjects = _require_text_tuple(self.subject_refs, "subject_refs")
-        objects = _require_text_or_null_tuple(self.object_refs, "object_refs")
-        candidate_refs = _require_text_tuple(
-            self.candidate_fact_refs, "candidate_fact_refs", allow_empty=False
+        subjects = _require_bound_entity_tuple(self.subject_refs, "subject_refs")
+        objects = _require_bound_entity_tuple(self.object_refs, "object_refs")
+        candidate_refs = _require_candidate_ref_tuple(
+            self.candidate_fact_refs,
+            "candidate_fact_refs",
+            namespace="fact",
+            allow_empty=False,
         )
-        for ref in candidate_refs:
-            ConsolidationCandidateRef.parse(ref)
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
         _require_text(self.first_source_order, "first_source_order")
         _require_bool(self.continuity_relevant, "continuity_relevant")
@@ -1652,7 +1701,7 @@ class StateTransition:
         _require_id_pattern(self.transition_id, _TRANSITION_ID_RE, "transition_id")
         _require_id_pattern(self.from_fact_id, _FACT_ID_RE, "from_fact_id")
         _require_id_pattern(self.to_fact_id, _FACT_ID_RE, "to_fact_id")
-        subjects = _require_text_tuple(self.subject_refs, "subject_refs")
+        subjects = _require_bound_entity_tuple(self.subject_refs, "subject_refs")
         _require_enum(self.transition_kind, STATE_TRANSITION_KINDS, "transition_kind")
         _require_text(self.source_decision_ref, "source_decision_ref")
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
@@ -1767,16 +1816,15 @@ class CanonicalEvent:
         _require_id_pattern(self.event_id, _EVENT_ID_RE, "event_id")
         _require_positive_int(self.narrative_order, "narrative_order")
         _require_text(self.summary_zh, "summary_zh")
-        participants = _require_text_tuple(self.participants, "participants")
-        if not participants:
-            raise ConsolidationModelError("participants must be non-empty")
-        locations = _require_text_tuple(self.locations, "locations")
+        participants = _require_bound_entity_tuple(self.participants, "participants")
+        locations = _require_bound_entity_tuple(self.locations, "locations")
         _require_enum(self.temporal_mode, TEMPORAL_MODES, "temporal_mode")
-        candidate_refs = _require_text_tuple(
-            self.candidate_event_refs, "candidate_event_refs", allow_empty=False
+        candidate_refs = _require_candidate_ref_tuple(
+            self.candidate_event_refs,
+            "candidate_event_refs",
+            namespace="event",
+            allow_empty=False,
         )
-        for ref in candidate_refs:
-            ConsolidationCandidateRef.parse(ref)
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
         _require_text(self.first_source_order, "first_source_order")
         object.__setattr__(self, "participants", participants)
@@ -1874,13 +1922,12 @@ class RelationshipState:
 
     def __post_init__(self) -> None:
         _require_text(self.state_zh, "state_zh")
-        candidate_refs = _require_text_tuple(
+        candidate_refs = _require_candidate_ref_tuple(
             self.candidate_relationship_refs,
             "candidate_relationship_refs",
+            namespace="relationship",
             allow_empty=False,
         )
-        for ref in candidate_refs:
-            ConsolidationCandidateRef.parse(ref)
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
         _require_positive_int(self.narrative_order, "narrative_order")
         object.__setattr__(self, "candidate_relationship_refs", candidate_refs)
@@ -1939,13 +1986,12 @@ class CanonicalRelationship:
             "direction",
         )
         _require_text(self.relationship_type_zh, "relationship_type_zh")
-        candidate_refs = _require_text_tuple(
+        candidate_refs = _require_candidate_ref_tuple(
             self.candidate_relationship_refs,
             "candidate_relationship_refs",
+            namespace="relationship",
             allow_empty=False,
         )
-        for ref in candidate_refs:
-            ConsolidationCandidateRef.parse(ref)
         for state in self.state_history:
             if not isinstance(state, RelationshipState):
                 raise ConsolidationModelError(
@@ -2060,11 +2106,9 @@ class StoryConflict:
         relationship_ids = _require_text_tuple(self.relationship_ids, "relationship_ids")
         for rid in relationship_ids:
             _require_id_pattern(rid, _REL_ID_RE, "relationship_ids[]")
-        candidate_refs = _require_text_tuple(
+        candidate_refs = _require_candidate_ref_tuple(
             self.candidate_refs, "candidate_refs", allow_empty=False
         )
-        for ref in candidate_refs:
-            ConsolidationCandidateRef.parse(ref)
         decision_refs = _require_text_tuple(self.decision_refs, "decision_refs")
         evidence = _to_evidence_tuple(self.evidence_refs, "evidence_refs")
         _require_enum(self.status, STORY_CONFLICT_STATUSES, "status")

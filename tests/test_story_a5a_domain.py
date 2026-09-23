@@ -49,6 +49,7 @@ from short_drama.llm import (
 from short_drama.paths import PROFILES_DIR, REPO_ROOT, SCHEMAS_DIR
 from short_drama.story import (
     A5SemanticIdentity,
+    A5_EVIDENCE_SELECTOR_PATTERN,
     A5UpstreamIdentity,
     CanonicalEvent,
     CanonicalEventSet,
@@ -1605,6 +1606,277 @@ class TestPromptPairLocalSelectorContract:
         text = self._system_text(A5_RELATIONSHIP_PROMPT_ID)
         assert "labeled L0, L1, L2" in text
         assert "the ONLY way to cite evidence" in text
+
+
+# ---------------------------------------------------------------------------
+# A5A contract / parity repair (issue #50 independent review)
+# ---------------------------------------------------------------------------
+
+
+class TestA5AContractParityRepair:
+    """Pin that the Python domain models and the persisted JSON Schemas agree
+    on the frozen A5A contract after the review repairs:
+
+    * bound-entity namespaces ``char_*`` / ``loc_*`` / ``unres_*`` (``obj_*``
+      and arbitrary strings rejected);
+    * exactly three ``StateTransition`` kinds;
+    * domain-specific candidate-ref namespaces on indexed + canonical models;
+    * non-nullable fact object refs;
+    * participantless events remain representable;
+    * the pair-local evidence-selector shape ``^[LR][0-9]+$``.
+    """
+
+    # -- helpers ----------------------------------------------------------
+
+    @staticmethod
+    def _fact_set_payload(**overrides: object) -> dict:
+        return CanonicalFactSet(
+            schema_version=1,
+            facts=(make_canonical_fact(**overrides),),
+            state_transitions=(),
+        ).to_dict()
+
+    @staticmethod
+    def _event_set_payload(**overrides: object) -> dict:
+        return CanonicalEventSet(
+            schema_version=1, events=(make_canonical_event(**overrides),)
+        ).to_dict()
+
+    # -- Finding 1: bound entity namespace --------------------------------
+
+    @pytest.mark.parametrize("ref", ["char_0001", "loc_0001", "unres_0001"])
+    def test_bound_entity_namespaces_accepted_python(self, ref: str) -> None:
+        fact = make_canonical_fact(subject_refs=(ref,), object_refs=(ref,))
+        assert fact.subject_refs == (ref,) and fact.object_refs == (ref,)
+
+    @pytest.mark.parametrize(
+        "bad", ["obj_0001", "someone", "char_1", "CHAR_0001", "unres_1"]
+    )
+    def test_bound_entity_bad_rejected_python(self, bad: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_fact(subject_refs=(bad,))
+
+    @pytest.mark.parametrize("ref", ["char_0001", "loc_0001", "unres_0001"])
+    def test_bound_entity_namespaces_accepted_schema(self, ref: str) -> None:
+        payload = self._fact_set_payload()
+        payload["facts"][0]["subject_refs"] = [ref]
+        assert _validate(payload, _schema("canonical-fact-set.schema.json")) == []
+
+    @pytest.mark.parametrize("bad", ["obj_0001", "someone", "char_1"])
+    def test_bound_entity_bad_rejected_schema(self, bad: str) -> None:
+        payload = self._fact_set_payload()
+        payload["facts"][0]["subject_refs"] = [bad]
+        assert _validate(payload, _schema("canonical-fact-set.schema.json")) != []
+
+    # -- Finding 2: StateTransition kinds ---------------------------------
+
+    def test_state_transition_kinds_constant(self) -> None:
+        assert STATE_TRANSITION_KINDS == {
+            "state_change",
+            "relationship_state_change",
+            "other",
+        }
+
+    @pytest.mark.parametrize(
+        "kind", ["state_change", "relationship_state_change", "other"]
+    )
+    def test_state_transition_kinds_accepted_python(self, kind: str) -> None:
+        assert make_state_transition(transition_kind=kind).transition_kind == kind
+
+    @pytest.mark.parametrize(
+        "bad", ["reassertion", "clarification", "correction", "nonsense"]
+    )
+    def test_state_transition_kinds_rejected_python(self, bad: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_state_transition(transition_kind=bad)
+
+    def test_state_transition_kind_python_schema_identical(self) -> None:
+        schema = _schema("canonical-fact-set.schema.json")
+        enum = schema["$defs"]["state_transition"]["properties"]["transition_kind"]["enum"]
+        assert set(enum) == set(STATE_TRANSITION_KINDS)
+
+    @pytest.mark.parametrize(
+        "kind", ["state_change", "relationship_state_change", "other"]
+    )
+    def test_state_transition_kinds_accepted_schema(self, kind: str) -> None:
+        payload = CanonicalFactSet(
+            schema_version=1,
+            facts=(),
+            state_transitions=(make_state_transition(transition_kind=kind),),
+        ).to_dict()
+        assert _validate(payload, _schema("canonical-fact-set.schema.json")) == []
+
+    # -- Finding 3: indexed candidate namespace ---------------------------
+
+    def test_indexed_fact_rejects_event_and_rel_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(global_candidate_ref=EVENT_LEFT)
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(global_candidate_ref=REL_LEFT)
+
+    def test_indexed_event_rejects_fact_and_rel_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_event_candidate(global_candidate_ref=FACT_LEFT)
+        with pytest.raises(ConsolidationModelError):
+            make_event_candidate(global_candidate_ref=REL_LEFT)
+
+    def test_indexed_rel_rejects_fact_and_event_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_relationship_candidate(global_candidate_ref=FACT_LEFT)
+        with pytest.raises(ConsolidationModelError):
+            make_relationship_candidate(global_candidate_ref=EVENT_LEFT)
+
+    def test_indexed_parts_must_match_ref_contract(self) -> None:
+        # chunk_id that does not match the parsed ref part fails closed.
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(chunk_id="not-a-chunk-id")
+        # local_candidate_id that does not match the parsed ref part.
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(local_candidate_id="cand_fact_999")
+
+    def test_indexed_global_ref_must_satisfy_contract(self) -> None:
+        # A global ref whose local id is malformed fails closed at parse.
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(
+                global_candidate_ref="CH003_C005:cand_fact_12",
+                local_candidate_id="cand_fact_12",
+            )
+
+    # -- Finding 4: canonical member refs are domain-scoped ---------------
+
+    def test_canonical_fact_rejects_event_and_rel_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_fact(candidate_fact_refs=(EVENT_LEFT,))
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_fact(candidate_fact_refs=(REL_LEFT,))
+
+    def test_canonical_event_rejects_fact_and_rel_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_event(candidate_event_refs=(FACT_LEFT,))
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_event(candidate_event_refs=(REL_LEFT,))
+
+    def test_relationship_state_rejects_fact_and_event_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_relationship_state(candidate_relationship_refs=(FACT_LEFT,))
+        with pytest.raises(ConsolidationModelError):
+            make_relationship_state(candidate_relationship_refs=(EVENT_LEFT,))
+
+    def test_canonical_relationship_rejects_fact_and_event_refs(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_relationship(candidate_relationship_refs=(FACT_LEFT,))
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_relationship(candidate_relationship_refs=(EVENT_LEFT,))
+
+    def test_story_conflict_candidate_refs_remain_cross_domain(self) -> None:
+        conflict = make_story_conflict(
+            candidate_refs=(FACT_LEFT, EVENT_LEFT, REL_LEFT)
+        )
+        assert conflict.candidate_refs == (FACT_LEFT, EVENT_LEFT, REL_LEFT)
+        # And still fail closed on an arbitrary string.
+        with pytest.raises(ConsolidationModelError):
+            make_story_conflict(candidate_refs=("not-a-ref",))
+
+    # -- Finding 5: bound refs fail closed across the A5A contracts -------
+
+    @pytest.mark.parametrize("field", ["subject_refs", "object_refs"])
+    def test_indexed_fact_bound_refs_fail_closed(self, field: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(**{field: ("arbitrary-string",)})
+
+    @pytest.mark.parametrize("field", ["participants", "locations"])
+    def test_indexed_event_bound_refs_fail_closed(self, field: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_event_candidate(**{field: ("arbitrary-string",)})
+
+    @pytest.mark.parametrize("field", ["source_entity_ref", "target_entity_ref"])
+    def test_indexed_rel_bound_refs_fail_closed(self, field: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_relationship_candidate(**{field: "arbitrary-string"})
+
+    @pytest.mark.parametrize("field", ["subject_refs", "object_refs"])
+    def test_canonical_fact_bound_refs_fail_closed(self, field: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_fact(**{field: ("arbitrary-string",)})
+
+    def test_state_transition_subject_refs_fail_closed(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_state_transition(subject_refs=("arbitrary-string",))
+
+    @pytest.mark.parametrize("field", ["participants", "locations"])
+    def test_canonical_event_bound_refs_fail_closed(self, field: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_event(**{field: ("arbitrary-string",)})
+
+    @pytest.mark.parametrize("field", ["source_entity_ref", "target_entity_ref"])
+    def test_canonical_rel_bound_refs_fail_closed(self, field: str) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_relationship(**{field: "arbitrary-string"})
+
+    # -- Finding 6: fact object refs are non-nullable ---------------------
+
+    def test_indexed_fact_object_refs_reject_null(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(object_refs=(None,))  # type: ignore[arg-type]
+        with pytest.raises(ConsolidationModelError):
+            make_fact_candidate(object_refs=("char_0001", None))  # type: ignore[list-item]
+
+    def test_canonical_fact_object_refs_reject_null(self) -> None:
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_fact(object_refs=(None,))  # type: ignore[arg-type]
+        with pytest.raises(ConsolidationModelError):
+            make_canonical_fact(object_refs=("char_0001", None))  # type: ignore[list-item]
+
+    def test_empty_object_refs_still_legal(self) -> None:
+        assert make_fact_candidate(object_refs=()).object_refs == ()
+        assert make_canonical_fact(object_refs=()).object_refs == ()
+
+    def test_fact_object_refs_null_rejected_schema(self) -> None:
+        schema = _schema("canonical-fact-set.schema.json")
+        payload = self._fact_set_payload()
+        payload["facts"][0]["object_refs"] = [None]
+        assert _validate(payload, schema) != []
+        payload2 = self._fact_set_payload()
+        payload2["facts"][0]["object_refs"] = ["char_0001", None]
+        assert _validate(payload2, schema) != []
+
+    # -- Finding 7: participantless events remain representable -----------
+
+    def test_indexed_event_no_participants_round_trip(self) -> None:
+        cand = make_event_candidate(participants=(), locations=())
+        assert cand.participants == ()
+        assert IndexedEventCandidate.from_dict(cand.to_dict()) == cand
+
+    def test_canonical_event_no_participants_round_trip(self) -> None:
+        evt = make_canonical_event(participants=(), locations=())
+        assert evt.participants == ()
+        assert CanonicalEvent.from_dict(evt.to_dict()) == evt
+
+    def test_participantless_event_schema_parity(self) -> None:
+        assert _validate(
+            self._event_set_payload(participants=(), locations=()),
+            _schema("canonical-event-set.schema.json"),
+        ) == []
+        index = ConsolidationCandidateIndex(
+            schema_version=1,
+            facts=(),
+            events=(make_event_candidate(participants=(), locations=()),),
+            relationships=(),
+        )
+        assert _validate(
+            index.to_dict(), _schema("consolidation-candidate-index.schema.json")
+        ) == []
+
+    # -- Finding 8: pair-local evidence-selector shape --------------------
+
+    def test_selector_pattern_constant(self) -> None:
+        import re
+
+        assert A5_EVIDENCE_SELECTOR_PATTERN == r"^[LR][0-9]+$"
+        for good in ("L0", "R0", "L1", "R12"):
+            assert re.fullmatch(A5_EVIDENCE_SELECTOR_PATTERN, good) is not None
+        for bad in ("LR0", "L", "R", "0", "X0", "l0", "L0R"):
+            assert re.fullmatch(A5_EVIDENCE_SELECTOR_PATTERN, bad) is None
 
 
 # ---------------------------------------------------------------------------

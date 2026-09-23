@@ -2238,6 +2238,448 @@ class TestTypedModelExceptionNarrowing:
         assert client.call_count == 1
 
 
+# ---------------------------------------------------------------------------
+# Test: Exact EvidenceRef alias canonicalization (Issue #46)
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceAliasCanonicalization:
+    """A4C exact EvidenceRef alias canonicalization (Issue #46).
+
+    Two distinct valid pair-local selectors (e.g. L0 and R0) may resolve to
+    the same exact EvidenceRef identity (paragraph_id, role, strength, excerpt).
+    The persisted evidence_refs tuple must contain the EvidenceRef only once,
+    at its first occurrence in canonical selector order. This is NOT selector
+    deduplication (duplicate selector strings are still rejected).
+    """
+
+    def _plans_and_evidence(self, entries, pair_plans):
+        result = make_planning_result(entries, pair_plans)
+        blocks = _build_blocks(result)
+        assert len(blocks) == 1
+        block = blocks[0]
+        evidence = _block_endpoint_evidence(result, list(block.pair_plans))
+        return block.pair_plans, evidence
+
+    @staticmethod
+    def _payload(decisions):
+        return ReconciliationSelectorDecisionPayload.from_dict({"decisions": decisions})
+
+    def _validate(self, entries, pair_plans, decisions):
+        plans, evidence = self._plans_and_evidence(entries, pair_plans)
+        payload = self._payload(decisions)
+        return _validate_selector_block_payload(payload, plans, evidence)
+
+    # -- A. Cross-endpoint exact alias ---------------------------------------
+
+    def test_cross_endpoint_exact_alias_deduped(self):
+        """L0 and R0 both resolve to the same exact EvidenceRef A. The
+        persisted tuple is (A,), not (A, A)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH005_P0048", "primary", "explicit", "shared excerpt")
+        entries = (
+            make_candidate_entry(a, display_name="Mushroom", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="Grass", evidence=(ev_a,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_a,)
+
+    # -- B. Reverse provider selector order -----------------------------------
+
+    def test_reverse_order_same_canonical_result(self):
+        """Provider returns ["R0", "L0"] (reverse order). Existing canonical
+        selector order must make the persisted projection identical to ["L0", "R0"]: (A,)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH005_P0048", "primary", "explicit", "shared excerpt")
+        entries = (
+            make_candidate_entry(a, display_name="Mushroom", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="Grass", evidence=(ev_a,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+
+        results = {}
+        for order in (["L0", "R0"], ["R0", "L0"]):
+            decisions = [
+                {
+                    "left_candidate_ref": a, "right_candidate_ref": b,
+                    "decision": "same_entity", "reason_zh": "t.",
+                    "evidence_selectors": order,
+                },
+            ]
+            ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+            assert ok, detail
+            results[tuple(order)] = resolved[0]
+        assert results[("L0", "R0")] == results[("R0", "L0")] == (ev_a,)
+
+    # -- C. Stable first occurrence -------------------------------------------
+
+    def test_stable_first_occurrence(self):
+        """L0 -> A, L1 -> B, R0 -> A, R1 -> C. Canonical order: L0, L1, R0, R1.
+        Expected: (A, B, C) — the second A (from R0) is deduped."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH005_P0048", "primary", "explicit", "A")
+        ev_b = EvidenceRef("CH005_P0049", "primary", "explicit", "B")
+        ev_c = EvidenceRef("CH005_P0050", "primary", "explicit", "C")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_a, ev_b)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_a, ev_c)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "L1", "R0", "R1"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_a, ev_b, ev_c)
+
+    # -- D. Duplicate selector still invalid -----------------------------------
+
+    def test_duplicate_selector_still_invalid(self):
+        """["L0", "L0"] is still semantic-invalid (not an alias case)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(
+                EvidenceRef("CH001_P001", "primary", "explicit", "A."),)),
+            make_candidate_entry(b, display_name="B"),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "L0"],
+            },
+        ]
+        ok, detail, _ = self._validate(entries, pair_plans, decisions)
+        assert not ok
+        assert "duplicate" in detail
+
+    # -- E. Exact-identity boundary -------------------------------------------
+
+    def test_identity_differs_by_role(self):
+        """Two EvidenceRefs differing only in role remain distinct."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_primary = EvidenceRef("CH001_P001", "primary", "explicit", "X")
+        ev_supporting = EvidenceRef("CH001_P001", "supporting", "explicit", "X")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_primary,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_supporting,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_primary, ev_supporting)
+
+    def test_identity_differs_by_strength(self):
+        """Two EvidenceRefs differing only in strength remain distinct."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_explicit = EvidenceRef("CH001_P001", "primary", "explicit", "X")
+        ev_implied = EvidenceRef("CH001_P001", "primary", "implied", "X")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_explicit,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_implied,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_explicit, ev_implied)
+
+    def test_identity_differs_by_excerpt(self):
+        """Two EvidenceRefs differing only in excerpt remain distinct."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH001_P001", "primary", "explicit", "text A")
+        ev_b = EvidenceRef("CH001_P001", "primary", "explicit", "text B")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_b,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_a, ev_b)
+
+    def test_identity_none_vs_string_excerpt(self):
+        """excerpt=None vs any string: they remain distinct (not deduped)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_none = EvidenceRef("CH001_P001", "primary", "explicit", None)
+        ev_str = EvidenceRef("CH001_P001", "primary", "explicit", "text")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_none,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_str,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_none, ev_str)
+        assert resolved[0][0].excerpt is None
+
+    def test_identity_differs_by_paragraph_id(self):
+        """Two EvidenceRefs differing only in paragraph_id remain distinct."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH001_P001", "primary", "explicit", "X")
+        ev_b = EvidenceRef("CH001_P002", "primary", "explicit", "X")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_b,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_a, ev_b)
+
+    # -- F. Decision ID computed from deduped tuple ---------------------------
+
+    def test_decision_id_from_deduped_tuple(self):
+        """The decision_id must be computed from (A,), not (A, A)."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH005_P0048", "primary", "explicit", "shared")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_a,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        decisions = [
+            {
+                "left_candidate_ref": a, "right_candidate_ref": b,
+                "decision": "same_entity", "reason_zh": "t.",
+                "evidence_selectors": ["L0", "R0"],
+            },
+        ]
+        ok, detail, resolved = self._validate(entries, pair_plans, decisions)
+        assert ok, detail
+        assert resolved[0] == (ev_a,)
+
+        # Compute expected decision ID from the deduped tuple
+        expected_id = compute_llm_decision_id(
+            left_ref=a,
+            right_ref=b,
+            decision="same_entity",
+            method="llm",
+            reason_code="llm_same_entity",
+            reason_zh="t.",
+            evidence_refs=(ev_a,),  # deduped
+            prompt_id="a4.entity-reconciliation",
+            prompt_version=3,
+            request_hash="reqhash",
+        )
+        # Compute what the ID would be if NOT deduped
+        non_deduped_id = compute_llm_decision_id(
+            left_ref=a,
+            right_ref=b,
+            decision="same_entity",
+            method="llm",
+            reason_code="llm_same_entity",
+            reason_zh="t.",
+            evidence_refs=(ev_a, ev_a),  # NOT deduped
+            prompt_id="a4.entity-reconciliation",
+            prompt_version=3,
+            request_hash="reqhash",
+        )
+        assert expected_id != non_deduped_id
+
+        # Verify via full resolve path that the actual decision_id matches the deduped one
+        from short_drama.story.reconciliation_semantic import resolve_semantic_ambiguity
+
+        payload = make_valid_payload(a, b, "same_entity", reason_zh="t.",
+                                     evidence_selectors=["L0", "R0"])
+        client = FakeLLMClient([payload])
+        result = make_planning_result(entries, pair_plans)
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        assert len(res.semantic_decisions) == 1
+        dec = res.semantic_decisions[0]
+        assert dec.evidence_refs == (ev_a,)
+        # Recompute the expected ID using the actual request hash
+        actual_id = compute_llm_decision_id(
+            left_ref=a,
+            right_ref=b,
+            decision="same_entity",
+            method="llm",
+            reason_code="llm_same_entity",
+            reason_zh="t.",
+            evidence_refs=(ev_a,),
+            prompt_id="a4.entity-reconciliation",
+            prompt_version=3,
+            request_hash=client.request_hashes[0],
+        )
+        assert dec.decision_id == actual_id
+
+    # -- G. Bounded retry semantics ------------------------------------------
+
+    def test_alias_does_not_consume_retry(self):
+        """A valid payload with cross-endpoint exact alias succeeds in round 1:
+        semantic_rounds == 1."""
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH005_P0048", "primary", "explicit", "shared")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_a,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        result = make_planning_result(entries, pair_plans)
+
+        payload = make_valid_payload(a, b, "same_entity", reason_zh="t.",
+                                     evidence_selectors=["L0", "R0"])
+        client = FakeLLMClient([payload])
+        res = resolve_semantic_ambiguity(
+            result, make_profile(), make_semantic_profile(), client,
+            prompt_registry=PROMPT_REGISTRY,
+        )
+        assert client.call_count == 1
+        assert len(res.block_results) == 1
+        assert res.block_results[0].semantic_rounds == 1
+        assert res.block_results[0].decisions[0].evidence_refs == (ev_a,)
+
+    # -- H. A4D fail-closed verifier ------------------------------------------
+
+    def test_a4d_deduped_passes_duplicate_fails(self):
+        """A canonical deduped decision (A,) passes A4D semantic-identity
+        binding. A deliberately constructed (A, A) decision still fails."""
+        from short_drama.story.reconciliation_persistence import (
+            validate_a4_semantic_identity_binding,
+        )
+        from short_drama.story.reconciliation import A4SemanticIdentity
+        from short_drama.story.errors import StoryIntegrityError
+        from short_drama.story.reconciliation_semantic import prepare_semantic_resolution
+
+        a, b = f"{CHUNK_ID}:cand_char_001", f"{CHUNK_ID}:cand_char_002"
+        ev_a = EvidenceRef("CH005_P0048", "primary", "explicit", "shared")
+        entries = (
+            make_candidate_entry(a, display_name="A", evidence=(ev_a,)),
+            make_candidate_entry(b, display_name="B", evidence=(ev_a,)),
+        )
+        pair_plans = (make_pair_plan(a, b),)
+        planning = make_planning_result(entries, pair_plans)
+        profile = make_profile()
+
+        prep = prepare_semantic_resolution(planning, profile, make_semantic_profile())
+        # Build A4SemanticIdentity from the preparation
+        identity = A4SemanticIdentity(
+            reconciliation_profile_id=profile.profile_id,
+            reconciliation_profile_hash=profile.profile_hash,
+            plan_hash=planning.plan_hash,
+            prompt_id=prep.prompt_id,
+            prompt_version=prep.prompt_version,
+            prompt_content_hash=prep.prompt_content_hash,
+            output_schema_id=prep.output_schema_id,
+            output_schema_version=prep.output_schema_version,
+            output_schema_hash=prep.output_schema_hash,
+            semantic_profile_id=prep.semantic_profile_id,
+            semantic_profile_hash=prep.semantic_profile_hash,
+            semantic_request_hashes=prep.semantic_request_hashes,
+        )
+
+        request_hash = prep.semantic_request_hashes[0]
+        # Build a valid deduped decision (A,)
+        valid_dec_id = compute_llm_decision_id(
+            left_ref=a, right_ref=b, decision="same_entity",
+            method="llm", reason_code="llm_same_entity",
+            reason_zh="t.", evidence_refs=(ev_a,),
+            prompt_id=prep.prompt_id, prompt_version=prep.prompt_version,
+            request_hash=request_hash,
+        )
+        valid_dec = ReconciliationDecision(
+            decision_id=valid_dec_id,
+            left_candidate_ref=a,
+            right_candidate_ref=b,
+            decision="same_entity",
+            method="llm",
+            reason_code="llm_same_entity",
+            reason_zh="t.",
+            evidence_refs=(ev_a,),
+            prompt_id=prep.prompt_id,
+            prompt_version=prep.prompt_version,
+            generation_provenance=make_provenance(prep, request_hash),
+        )
+        # Passes A4D
+        validate_a4_semantic_identity_binding(
+            decisions=(valid_dec,),
+            semantic_identity=identity,
+            candidate_index=planning.candidate_index,
+            replanned=planning,
+        )
+
+        # Build a deliberately duplicated (A, A) decision
+        dup_dec_id = compute_llm_decision_id(
+            left_ref=a, right_ref=b, decision="same_entity",
+            method="llm", reason_code="llm_same_entity",
+            reason_zh="t.", evidence_refs=(ev_a, ev_a),
+            prompt_id=prep.prompt_id, prompt_version=prep.prompt_version,
+            request_hash=request_hash,
+        )
+        dup_dec = ReconciliationDecision(
+            decision_id=dup_dec_id,
+            left_candidate_ref=a,
+            right_candidate_ref=b,
+            decision="same_entity",
+            method="llm",
+            reason_code="llm_same_entity",
+            reason_zh="t.",
+            evidence_refs=(ev_a, ev_a),
+            prompt_id=prep.prompt_id,
+            prompt_version=prep.prompt_version,
+            generation_provenance=make_provenance(prep, request_hash),
+        )
+        # Fails A4D with duplicate evidence
+        with pytest.raises(StoryIntegrityError, match="duplicate evidence"):
+            validate_a4_semantic_identity_binding(
+                decisions=(dup_dec,),
+                semantic_identity=identity,
+                candidate_index=planning.candidate_index,
+                replanned=planning,
+            )
+
+
 def make_valid_payload(
     left: str,
     right: str,
@@ -2259,3 +2701,25 @@ def make_valid_payload(
             }
         ]
     }
+
+
+def make_provenance(prep, request_hash: str):
+    """Build an LLMInvocationProvenance matching the preparation's identity."""
+    from short_drama.llm import LLMInvocationProvenance
+    return LLMInvocationProvenance(
+        provider_family="qwen",
+        model="qwen3-27b",
+        semantic_profile_id=prep.semantic_profile_id,
+        semantic_profile_hash=prep.semantic_profile_hash,
+        prompt_id=prep.prompt_id,
+        prompt_version=prep.prompt_version,
+        prompt_content_hash=prep.prompt_content_hash,
+        rendered_prompt_hash="1" * 64,
+        output_schema_id=prep.output_schema_id,
+        output_schema_version=prep.output_schema_version,
+        output_schema_hash=prep.output_schema_hash,
+        request_hash=request_hash,
+        provider_response_id="resp",
+        finish_reason="stop",
+        usage=None,
+    )

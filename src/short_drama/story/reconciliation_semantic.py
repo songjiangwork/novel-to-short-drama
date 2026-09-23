@@ -22,6 +22,8 @@ This module implements the A4C semantic ambiguity-resolution slice:
         ↓
     selector -> exact endpoint EvidenceRef resolution (Python-owned identity)
         ↓
+    stable exact-EvidenceRef alias dedup (first-occurrence in canonical order)
+        ↓
     ReconciliationDecision construction (method=llm)
         ↓
     combined deterministic + semantic decision result
@@ -46,12 +48,19 @@ against that exact pair (syntax, range, duplicates, no third candidate) and,
 after every selector in a decision is valid, canonicalizes the selector set to
 the frozen pair-local order (all left selectors by ascending index, then all
 right selectors by ascending index) before resolving it to the exact endpoint
-EvidenceRef objects. Canonicalizing means semantically equivalent selector
-permutations (e.g. ["L0","R0"] vs ["R0","L0"]) resolve to the SAME persisted
-EvidenceRef tuple and the SAME decision_id. An invalid selector fails the A4C
-semantic output validation and consumes a bounded semantic round exactly like
-the existing invalid-evidence behavior. The persisted A4 decision contracts are
-unchanged and selector strings never enter them.
+EvidenceRef objects. The resolved sequence is then projected to the canonical
+exact-EvidenceRef form: two distinct valid selectors that resolve to the same
+exact EvidenceRef identity (paragraph_id, role, strength, excerpt) are
+collapsed to the first occurrence in canonical selector order. This is a
+persisted-projection canonicalization (NOT selector deduplication or repair),
+and it ensures the persisted ``evidence_refs`` tuple satisfies the A4D
+invariant (no duplicate exact EvidenceRef). Canonicalizing means semantically
+equivalent selector permutations (e.g. ["L0","R0"] vs ["R0","L0"]) resolve to
+the SAME persisted EvidenceRef tuple and the SAME decision_id. An invalid
+selector fails the A4C semantic output validation and consumes a bounded
+semantic round exactly like the existing invalid-evidence behavior. The
+persisted A4 decision contracts are unchanged and selector strings never enter
+them.
 """
 
 from __future__ import annotations
@@ -618,6 +627,17 @@ def _canonicalize_evidence_selectors(selectors: list[str]) -> list[str]:
     return left + right
 
 
+def _evidence_exact_identity(ev: EvidenceRef) -> tuple[str, str, str, "str | None"]:
+    """The exact persisted EvidenceRef identity tuple.
+
+    Two EvidenceRefs are the same evidence for dedupe purposes if and only if
+    their complete identity tuple ``(paragraph_id, role, strength, excerpt)``
+    is equal. ``excerpt=None`` is distinct from any string value. No
+    normalization, case-folding, or semantic similarity is applied.
+    """
+    return (ev.paragraph_id, ev.role, ev.strength, ev.excerpt)
+
+
 def _validate_selector_block_payload(
     payload: ReconciliationSelectorDecisionPayload,
     pair_plans: tuple[ReconciliationPairPlan, ...],
@@ -632,8 +652,9 @@ def _validate_selector_block_payload(
 
     Returns (is_valid, failure_detail, resolved_evidence). ``resolved_evidence``
     is aligned with ``payload.decisions`` when valid (each a tuple of the exact
-    endpoint EvidenceRefs in the CANONICAL pair-local selector order, see
-    :func:`_canonicalize_evidence_selectors`), otherwise empty.
+    endpoint EvidenceRefs in the CANONICAL pair-local selector order with exact-
+    EvidenceRef alias deduplication; see :func:`_canonicalize_evidence_selectors`
+    and :func:`_evidence_exact_identity`), otherwise empty.
 
     Checks (the exact pair order / ref checks are UNCHANGED from the prior
     endpoint-only validator):
@@ -648,8 +669,15 @@ def _validate_selector_block_payload(
     Only AFTER every selector in a decision has passed syntax + range +
     duplicate validation is the selector SET canonicalized (left selectors
     first by index, then right selectors by index) and resolved to the exact
-    endpoint EvidenceRefs. Invalid / out-of-range / duplicate selectors always
-    fail BEFORE canonicalization and consume a bounded semantic round.
+    endpoint EvidenceRefs. The resolved sequence is then projected to the
+    canonical exact-EvidenceRef form: duplicates by exact identity
+    ``(paragraph_id, role, strength, excerpt)`` are collapsed to their first
+    occurrence in canonical selector order. This is a persisted-projection
+    canonicalization, NOT a selector repair: the provider's valid selectors
+    are all preserved, and the resulting ``evidence_refs`` tuple satisfies the
+    A4D invariant (no duplicate exact EvidenceRef). Invalid / out-of-range /
+    duplicate selectors always fail BEFORE canonicalization and consume a
+    bounded semantic round.
     """
     requested_pairs = [
         (p.left_candidate_ref, p.right_candidate_ref) for p in pair_plans
@@ -718,14 +746,24 @@ def _validate_selector_block_payload(
         # semantically equivalent permutations persist identically.
         canonical_selectors = _canonicalize_evidence_selectors(validated_selectors)
 
-        # Resolve the canonical selector sequence to exact endpoint EvidenceRefs.
+        # Resolve the canonical selector sequence to exact endpoint EvidenceRefs,
+        # then apply stable exact-EvidenceRef alias deduplication: two distinct
+        # valid selectors (e.g. L0 and R0) may resolve to the same exact
+        # EvidenceRef identity; only the first occurrence (in canonical selector
+        # order) is persisted. This is NOT selector deduplication — duplicate
+        # selector strings are still rejected above.
         decision_evidence: list[EvidenceRef] = []
+        seen_exact_evidence: set[tuple[str, str, str, "str | None"]] = set()
         for selector in canonical_selectors:
             index = int(selector[1:])
             if selector[0] == "L":
-                decision_evidence.append(left_evidence[index])
+                ev = left_evidence[index]
             else:  # "R"
-                decision_evidence.append(right_evidence[index])
+                ev = right_evidence[index]
+            identity = _evidence_exact_identity(ev)
+            if identity not in seen_exact_evidence:
+                seen_exact_evidence.add(identity)
+                decision_evidence.append(ev)
         resolved.append(tuple(decision_evidence))
 
     return True, "", resolved
@@ -795,10 +833,13 @@ def _convert_to_decision(
     ``evidence_refs`` are the exact endpoint EvidenceRefs resolved from the
     provider's pair-local selectors in the canonical pair-local selector order
     (left-by-index, then right-by-index; see
-    :func:`_canonicalize_evidence_selectors`). The persisted
+    :func:`_canonicalize_evidence_selectors`) with stable exact-EvidenceRef
+    alias deduplication applied (first occurrence in canonical order; see
+    :func:`_evidence_exact_identity`). The persisted
     :class:`ReconciliationDecision` carries those exact EvidenceRefs -- no
-    selector strings ever appear in the persisted contract, and the ordering is
-    canonical (independent of the order the provider returned the selectors).
+    selector strings ever appear in the persisted contract, the ordering is
+    canonical (independent of the order the provider returned the selectors),
+    and the tuple contains no duplicate exact EvidenceRefs.
     """
     reason_code = _REASON_CODE_MAP[decision]
     decision_id = compute_llm_decision_id(

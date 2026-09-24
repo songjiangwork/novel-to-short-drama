@@ -45,12 +45,23 @@ from short_drama.story import (
     ConsolidationPlanningResult,
     StoryIntegrityError,
     build_consolidation_planning,
+    load_consolidation_profile,
 )
 
 DEFAULT_RUNS_ROOT = REPO_ROOT / "runs" / "a4e_real_novel"
 DEFAULT_PROJECT = "a3e-real-novel"
 DEFAULT_DOCUMENT = "src_001"
 DEFAULT_PROFILE = "entity-reconciliation-v2"
+DEFAULT_CONSOLIDATION_PROFILE = REPO_ROOT / "profiles" / "consolidation_v1.yaml"
+
+# Frozen Alice v1.2-A5B blocking-v1 acceptance gates (post-audit refinement).
+# ``relationship`` is an EXACT expectation; the rest are upper bounds; auto_same
+# is an EXACT zero expectation (the Alice corpus produces no deterministic merges).
+ALICE_GATE_FACT_MAX = 5300
+ALICE_GATE_EVENT_MAX = 4300
+ALICE_GATE_RELATIONSHIP_EXACT = 845
+ALICE_GATE_TOTAL_MAX = 10450
+ALICE_GATE_AUTO_SAME_EXACT = 0
 
 # Bound-reference field kinds (mirrors the A3 validation authority).
 _PERSON_FIELDS = ("participants", "source_entity_ref", "target_entity_ref")
@@ -490,7 +501,9 @@ def _distance_for(chunk_ordinal: dict[str, int], a, b) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _audit_checks(result: ConsolidationPlanningResult) -> list[tuple[str, bool]]:
+def _audit_checks(
+    result: ConsolidationPlanningResult, *, alice_gates: bool = False
+) -> list[tuple[str, bool]]:
     index = result.index
     coverage = result.coverage
     counts = _field_namespaces(result)
@@ -534,6 +547,117 @@ def _audit_checks(result: ConsolidationPlanningResult) -> list[tuple[str, bool]]
         counts[field][_ns] == 0 for field in counts for _ns in ("other",)
     )
     checks.append(("every bound id is in the char_/loc_/unres_ namespace", other_ok))
+
+    # Phase B deterministic-planning invariants (always checked).
+    fact_auto, _ = _pair_plan_split(result.fact_pair_plans)
+    event_auto, _ = _pair_plan_split(result.event_pair_plans)
+    rel_auto, _ = _pair_plan_split(result.relationship_pair_plans)
+    auto_total = fact_auto + event_auto + rel_auto
+    n_fact = len(result.fact_pair_plans)
+    n_event = len(result.event_pair_plans)
+    n_rel = len(result.relationship_pair_plans)
+    total = n_fact + n_event + n_rel
+    checks.append(
+        (
+            "deterministic decision set size == auto_same pair count",
+            len(result.deterministic_decision_set.decisions) == auto_total,
+        )
+    )
+    checks.append(
+        (
+            "plan hash is a 64-hex canonical content hash",
+            isinstance(result.plan_hash, str)
+            and len(result.plan_hash) == 64
+            and all(c in "0123456789abcdef" for c in result.plan_hash),
+        )
+    )
+
+    # Alice-specific acceptance gates (only for the Alice corpus, blocking-v1).
+    if not alice_gates:
+        return checks
+    checks.append(
+        (
+            f"auto_same pair count == {ALICE_GATE_AUTO_SAME_EXACT} (got {auto_total})",
+            auto_total == ALICE_GATE_AUTO_SAME_EXACT,
+        )
+    )
+    checks.append(
+        (
+            f"fact pair plans <= {ALICE_GATE_FACT_MAX} (got {n_fact})",
+            n_fact <= ALICE_GATE_FACT_MAX,
+        )
+    )
+    checks.append(
+        (
+            f"event pair plans <= {ALICE_GATE_EVENT_MAX} (got {n_event})",
+            n_event <= ALICE_GATE_EVENT_MAX,
+        )
+    )
+    checks.append(
+        (
+            f"relationship pair plans == {ALICE_GATE_RELATIONSHIP_EXACT} (got {n_rel})",
+            n_rel == ALICE_GATE_RELATIONSHIP_EXACT,
+        )
+    )
+    checks.append(
+        (
+            f"total pair plans <= {ALICE_GATE_TOTAL_MAX} (got {total})",
+            total <= ALICE_GATE_TOTAL_MAX,
+        )
+    )
+    return checks
+    fact_auto, _ = _pair_plan_split(result.fact_pair_plans)
+    event_auto, _ = _pair_plan_split(result.event_pair_plans)
+    rel_auto, _ = _pair_plan_split(result.relationship_pair_plans)
+    auto_total = fact_auto + event_auto + rel_auto
+    n_fact = len(result.fact_pair_plans)
+    n_event = len(result.event_pair_plans)
+    n_rel = len(result.relationship_pair_plans)
+    total = n_fact + n_event + n_rel
+    checks.append(
+        (
+            f"auto_same pair count == {ALICE_GATE_AUTO_SAME_EXACT} (got {auto_total})",
+            auto_total == ALICE_GATE_AUTO_SAME_EXACT,
+        )
+    )
+    checks.append(
+        (
+            f"fact pair plans <= {ALICE_GATE_FACT_MAX} (got {n_fact})",
+            n_fact <= ALICE_GATE_FACT_MAX,
+        )
+    )
+    checks.append(
+        (
+            f"event pair plans <= {ALICE_GATE_EVENT_MAX} (got {n_event})",
+            n_event <= ALICE_GATE_EVENT_MAX,
+        )
+    )
+    checks.append(
+        (
+            f"relationship pair plans == {ALICE_GATE_RELATIONSHIP_EXACT} (got {n_rel})",
+            n_rel == ALICE_GATE_RELATIONSHIP_EXACT,
+        )
+    )
+    checks.append(
+        (
+            f"total pair plans <= {ALICE_GATE_TOTAL_MAX} (got {total})",
+            total <= ALICE_GATE_TOTAL_MAX,
+        )
+    )
+    checks.append(
+        (
+            "deterministic decision set size == auto_same pair count",
+            len(result.deterministic_decision_set.decisions) == auto_total,
+        )
+    )
+    checks.append(
+        (
+            "plan hash is a 64-hex canonical content hash",
+            isinstance(result.plan_hash, str)
+            and len(result.plan_hash) == 64
+            and all(c in "0123456789abcdef" for c in result.plan_hash),
+        )
+    )
     return checks
 
 
@@ -703,6 +827,50 @@ def _print_naive_pair_universe(result: ConsolidationPlanningResult) -> None:
     print()
 
 
+def _pair_plan_split(plans) -> tuple[int, int]:
+    """Return ``(auto_same_count, needs_semantic_decision_count)`` for a plan list."""
+    auto = sum(1 for p in plans if p.state == "auto_same")
+    needs = sum(1 for p in plans if p.state == "needs_semantic_decision")
+    return auto, needs
+
+
+def _print_pair_planning(result: ConsolidationPlanningResult) -> None:
+    """Report the production blocking-v1 pair plans (Phase B, zero-provider).
+
+    This is the deterministic, no-N^2 pair generation output -- the exact
+    material that would feed the semantic stream (#52/#53). It is NOT the
+    diagnostic corpus-shape enumeration above.
+    """
+    fact_auto, fact_needs = _pair_plan_split(result.fact_pair_plans)
+    event_auto, event_needs = _pair_plan_split(result.event_pair_plans)
+    rel_auto, rel_needs = _pair_plan_split(result.relationship_pair_plans)
+    auto_total = fact_auto + event_auto + rel_auto
+    total = len(result.fact_pair_plans) + len(result.event_pair_plans) + len(
+        result.relationship_pair_plans
+    )
+    print("=== PRODUCTION PAIR PLANNING (blocking-v1) ===")
+    print(f"blocking_policy_id:            {result.blocking_policy_id}")
+    print(f"text_normalization_policy_id:  {result.text_normalization_policy_id}")
+    print(f"exact_safe_policy_id:          {result.exact_safe_policy_id}")
+    print(f"planning_policy_id:            {result.planning_policy_id}")
+    print(
+        f"fact_pair_plans:               {len(result.fact_pair_plans):5d}  "
+        f"(auto_same={fact_auto}, needs_semantic_decision={fact_needs})"
+    )
+    print(
+        f"event_pair_plans:              {len(result.event_pair_plans):5d}  "
+        f"(auto_same={event_auto}, needs_semantic_decision={event_needs})"
+    )
+    print(
+        f"relationship_pair_plans:       {len(result.relationship_pair_plans):5d}  "
+        f"(auto_same={rel_auto}, needs_semantic_decision={rel_needs})"
+    )
+    print(f"total_pair_plans:              {total:5d}")
+    print(f"deterministic_decisions:       {len(result.deterministic_decision_set.decisions):5d}")
+    print(f"plan_hash:                     {result.plan_hash}")
+    print()
+
+
 def _print_source_distance(result: ConsolidationPlanningResult) -> None:
     index = result.index
     ordinal = _chunk_ordinal_by_chunk_id(result.snapshot)
@@ -787,13 +955,17 @@ def run_audit(
     project_id: str,
     document_id: str,
     reconciliation_profile_id: str,
+    consolidation_profile_path: Path = DEFAULT_CONSOLIDATION_PROFILE,
+    alice_gates: bool = False,
 ) -> int:
+    consolidation_profile = load_consolidation_profile(consolidation_profile_path)
     result = build_consolidation_planning(
         store,
         pointers,
         project_id=project_id,
         document_id=document_id,
         reconciliation_profile_id=reconciliation_profile_id,
+        consolidation_profile=consolidation_profile,
     )
     index = result.index
     ordinal = _chunk_ordinal_by_chunk_id(result.snapshot)
@@ -818,6 +990,8 @@ def run_audit(
     _print_relationships(result)
     # 7. Naive pair universe
     _print_naive_pair_universe(result)
+    # 7b. Production blocking-v1 pair plans (Phase B, zero-provider)
+    _print_pair_planning(result)
     # 8. Source distance (also returns the pair analyses reused below)
     analyses = _print_source_distance(result)
 
@@ -853,7 +1027,7 @@ def run_audit(
 
     # Read-only audit checks (gate)
     print("=== AUDIT CHECKS ===")
-    checks = _audit_checks(result)
+    checks = _audit_checks(result, alice_gates=alice_gates)
     all_pass = True
     for label, passed in checks:
         all_pass = all_pass and passed
@@ -864,8 +1038,9 @@ def run_audit(
         print("A5B AUDIT RESULT: FAIL", file=sys.stderr)
         return 2
     print("A5B AUDIT RESULT: PASS (zero-provider, read-only)")
-    print("Phase A complete: input binding + indexing + source order + coverage + audit.")
-    print("STOP: no blocking, provider call, canonical id, persistence, or CURRENT.")
+    print("Phase A + Phase B complete: input binding + indexing + source order +")
+    print("coverage + corpus-shape audit + deterministic blocking-v1 pair planning.")
+    print("Still zero-provider: no LLM call, no canonical id, no A5 persistence/CURRENT.")
     return 0
 
 
@@ -877,6 +1052,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument("--document", default=DEFAULT_DOCUMENT)
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
+    parser.add_argument(
+        "--no-alice-gates",
+        action="store_true",
+        help="skip the Alice-specific blocking-v1 acceptance gates "
+        "(structural + deterministic checks still apply)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -887,6 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
             project_id=args.project,
             document_id=args.document,
             reconciliation_profile_id=args.profile,
+            alice_gates=not args.no_alice_gates,
         )
     except (ConsolidationCurrentMissingError, StoryIntegrityError) as exc:
         print(f"A5B AUDIT RESULT: FAIL ({type(exc).__name__}: {exc})", file=sys.stderr)

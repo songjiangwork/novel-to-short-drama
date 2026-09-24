@@ -72,6 +72,7 @@ from short_drama.story import (
     build_consolidation_planning,
     compute_llm_decision_id,
     finalize_reconciliation,
+    load_consolidation_profile,
     load_entity_reconciliation_profile,
     llm_reason_code,
     pack_semantic_pairs_v1,
@@ -102,6 +103,11 @@ EXTRACTION_PROFILE_ID = "story-extraction-v1"
 RECON_PROFILE_ID = "entity-reconciliation-v2"
 RECON_PROFILE_PATH = REPO_ROOT / "profiles" / "entity_reconciliation_v2.yaml"
 A4_LLM_PROFILE_PATH = REPO_ROOT / "profiles" / "entity_reconciliation_llm_v1.yaml"
+CONSOLIDATION_PROFILE_PATH = REPO_ROOT / "profiles" / "consolidation_v1.yaml"
+
+
+def _consolidation_profile():
+    return load_consolidation_profile(CONSOLIDATION_PROFILE_PATH)
 
 _PARAS = ("CH001_P0001", "CH001_P0002", "CH001_P0003")
 _CHUNK_ID = "CH001_C001"
@@ -681,6 +687,7 @@ def test_full_planning_result(tmp_path):
         project_id=PROJECT,
         document_id=DOCUMENT,
         reconciliation_profile_id=RECON_PROFILE_ID,
+        consolidation_profile=_consolidation_profile(),
     )
     assert result.coverage.fact_candidate_count == 1
     assert result.coverage.event_candidate_count == 1

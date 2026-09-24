@@ -31,18 +31,27 @@ pointer, and never invokes a provider.
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore
+from short_drama.artifacts.canonical import content_hash
 from short_drama.foundation import FilePointerStore
 
 from .chunking import ChunkManifest, SourceChunk
 from .consolidation import (
     ConsolidationCandidateIndex,
     ConsolidationCoverageSummary,
+    ConsolidationProfile,
     IndexedEventCandidate,
     IndexedFactCandidate,
     IndexedRelationshipCandidate,
+)
+from .reconciliation_planning import (
+    PAIR_STATE_AUTO_SAME,
+    PAIR_STATE_NEEDS_SEMANTIC_DECISION,
 )
 from .errors import ConsolidationCurrentMissingError, StoryIntegrityError
 from .extraction import CandidateExtraction
@@ -137,19 +146,276 @@ class ConsolidationInputSnapshot:
     candidate_extraction_refs: tuple[ArtifactRef, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class ConsolidationPlanningResult:
-    """The zero-provider A5B Phase A planning outcome.
+# ---------------------------------------------------------------------------
+# Phase B -- deterministic blocking-v1 pair planning (zero provider)
+#
+# The frozen post-audit A5B blocking-v1 contract is implemented here as pure,
+# deterministic, bucket/index-based pair generation over the Phase A
+# ``ConsolidationCandidateIndex``. It never iterates the naive N-choose-2
+# cross-product per domain, never calls a provider, and never writes an
+# artifact or pointer. The ``needs_semantic_decision`` pairs form the semantic
+# input stream for #52/#53 (no prompt rendering, provider call, or result
+# parsing is performed here).
+# ---------------------------------------------------------------------------
 
-    Carries the exact input snapshot, the A5B-built
-    ``ConsolidationCandidateIndex`` (source-ordered), and the
-    ``ConsolidationCoverageSummary``. This is in-memory only; Phase A performs
-    no A5 persistence / CURRENT / blocking.
+#: The frozen A5B blocking policy id (from profiles/consolidation_v1.yaml).
+A5B_BLOCKING_POLICY_ID = "consolidation-blocking-v1"
+#: The frozen deterministic text-normalization policy id.
+TEXT_NORMALIZATION_POLICY_ID = "a5-text-normalization-v1"
+#: The frozen exact-safe auto-same policy id.
+EXACT_SAFE_POLICY_ID = "a5-exact-safe-v1"
+#: The frozen deterministic pair-planning policy id.
+PLANNING_POLICY_ID = "a5-pair-planning-v1"
+#: The fixed method / reason-code for deterministic exact-safe decisions.
+DETERMINISTIC_METHOD = "deterministic"
+EXACT_SAFE_REASON_CODE = "exact_safe"
+
+#: All Unicode whitespace (collapsed to a single ASCII space by normalization).
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_consolidation_text(value: str) -> str:
+    """Deterministic A5 text normalization (``a5-text-normalization-v1``).
+
+    Unicode NFKC -> casefold -> strip -> collapse internal whitespace to a
+    single ASCII space. No punctuation removal, no stemming, no synonym
+    mapping, no fuzzy threshold, no edit distance, no embedding, and no LLM.
+    """
+    if value is None:
+        return ""
+    text = unicodedata.normalize("NFKC", value)
+    text = text.casefold()
+    text = text.strip()
+    return _WS_RE.sub(" ", text)
+
+
+def _require_exact_safe_text(value: str, name: str) -> str:
+    """Fail closed if an exact-safe required text field is empty/missing."""
+    if value is None or value.strip() == "":
+        raise StoryIntegrityError(
+            f"exact-safe: {name!r} must be a non-empty text value"
+        )
+    return value
+
+
+def _endpoint_identity_key(
+    source_ref: str, target_ref: str, direction: str
+) -> tuple:
+    """The A5 relationship endpoint identity key (blocking group + exact-safe).
+
+    * directed  -> ordered (source, target)
+    * symmetric -> unordered frozenset of the two bound refs
+    * unknown   -> unordered frozenset of the two bound refs
+    """
+    if direction == "directed":
+        return ("directed", source_ref, target_ref)
+    if direction in ("symmetric", "unknown"):
+        return (direction, frozenset((source_ref, target_ref)))
+    raise StoryIntegrityError(
+        f"exact-safe: unknown relationship direction {direction!r}"
+    )
+
+
+def fact_exact_safe_key(candidate: IndexedFactCandidate) -> tuple:
+    """Fact exact-safe auto-same key (exact-safe-v1).
+
+    ``(fact_type, normalized statement, exact subject_refs tuple, exact
+    object_refs tuple)``.
+    """
+    _require_exact_safe_text(candidate.fact_type, "fact_type")
+    _require_exact_safe_text(candidate.statement_zh, "statement_zh")
+    return (
+        candidate.fact_type,
+        normalize_consolidation_text(candidate.statement_zh),
+        tuple(candidate.subject_refs),
+        tuple(candidate.object_refs),
+    )
+
+
+def event_exact_safe_key(candidate: IndexedEventCandidate) -> tuple:
+    """Event exact-safe auto-same key (exact-safe-v1).
+
+    ``(normalized summary, exact participants tuple, exact locations tuple,
+    temporal_mode)``.
+    """
+    _require_exact_safe_text(candidate.summary_zh, "summary_zh")
+    return (
+        normalize_consolidation_text(candidate.summary_zh),
+        tuple(candidate.participants),
+        tuple(candidate.locations),
+        candidate.temporal_mode,
+    )
+
+
+def relationship_exact_safe_key(candidate: IndexedRelationshipCandidate) -> tuple:
+    """Relationship exact-safe auto-same key (exact-safe-v1).
+
+    ``(endpoint_identity_key, normalized type, normalized optional state)``.
+    ``None`` and the empty string are distinct for the optional state.
+    """
+    _require_exact_safe_text(
+        candidate.relationship_type_zh, "relationship_type_zh"
+    )
+    endpoint_key = _endpoint_identity_key(
+        candidate.source_entity_ref,
+        candidate.target_entity_ref,
+        candidate.direction,
+    )
+    normalized_state = (
+        None
+        if candidate.state_zh is None
+        else normalize_consolidation_text(candidate.state_zh)
+    )
+    return (
+        endpoint_key,
+        normalize_consolidation_text(candidate.relationship_type_zh),
+        normalized_state,
+    )
+
+
+def _chunk_ordinal_from_source_order_key(source_order_key: str) -> int:
+    """Recover the authoritative 1-based chunk ordinal from the source key.
+
+    The first field of the A5B source-order key is the zero-padded chunk
+    ordinal that the Phase A index construction used.
+    """
+    first_field = source_order_key.split(":", 1)[0]
+    if not first_field.isdigit():
+        raise StoryIntegrityError(
+            f"source_order_key {source_order_key!r} does not start with a chunk ordinal"
+        )
+    ordinal = int(first_field)
+    if ordinal < 1:
+        raise StoryIntegrityError(f"chunk ordinal must be >= 1, got {ordinal}")
+    return ordinal
+
+
+@dataclass(frozen=True, slots=True)
+class FactPairPlan:
+    """One A5 fact pair plan (``a5-pair-planning-v1``)."""
+
+    left_ref: str
+    right_ref: str
+    state: str  # PAIR_STATE_AUTO_SAME | PAIR_STATE_NEEDS_SEMANTIC_DECISION
+    blocking_signal_counts: dict[str, int]
+
+    def to_dict(self) -> dict:
+        return {
+            "left_ref": self.left_ref,
+            "right_ref": self.right_ref,
+            "state": self.state,
+            "blocking_signal_counts": dict(self.blocking_signal_counts),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EventPairPlan:
+    """One A5 event pair plan (``a5-pair-planning-v1``)."""
+
+    left_ref: str
+    right_ref: str
+    state: str
+    blocking_signal_counts: dict[str, int]
+
+    def to_dict(self) -> dict:
+        return {
+            "left_ref": self.left_ref,
+            "right_ref": self.right_ref,
+            "state": self.state,
+            "blocking_signal_counts": dict(self.blocking_signal_counts),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipPairPlan:
+    """One A5 relationship pair plan (``a5-pair-planning-v1``)."""
+
+    left_ref: str
+    right_ref: str
+    state: str
+    blocking_signal_counts: dict[str, int]
+
+    def to_dict(self) -> dict:
+        return {
+            "left_ref": self.left_ref,
+            "right_ref": self.right_ref,
+            "state": self.state,
+            "blocking_signal_counts": dict(self.blocking_signal_counts),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DeterministicConsolidationDecision:
+    """A deterministic exact-safe A5 decision (``a5-exact-safe-v1``).
+
+    ``method=deterministic``; ``prompt_id`` / ``prompt_version`` /
+    ``generation_provenance`` are always ``None`` (no provider data).
     """
 
+    decision_id: str
+    left_ref: str
+    right_ref: str
+    pair_kind: str  # "fact" | "event" | "relationship"
+    method: str
+    reason_code: str
+    reason_zh: str
+    evidence_refs: tuple
+    prompt_id: None
+    prompt_version: None
+    generation_provenance: None
+
+    def to_dict(self) -> dict:
+        return {
+            "decision_id": self.decision_id,
+            "left_ref": self.left_ref,
+            "right_ref": self.right_ref,
+            "pair_kind": self.pair_kind,
+            "method": self.method,
+            "reason_code": self.reason_code,
+            "reason_zh": self.reason_zh,
+            "evidence_refs": [e.to_dict() for e in self.evidence_refs],
+            "prompt_id": self.prompt_id,
+            "prompt_version": self.prompt_version,
+            "generation_provenance": self.generation_provenance,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DeterministicConsolidationDecisionSet:
+    """The set of deterministic auto-same A5 decisions (no uncertain decisions)."""
+
+    decisions: tuple
+
+    def to_dict(self) -> dict:
+        return {"decisions": [d.to_dict() for d in self.decisions]}
+
+
+@dataclass(frozen=True, slots=True)
+class ConsolidationPlanningResult:
+    """The zero-provider A5B planning outcome (Phase A + Phase B).
+
+    Carries the exact input snapshot, the A5B-built ``ConsolidationCandidateIndex``
+    (source-ordered), and the ``ConsolidationCoverageSummary`` (Phase A), plus
+    the deterministic blocking-v1 pair plans, the deterministic auto-same
+    decision set, the frozen policy ids, and the deterministic plan hash
+    (Phase B). This is in-memory only; it performs no A5 persistence, no
+    CURRENT publication, and no provider call.
+    """
+
+    # Phase A
     snapshot: ConsolidationInputSnapshot
     index: ConsolidationCandidateIndex
     coverage: ConsolidationCoverageSummary
+    # Phase B
+    fact_pair_plans: tuple
+    event_pair_plans: tuple
+    relationship_pair_plans: tuple
+    deterministic_decision_set: DeterministicConsolidationDecisionSet
+    blocking_policy_id: str
+    text_normalization_policy_id: str
+    exact_safe_policy_id: str
+    planning_policy_id: str
+    plan_hash: str
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +1131,374 @@ def build_consolidation_input_snapshot(
     )
 
 
+# Fixed Chinese reasons for deterministic exact-safe auto-same decisions.
+_FACT_REASON_ZH = "事实精确一致，确定性合并"
+_EVENT_REASON_ZH = "事件精确一致，确定性合并"
+_RELATIONSHIP_REASON_ZH = "关系精确一致，确定性合并"
+
+
+# ---------------------------------------------------------------------------
+# Phase B -- pure bucket/index-based pair generation (no N-choose-2 cross product)
+# ---------------------------------------------------------------------------
+
+
+def _ref_pair(left_ref: str, right_ref: str) -> tuple:
+    """An ordered ``(left, right)`` pair with ``left < right`` (fail closed)."""
+    if left_ref == right_ref:
+        raise StoryIntegrityError(
+            f"cannot form a pair from a single ref {left_ref!r}"
+        )
+    return (left_ref, right_ref) if left_ref < right_ref else (right_ref, left_ref)
+
+
+def _pairs_within_buckets(buckets, refs) -> set:
+    """Every unordered pair inside each bucket that has at least two members."""
+    pairs = set()
+    for group in buckets.values():
+        count = len(group)
+        for i in range(count):
+            for j in range(i + 1, count):
+                pairs.add(_ref_pair(refs[group[i]], refs[group[j]]))
+    return pairs
+
+
+def _adjacent_chunk_pairs(by_chunk, refs) -> set:
+    """Unordered pairs across chunk ordinals exactly one apart (distance == 1)."""
+    pairs = set()
+    for ord_a, group_a in by_chunk.items():
+        for ord_b in (ord_a - 1, ord_a + 1):
+            group_b = by_chunk.get(ord_b)
+            if not group_b:
+                continue
+            for i in group_a:
+                for j in group_b:
+                    pairs.add(_ref_pair(refs[i], refs[j]))
+    return pairs
+
+
+def _fact_signal_pair_sets(facts, ordinal) -> list:
+    """Fact blocking-v1 signals as ``[(signal_name, set of (left, right) pairs)]``.
+
+    A pair is a candidate iff any signal fires. Each signal is generated from
+    buckets/indices (never the naive N-choose-2 cross product):
+
+    1. ``exact_normalized_statement``   -- same non-empty normalized statement
+    2. ``evidence_paragraph_overlap``   -- share a global evidence paragraph
+    3. ``same_fact_type_bound_entity_overlap`` -- same normalized fact_type AND
+       a shared bound entity
+    4. ``same_fact_type_same_chunk``    -- same normalized fact_type AND same chunk
+    5. ``same_fact_type_adjacent_chunk`` -- same normalized fact_type AND
+       adjacent chunk (distance exactly 1)
+    """
+    n = len(facts)
+    refs = [f.global_candidate_ref for f in facts]
+    norm_stmt = [normalize_consolidation_text(f.statement_zh) for f in facts]
+    norm_type = [normalize_consolidation_text(f.fact_type) for f in facts]
+    bound = [
+        frozenset(f.subject_refs) | frozenset(f.object_refs) for f in facts
+    ]
+    ev_para = [
+        frozenset(ref.paragraph_id for ref in f.evidence_refs) for f in facts
+    ]
+    chunk_ord = [ordinal[f.global_candidate_ref] for f in facts]
+
+    signal_sets = []
+
+    buckets: dict = defaultdict(list)
+    for i in range(n):
+        if norm_stmt[i]:
+            buckets[norm_stmt[i]].append(i)
+    signal_sets.append(("exact_normalized_statement", _pairs_within_buckets(buckets, refs)))
+
+    buckets = defaultdict(list)
+    for i in range(n):
+        for paragraph in ev_para[i]:
+            buckets[paragraph].append(i)
+    signal_sets.append(("evidence_paragraph_overlap", _pairs_within_buckets(buckets, refs)))
+
+    buckets = defaultdict(list)
+    for i in range(n):
+        if norm_type[i]:
+            for entity in bound[i]:
+                buckets[(norm_type[i], entity)].append(i)
+    signal_sets.append(
+        ("same_fact_type_bound_entity_overlap", _pairs_within_buckets(buckets, refs))
+    )
+
+    buckets = defaultdict(list)
+    for i in range(n):
+        if norm_type[i]:
+            buckets[(norm_type[i], chunk_ord[i])].append(i)
+    signal_sets.append(
+        ("same_fact_type_same_chunk", _pairs_within_buckets(buckets, refs))
+    )
+
+    by_type_chunk = defaultdict(lambda: defaultdict(list))
+    for i in range(n):
+        if norm_type[i]:
+            by_type_chunk[norm_type[i]][chunk_ord[i]].append(i)
+    adjacent = set()
+    for by_chunk in by_type_chunk.values():
+        adjacent |= _adjacent_chunk_pairs(by_chunk, refs)
+    signal_sets.append(("same_fact_type_adjacent_chunk", adjacent))
+
+    return signal_sets
+
+
+def _event_signal_pair_sets(events, ordinal) -> list:
+    """Event blocking-v1 signals as ``[(signal_name, set of (left, right) pairs)]``.
+
+    1. ``exact_normalized_summary``        -- same non-empty normalized summary
+    2. ``evidence_paragraph_overlap``      -- share a global evidence paragraph
+    3. ``same_chunk``                      -- same chunk
+    4. ``adjacent_chunk_shared_entity``    -- adjacent chunk AND a shared bound
+       entity (participant or location)
+    5. ``participant_location_overlap``    -- a shared participant AND a shared
+       location
+    """
+    n = len(events)
+    refs = [e.global_candidate_ref for e in events]
+    norm_summary = [normalize_consolidation_text(e.summary_zh) for e in events]
+    participants = [frozenset(e.participants) for e in events]
+    locations = [frozenset(e.locations) for e in events]
+    bound = [participants[i] | locations[i] for i in range(n)]
+    ev_para = [
+        frozenset(ref.paragraph_id for ref in e.evidence_refs) for e in events
+    ]
+    chunk_ord = [ordinal[e.global_candidate_ref] for e in events]
+
+    signal_sets = []
+
+    buckets: dict = defaultdict(list)
+    for i in range(n):
+        if norm_summary[i]:
+            buckets[norm_summary[i]].append(i)
+    signal_sets.append(("exact_normalized_summary", _pairs_within_buckets(buckets, refs)))
+
+    buckets = defaultdict(list)
+    for i in range(n):
+        for paragraph in ev_para[i]:
+            buckets[paragraph].append(i)
+    signal_sets.append(("evidence_paragraph_overlap", _pairs_within_buckets(buckets, refs)))
+
+    buckets = defaultdict(list)
+    for i in range(n):
+        buckets[chunk_ord[i]].append(i)
+    signal_sets.append(("same_chunk", _pairs_within_buckets(buckets, refs)))
+
+    by_chunk_entity = defaultdict(list)
+    for i in range(n):
+        for entity in bound[i]:
+            by_chunk_entity[(chunk_ord[i], entity)].append(i)
+    adjacent = set()
+    for (ord_a, entity), group_a in by_chunk_entity.items():
+        for ord_b in (ord_a - 1, ord_a + 1):
+            group_b = by_chunk_entity.get((ord_b, entity))
+            if not group_b:
+                continue
+            for i in group_a:
+                for j in group_b:
+                    adjacent.add(_ref_pair(refs[i], refs[j]))
+    signal_sets.append(("adjacent_chunk_shared_entity", adjacent))
+
+    by_participant_location = defaultdict(list)
+    for i in range(n):
+        for participant in participants[i]:
+            for location in locations[i]:
+                by_participant_location[(participant, location)].append(i)
+    signal_sets.append(
+        ("participant_location_overlap", _pairs_within_buckets(by_participant_location, refs))
+    )
+
+    return signal_sets
+
+
+def _relationship_endpoint_group(source_ref: str, target_ref: str) -> frozenset:
+    """The A5 relationship *endpoint group* (blocking key).
+
+    The endpoint group is the unordered frozenset of the two bound endpoint
+    refs, independent of direction. Two relationships are a blocking pair iff
+    they share this endpoint group. (The direction-sensitive
+    ``endpoint_identity_key`` is a separate, exact-safe concept.)
+    """
+    return frozenset((source_ref, target_ref))
+
+
+def _relationship_signal_pair_sets(rels) -> list:
+    """Relationship blocking-v1: ``same_endpoint_group`` only.
+
+    A pair is a candidate iff the two relationships share the same endpoint
+    group (the unordered frozenset of their two bound endpoint refs). No
+    evidence overlap, chunk distance, type, state, or summary bucket is used.
+    """
+    refs = [r.global_candidate_ref for r in rels]
+    buckets: dict = defaultdict(list)
+    for i, rel in enumerate(rels):
+        key = _relationship_endpoint_group(
+            rel.source_entity_ref, rel.target_entity_ref
+        )
+        buckets[key].append(i)
+    return [("same_endpoint_group", _pairs_within_buckets(buckets, refs))]
+
+
+def _union_evidence(left_evidence, right_evidence) -> tuple:
+    """Union of both sides' evidence: stable exact dedupe, first-appearance order."""
+    seen = set()
+    result = []
+    for evidence in (*left_evidence, *right_evidence):
+        key = (
+            evidence.paragraph_id,
+            evidence.role,
+            evidence.strength,
+            evidence.excerpt,
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(evidence)
+    return tuple(result)
+
+
+def _make_deterministic_decision(
+    left_ref: str, right_ref: str, pair_kind: str, reason_zh: str, left, right
+) -> DeterministicConsolidationDecision:
+    """Build a deterministic exact-safe decision for an auto_same pair.
+
+    The decision id is ``dec_`` + the first 20 hex chars of the canonical
+    content hash of the exact canonical identity material (no timestamp,
+    hostname, PID, worker id, random salt, provider data, prompt text, or
+    model name).
+    """
+    evidence_refs = _union_evidence(left.evidence_refs, right.evidence_refs)
+    identity_material = {
+        "left_ref": left_ref,
+        "right_ref": right_ref,
+        "pair_kind": pair_kind,
+        "method": DETERMINISTIC_METHOD,
+        "reason_code": EXACT_SAFE_REASON_CODE,
+        "reason_zh": reason_zh,
+        "evidence_refs": [e.to_dict() for e in evidence_refs],
+    }
+    decision_id = "dec_" + content_hash(identity_material)[:20]
+    return DeterministicConsolidationDecision(
+        decision_id=decision_id,
+        left_ref=left_ref,
+        right_ref=right_ref,
+        pair_kind=pair_kind,
+        method=DETERMINISTIC_METHOD,
+        reason_code=EXACT_SAFE_REASON_CODE,
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=None,
+        prompt_version=None,
+        generation_provenance=None,
+    )
+
+
+def _plan_domain_pairs(
+    candidates,
+    signal_pair_sets: list,
+    *,
+    pair_kind: str,
+    reason_zh: str,
+    exact_key,
+    plan_cls,
+):
+    """Assemble ordered pair plans + deterministic auto-same decisions.
+
+    ``signal_pair_sets`` is ``[(signal_name, set of (left, right) pairs)]``;
+    a pair is emitted iff at least one signal fires. The pair state is
+    ``auto_same`` iff the exact-safe keys match, else
+    ``needs_semantic_decision``. Pair plans are ordered by ``(left_ref,
+    right_ref)``. No ``not_compared`` pair is materialized.
+    """
+    by_ref = {c.global_candidate_ref: c for c in candidates}
+    pair_signals: dict = {}
+    for signal_name, pair_set in signal_pair_sets:
+        for (left, right) in pair_set:
+            key = frozenset((left, right))
+            pair_signals.setdefault(key, set()).add(signal_name)
+
+    plans = []
+    decisions = []
+    for key in sorted(pair_signals, key=lambda k: tuple(sorted(k))):
+        left_ref, right_ref = sorted(key)
+        left = by_ref[left_ref]
+        right = by_ref[right_ref]
+        state = (
+            PAIR_STATE_AUTO_SAME
+            if exact_key(left) == exact_key(right)
+            else PAIR_STATE_NEEDS_SEMANTIC_DECISION
+        )
+        counts = {signal: 1 for signal in sorted(pair_signals[key])}
+        plans.append(
+            plan_cls(
+                left_ref=left_ref,
+                right_ref=right_ref,
+                state=state,
+                blocking_signal_counts=counts,
+            )
+        )
+        if state == PAIR_STATE_AUTO_SAME:
+            decisions.append(
+                _make_deterministic_decision(
+                    left_ref, right_ref, pair_kind, reason_zh, left, right
+                )
+            )
+    return plans, decisions
+
+
+def plan_consolidation_pairs(
+    index: ConsolidationCandidateIndex,
+) -> tuple:
+    """Deterministic blocking-v1 pair planning over the Phase A index.
+
+    Pure and zero-provider: it reads only the ``ConsolidationCandidateIndex``
+    and returns ``(fact_pair_plans, event_pair_plans, relationship_pair_plans,
+    deterministic_decision_set)``. The pair plans are the semantic input stream
+    (``needs_semantic_decision``) plus the deterministic ``auto_same`` pairs;
+    no prompt is rendered, no provider is called, and no result is parsed.
+    """
+    ordinal = {
+        cand.global_candidate_ref: _chunk_ordinal_from_source_order_key(
+            cand.source_order_key
+        )
+        for cand in (*index.facts, *index.events, *index.relationships)
+    }
+    fact_plans, fact_decisions = _plan_domain_pairs(
+        index.facts,
+        _fact_signal_pair_sets(index.facts, ordinal),
+        pair_kind="fact",
+        reason_zh=_FACT_REASON_ZH,
+        exact_key=fact_exact_safe_key,
+        plan_cls=FactPairPlan,
+    )
+    event_plans, event_decisions = _plan_domain_pairs(
+        index.events,
+        _event_signal_pair_sets(index.events, ordinal),
+        pair_kind="event",
+        reason_zh=_EVENT_REASON_ZH,
+        exact_key=event_exact_safe_key,
+        plan_cls=EventPairPlan,
+    )
+    rel_plans, rel_decisions = _plan_domain_pairs(
+        index.relationships,
+        _relationship_signal_pair_sets(index.relationships),
+        pair_kind="relationship",
+        reason_zh=_RELATIONSHIP_REASON_ZH,
+        exact_key=relationship_exact_safe_key,
+        plan_cls=RelationshipPairPlan,
+    )
+    decision_set = DeterministicConsolidationDecisionSet(
+        decisions=tuple(fact_decisions + event_decisions + rel_decisions)
+    )
+    return (
+        tuple(fact_plans),
+        tuple(event_plans),
+        tuple(rel_plans),
+        decision_set,
+    )
+
+
 def build_consolidation_planning(
     store: FileArtifactStore,
     pointers: FilePointerStore,
@@ -872,13 +1506,28 @@ def build_consolidation_planning(
     project_id: str,
     document_id: str,
     reconciliation_profile_id: str,
+    consolidation_profile: ConsolidationProfile,
 ) -> ConsolidationPlanningResult:
-    """Run the full zero-provider A5B Phase A planning (read-only).
+    """Run the full zero-provider A5B planning (Phase A + Phase B, read-only).
 
-    Resolves the exact input snapshot, builds the source-ordered
-    ``ConsolidationCandidateIndex``, and computes the coverage summary. No
-    provider is invoked and nothing is persisted.
+    Phase A: resolves the exact input snapshot, builds the source-ordered
+    ``ConsolidationCandidateIndex``, and computes the coverage summary.
+    Phase B: verifies the frozen blocking policy id, then runs deterministic
+    blocking-v1 pair planning (bucket/index based, never the naive N-choose-2
+    cross product), the exact-safe auto-same decisions, and the deterministic
+    plan hash.
+
+    No provider is invoked and nothing is persisted. The used
+    ``ConsolidationProfile.blocking_policy_id`` must equal
+    ``consolidation-blocking-v1`` or the planner fails closed (no silent
+    fallback).
     """
+    if consolidation_profile.blocking_policy_id != A5B_BLOCKING_POLICY_ID:
+        raise StoryIntegrityError(
+            "consolidation blocking_policy_id "
+            f"{consolidation_profile.blocking_policy_id!r} does not match the "
+            f"frozen A5B policy {A5B_BLOCKING_POLICY_ID!r}; refusing to plan"
+        )
     snapshot = build_consolidation_input_snapshot(
         store,
         pointers,
@@ -888,16 +1537,65 @@ def build_consolidation_planning(
     )
     index = build_consolidation_candidate_index(snapshot)
     coverage = _coverage_summary(index)
+
+    (
+        fact_pair_plans,
+        event_pair_plans,
+        relationship_pair_plans,
+        deterministic_decision_set,
+    ) = plan_consolidation_pairs(index)
+
+    plan_material = {
+        "blocking_policy_id": A5B_BLOCKING_POLICY_ID,
+        "text_normalization_policy_id": TEXT_NORMALIZATION_POLICY_ID,
+        "exact_safe_policy_id": EXACT_SAFE_POLICY_ID,
+        "planning_policy_id": PLANNING_POLICY_ID,
+        "candidate_index": index.to_dict(),
+        "fact_pair_plans": [p.to_dict() for p in fact_pair_plans],
+        "event_pair_plans": [p.to_dict() for p in event_pair_plans],
+        "relationship_pair_plans": [p.to_dict() for p in relationship_pair_plans],
+        "deterministic_decision_set": deterministic_decision_set.to_dict(),
+    }
+    plan_hash = content_hash(plan_material)
+
     return ConsolidationPlanningResult(
-        snapshot=snapshot, index=index, coverage=coverage
+        snapshot=snapshot,
+        index=index,
+        coverage=coverage,
+        fact_pair_plans=fact_pair_plans,
+        event_pair_plans=event_pair_plans,
+        relationship_pair_plans=relationship_pair_plans,
+        deterministic_decision_set=deterministic_decision_set,
+        blocking_policy_id=A5B_BLOCKING_POLICY_ID,
+        text_normalization_policy_id=TEXT_NORMALIZATION_POLICY_ID,
+        exact_safe_policy_id=EXACT_SAFE_POLICY_ID,
+        planning_policy_id=PLANNING_POLICY_ID,
+        plan_hash=plan_hash,
     )
 
 
 __all__ = [
     "ConsolidationCurrentMissingError",
+    "DeterministicConsolidationDecision",
+    "DeterministicConsolidationDecisionSet",
     "ConsolidationInputSnapshot",
     "ConsolidationPlanningResult",
+    "ConsolidationProfile",
+    "EventPairPlan",
+    "EXACT_SAFE_POLICY_ID",
+    "FactPairPlan",
+    "PAIR_STATE_AUTO_SAME",
+    "PAIR_STATE_NEEDS_SEMANTIC_DECISION",
+    "PLANNING_POLICY_ID",
+    "RelationshipPairPlan",
+    "TEXT_NORMALIZATION_POLICY_ID",
+    "A5B_BLOCKING_POLICY_ID",
     "build_consolidation_candidate_index",
     "build_consolidation_input_snapshot",
     "build_consolidation_planning",
+    "event_exact_safe_key",
+    "fact_exact_safe_key",
+    "normalize_consolidation_text",
+    "plan_consolidation_pairs",
+    "relationship_exact_safe_key",
 ]

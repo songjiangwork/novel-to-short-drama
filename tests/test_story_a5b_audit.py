@@ -109,6 +109,7 @@ from test_story_a5b_planning import (
     _build_run_tree,
     _char,
     _chunk_profile,
+    _consolidation_profile,
     _evidence,
     _event,
     _extraction_profile,
@@ -388,6 +389,7 @@ def _plan(tree: RunTree):
         project_id=PROJECT,
         document_id=DOCUMENT,
         reconciliation_profile_id=RECON_PROFILE_ID,
+        consolidation_profile=_consolidation_profile(),
     )
 
 

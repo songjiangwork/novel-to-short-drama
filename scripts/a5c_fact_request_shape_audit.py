@@ -1,32 +1,41 @@
 """v1.2 A5C-A — zero-provider fact request-shape audit.
 
-This is the A5C-A delivery slice (issue #52, BLOCK 1-6). It resolves the exact
+This is the A5C-A delivery slice (issue #52). It resolves the exact
 current-eligible A4 CURRENT from a *pre-existing* run tree, builds the A5B
-``ConsolidationPlanningResult``, and builds the A5C **fact semantic
-preparation** + a **deterministic block-packing audit** for three packing
+``ConsolidationPlanningResult``, validates the A5C fact semantic stream fail
+closed, builds the A5C **fact semantic preparation** under an EXPLICIT packing
+policy, and runs a **deterministic block-packing audit** over three packing
 candidates -- with NO provider call and NO persistence anywhere.
 
 Specifically it:
 
-* selects the A5C fact semantic stream (the ``needs_semantic_decision`` fact
-  pairs; ``auto_same`` fact pairs are already resolved deterministically by
-  A5B and are never sent to the provider);
-* deterministically packs the fact stream into blocks and evaluates the three
-  audit-only packing candidates (P1 6/12, P2 12/24, P3 24/48);
+* selects and validates the A5C fact semantic stream (EXACTLY the
+  ``needs_semantic_decision`` fact pairs; ``auto_same`` fact pairs are
+  deterministic and excluded) -- fact namespace, ``left_ref < right_ref``, no
+  duplicate pair, canonical ``(left_ref, right_ref)`` order;
+* deterministically packs the fact stream under TWO independent limits (at most
+  ``max_pairs_per_block`` pairs AND at most ``max_candidates_per_block`` unique
+  candidates) and evaluates the three audit-only packing candidates
+  (P1 6/12, P2 12/24, P3 24/48);
+* reports the deterministic distribution statistics for each candidate
+  (pairs / unique candidates / evidence items / pair-context bytes / rendered
+  prompt bytes, each min/median/p95/max), the deterministic largest-block
+  diagnostics, and the request-hash counts;
 * renders **real** ``StructuredGenerationRequest`` objects through the existing
   ``PromptRegistry`` / ``OutputSchema`` / ``SemanticLLMProfile`` infrastructure
   (the tracked ``a5.fact-consolidation`` prompt v1, the
   ``consolidation-fact-selector-payload`` schema v1, and the
   ``consolidation-llm-v1`` semantic profile);
 * verifies the exact consolidation profile + prompt + schema + semantic profile
-  identity (fail closed on any mismatch);
+  identity (fail closed on any mismatch, including ``max_generation_rounds == 2``);
 * proves it is zero-provider (no transport is touched; the requests are
   provider-neutral) and read-only (the run tree fingerprint is unchanged) and
   deterministic (a second preparation is byte-identical).
 
-The three packing candidates are AUDIT ONLY: this script does NOT freeze the
-production default block size and does NOT implement A5C-B (no response
-handling, validation, canonical fact set, or CURRENT publication).
+The three packing candidates are AUDIT ONLY: ``fact-semantic-packing-v1`` is
+NOT YET FROZEN, so this script requires an explicit policy and does NOT freeze a
+production default, and does NOT implement A5C-B (no response handling, payload
+validation, canonical fact set, or CURRENT publication).
 
 Usage:
     python scripts/a5c_fact_request_shape_audit.py \
@@ -47,10 +56,11 @@ from short_drama.foundation import FilePointerStore
 from short_drama.llm import PromptRegistry
 from short_drama.paths import REPO_ROOT
 from short_drama.story import (
-    A5C_DEFAULT_FACT_BLOCK_SIZE,
+    A5C_PACKING_CANDIDATES,
     ConsolidationCurrentMissingError,
     ConsolidationPlanningResult,
     DEFAULT_PROMPT_BASE_DIR,
+    FactSemanticPackingPolicy,
     FactSemanticPreparation,
     StoryIntegrityError,
     build_consolidation_planning,
@@ -66,6 +76,9 @@ DEFAULT_PROJECT = "a3e-real-novel"
 DEFAULT_DOCUMENT = "src_001"
 DEFAULT_PROFILE = "entity-reconciliation-v2"
 DEFAULT_CONSOLIDATION_PROFILE = REPO_ROOT / "profiles" / "consolidation_v1.yaml"
+
+#: The policy used for the sample request-shape section (audit-only, P2).
+REQUEST_SHAPE_POLICY = A5C_PACKING_CANDIDATES[1]
 
 # Provider-neutrality: these keys must NEVER appear in the canonical request
 # material (endpoint / transport / credential / routing identity).
@@ -131,10 +144,24 @@ def _request_material_keys(request) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _fmt_distribution(dist: dict[str, float]) -> str:
+    return (
+        f"min={int(dist['min'])} median={int(dist['median'])} "
+        f"p95={int(dist['p95'])} max={int(dist['max'])}"
+    )
+
+
+def _fmt_pair(pair) -> str:
+    if pair is None:
+        return "-"
+    left, right = pair
+    return f"{left} <-> {right}"
+
+
 def _print_identity(project_id: str, document_id: str, reconciliation_profile_id: str,
                     prep: FactSemanticPreparation) -> None:
     identity = build_fact_semantic_identity(prep)
-    print("=== A5C-A FACT REQUEST-SHAPE AUDIT (zero-provider, read-only) ===")
+    print("=== A5C FACT ZERO-PROVIDER REQUEST-SHAPE AUDIT ===")
     print(f"project:              {project_id}")
     print(f"document:             {document_id}")
     print(f"reconciliation:       {reconciliation_profile_id}")
@@ -174,28 +201,43 @@ def _print_candidate_universe(prep: FactSemanticPreparation) -> None:
 def _print_packing(audit: tuple[dict, ...]) -> None:
     print("=== DETERMINISTIC PACKING CANDIDATES (audit-only, NOT frozen) ===")
     for row in audit:
-        print(f"{row['candidate']} (min {row['min_block_size']} / requested max "
-              f"{row['requested_max_block_size']}):")
-        print(f"  total_fact_semantic_pairs: {row['total_fact_semantic_pairs']}")
+        print(
+            f"{row['packing_name']} "
+            f"(max_pairs_per_block={row['max_pairs_per_block']} / "
+            f"max_candidates_per_block={row['max_candidates_per_block']}):"
+        )
         print(f"  block_count:               {row['block_count']}")
-        print(f"  min_block_size:            {row['min_block_size_actual']}")
-        print(f"  avg_block_size:            {row['avg_block_size']:.4f}")
-        print(f"  max_block_size:            {row['max_block_size_actual']}")
-        print(f"  max_block_bytes:           {row['max_block_bytes']}")
-        print(f"  largest_block_id:          {row['largest_block_id']}")
-        print(f"  total_request_count:       {row['total_request_count']}")
-        hashes = row["request_hashes"]
-        print(f"  request_hashes ({len(hashes)}):")
-        for ordinal, request_hash in enumerate(hashes[:5]):
-            print(f"    [{ordinal:3}] {request_hash}")
-        if len(hashes) > 5:
-            print(f"    ... (+{len(hashes) - 5} more)")
+        print(f"  total_pairs_in_blocks:     {row['total_pairs_in_blocks']}")
+        print(f"  pairs/block:               {_fmt_distribution(row['pairs_per_block'])}")
+        print(f"  candidates/block:          {_fmt_distribution(row['unique_candidates_per_block'])}")
+        print(f"  evidence/block:            {_fmt_distribution(row['evidence_items_per_block'])}")
+        print(f"  pair_contexts_bytes:       {_fmt_distribution(row['pair_contexts_json_bytes'])}")
+        print(f"  rendered_prompt_bytes:     {_fmt_distribution(row['rendered_prompt_bytes'])}")
+        print(f"  request_hash_count:        {row['request_hash_count']}")
+        print(f"  unique_request_hash_count: {row['unique_request_hash_count']}")
+        largest = row["largest_block"]
+        if largest is None:
+            print("  largest_block:             (none)")
+        else:
+            print("  largest_block:")
+            print(f"    block_id:                {largest['block_id']}")
+            print(f"    block_ordinal:           {largest['block_ordinal']}")
+            print(f"    pair_count:              {largest['pair_count']}")
+            print(f"    unique_candidate_count:  {largest['unique_candidate_count']}")
+            print(f"    evidence_item_count:     {largest['evidence_item_count']}")
+            print(f"    pair_contexts_json_bytes: {largest['pair_contexts_json_bytes']}")
+            print(f"    rendered_prompt_bytes:   {largest['rendered_prompt_bytes']}")
+            print(f"    first_pair:              {_fmt_pair(largest['first_pair'])}")
+            print(f"    last_pair:               {_fmt_pair(largest['last_pair'])}")
         print()
 
 
 def _print_request_shape(prep: FactSemanticPreparation) -> None:
-    print("=== REQUEST SHAPE (real StructuredGenerationRequest, default block size "
-          f"{prep.max_block_size}) ===")
+    policy = prep.packing_policy
+    print(
+        f"=== REQUEST SHAPE (real StructuredGenerationRequest, policy "
+        f"{policy.name} {policy.max_pairs_per_block}/{policy.max_candidates_per_block}) ==="
+    )
     requests = prep.structured_requests
     print(f"structured_request_count:  {len(requests)}")
     if not requests:
@@ -211,7 +253,9 @@ def _print_request_shape(prep: FactSemanticPreparation) -> None:
         system_text = request.rendered_prompt.system_text
         print(f"request[{ordinal}]:")
         print(f"  block_id:                      {block.block_id}")
+        print(f"  block_ordinal:                 {block.block_ordinal}")
         print(f"  pair_count:                    {block.pair_count}")
+        print(f"  unique_candidate_count:        {len(block.candidate_refs)}")
         print(f"  payload_bytes:                 {block.payload_bytes}")
         print(f"  messages:                      {[m['role'] for m in request.messages]}")
         print(f"  system_text_len:               {len(system_text)}")
@@ -230,27 +274,28 @@ def _print_request_shape(prep: FactSemanticPreparation) -> None:
 
 
 def _packing_row_consistent(row: dict, total_pairs: int) -> tuple[bool, str]:
-    requested_max = row["requested_max_block_size"]
+    name = row["packing_name"]
+    max_pairs = row["max_pairs_per_block"]
+    max_candidates = row["max_candidates_per_block"]
     block_count = row["block_count"]
-    if row["total_fact_semantic_pairs"] != total_pairs:
-        return False, f"{row['candidate']} total pairs mismatch"
-    if row["total_request_count"] != block_count:
-        return False, f"{row['candidate']} request count != block count"
-    if row["min_block_size_actual"] < 1 or row["max_block_size_actual"] > requested_max:
-        return False, f"{row['candidate']} block size out of [1, {requested_max}]"
+    if total_pairs == 0:
+        return block_count == 0, f"{name} empty corpus mismatch"
+    if row["total_pairs_in_blocks"] != total_pairs:
+        return False, f"{name} total pairs in blocks != semantic pair count (pair loss/dup)"
     if row["block_count"] == 0:
-        return total_pairs == 0, f"{row['candidate']} empty corpus mismatch"
-    # The first block_count-1 blocks are exactly requested_max; the last is the
-    # remainder (or requested_max if it divides evenly). So the total must equal
-    # (block_count-1)*requested_max + last, with last in [1, requested_max].
-    expected_full = (block_count - 1) * requested_max
-    last = total_pairs - expected_full
-    if not 1 <= last <= requested_max:
-        return False, f"{row['candidate']} block sizes do not sum to total pairs"
-    if row["max_block_size_actual"] != requested_max:
-        return False, f"{row['candidate']} max block size != requested max"
-    if row["min_block_size_actual"] != min(requested_max, last):
-        return False, f"{row['candidate']} min block size mismatch"
+        return False, f"{name} produced no blocks for {total_pairs} pairs"
+    # Both independent limits must hold for every block (min/median/p95/max).
+    for metric, limit, label in (
+        ("pairs_per_block", max_pairs, "pairs/block"),
+        ("unique_candidates_per_block", max_candidates, "candidates/block"),
+    ):
+        if row[metric]["max"] > limit:
+            return False, f"{name} {label} exceeds {label} limit {limit}"
+    # Request hashes: one per block, all unique.
+    if row["request_hash_count"] != block_count:
+        return False, f"{name} request_hash_count != block_count"
+    if row["unique_request_hash_count"] != block_count:
+        return False, f"{name} unique_request_hash_count != block_count (duplicate request)"
     return True, "ok"
 
 
@@ -330,13 +375,9 @@ def _run_checks(
         )
     )
 
-    # Packing candidates are internally consistent.
-    for row in packing_audit:
-        ok, _ = _packing_row_consistent(row, prep.semantic_pair_count)
-        checks.append((f"packing {row['candidate']} consistent", ok))
-
     # Pair-local selectors: each endpoint packet's evidence selectors are exactly
-    # L0..L{n-1} (left) / R0..R{n-1} (right), and no block-wide pool exists.
+    # L0..L{n-1} (left) / R0..R{n-1} (right), in the exact indexed A5B evidence
+    # order, and no block-wide pool exists.
     selector_ok = True
     for block in prep.blocks:
         for pc in block.pair_contexts:
@@ -346,6 +387,12 @@ def _run_checks(
                 if selectors != expected:
                     selector_ok = False
     checks.append(("pair-local evidence selectors (L0.. / R0.., no block pool)", selector_ok))
+
+    # Packing candidates are internally consistent (both limits + no pair loss +
+    # unique request hashes).
+    for row in packing_audit:
+        ok, _ = _packing_row_consistent(row, prep.semantic_pair_count)
+        checks.append((f"packing {row['packing_name']} consistent", ok))
 
     return checks
 
@@ -364,7 +411,6 @@ def run_audit(
     document_id: str,
     reconciliation_profile_id: str,
     consolidation_profile_path: Path = DEFAULT_CONSOLIDATION_PROFILE,
-    default_block_size: int = A5C_DEFAULT_FACT_BLOCK_SIZE,
 ) -> int:
     consolidation_profile = load_consolidation_profile(consolidation_profile_path)
     semantic_profile = load_fact_semantic_profile()
@@ -380,12 +426,14 @@ def run_audit(
 
     before = _fingerprint_dir(root)
 
+    # The request-shape section uses an explicit audit policy (P2), NOT a
+    # production default (fact-semantic-packing-v1 is not yet frozen).
     prep = build_fact_semantic_preparation(
         result,
         consolidation_profile,
         semantic_profile,
         prompts=prompts,
-        max_block_size=default_block_size,
+        packing_policy=REQUEST_SHAPE_POLICY,
     )
     packing_audit = build_fact_packing_audit(
         result,
@@ -399,7 +447,7 @@ def run_audit(
         consolidation_profile,
         semantic_profile,
         prompts=prompts,
-        max_block_size=default_block_size,
+        packing_policy=REQUEST_SHAPE_POLICY,
     )
 
     after = _fingerprint_dir(root)
@@ -423,7 +471,7 @@ def run_audit(
     print("A5C AUDIT RESULT: PASS (zero-provider, read-only)")
     print("A5C-A complete: fact semantic preparation + deterministic packing audit +")
     print("real StructuredGenerationRequest rendering. Still zero-provider and")
-    print("read-only: no LLM call, no canonical fact set, no A5C-B persistence/CURRENT.")
+    print("read-only: no LLM call, no A5C-B response handling, no CURRENT.")
     return 0
 
 
@@ -435,12 +483,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument("--document", default=DEFAULT_DOCUMENT)
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
-    parser.add_argument(
-        "--default-block-size",
-        type=int,
-        default=A5C_DEFAULT_FACT_BLOCK_SIZE,
-        help="requested maximum block size for the request-shape section",
-    )
     args = parser.parse_args(argv)
 
     try:
@@ -452,7 +494,6 @@ def main(argv: list[str] | None = None) -> int:
             project_id=args.project,
             document_id=args.document,
             reconciliation_profile_id=args.profile,
-            default_block_size=args.default_block_size,
         )
     except (ConsolidationCurrentMissingError, StoryIntegrityError) as exc:
         print(f"A5C AUDIT RESULT: FAIL ({type(exc).__name__}: {exc})", file=sys.stderr)

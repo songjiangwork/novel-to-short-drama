@@ -63,6 +63,7 @@ from short_drama.io import load_json
 from short_drama.paths import SCHEMAS_DIR
 
 from .errors import (
+    ConsolidationCurrentMissingError,
     ReconciliationPlanningError,
     StoryIntegrityError,
     StoryPersistenceError,
@@ -1018,6 +1019,28 @@ class ReconciliationPublication:
     reused: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedEntityMapCurrent:
+    """A fully-verified, current-eligible A4 EntityMap resolved read-only.
+
+    A5B (and the A5 stage) must consume A4 strictly through its CURRENT
+    pointer. This is the return value of
+    :meth:`ReconciliationPersistenceService.require_current_validated`:
+    the exact CURRENT EntityMap (already verified end-to-end), its artifact
+    ref, the exact PASS validation-report ref, and the CURRENT pointer ref.
+
+    This is a read-only downstream seam: it performs no writes, no CURRENT
+    mutation, and no identity comparison (that is A4D reuse). It raises
+    :class:`ConsolidationCurrentMissingError` when no current-eligible A4
+    CURRENT exists (a structural A5 failure, not a cache miss).
+    """
+
+    entity_map: EntityMap
+    entity_map_ref: ArtifactRef
+    validation_report_ref: ArtifactRef
+    current_pointer_ref: ArtifactRef
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -1190,6 +1213,65 @@ class ReconciliationPersistenceService:
             ),
             current_pointer_ref=current_pointer_ref,
             reused=True,
+        )
+
+    # -- read-only downstream seam (A5) ------------------------------------
+
+    def require_current_validated(
+        self,
+        *,
+        project_id: str,
+        document_id: str,
+        reconciliation_profile_id: str,
+    ) -> ValidatedEntityMapCurrent:
+        """Resolve the exact current-eligible A4 CURRENT EntityMap, read-only.
+
+        A5 consumes A4 strictly through its CURRENT pointer. This method
+        verifies the exact CURRENT end-to-end (byte-identical to the A4D
+        publication verifier) and returns it, together with the exact PASS
+        validation-report ref and the CURRENT pointer ref. It performs no
+        writes and no identity comparison.
+
+        Unlike :meth:`try_reuse_current` (which treats a missing CURRENT as a
+        normal cache miss and returns ``None``), a missing CURRENT here is a
+        structural A5 failure and raises
+        :class:`ConsolidationCurrentMissingError`: A4 is a hard dependency of
+        A5, so the absent CURRENT must fail closed.
+        """
+        base = a4_base_artifact_id(project_id, document_id, reconciliation_profile_id)
+        pointer_id = a4_pointer_id(project_id, document_id, reconciliation_profile_id)
+        logical_entity_map_id = entity_map_artifact_id(base)
+        current_pointer_ref, current_entity_map_ref = _current_pointer(
+            self.pointers, pointer_id
+        )
+        if current_entity_map_ref is None:
+            raise ConsolidationCurrentMissingError(
+                f"no current-eligible A4 CURRENT EntityMap for "
+                f"{project_id}/{document_id}/{reconciliation_profile_id}; "
+                "A5 requires a valid A4 CURRENT (structural failure, not a "
+                "cache miss)"
+            )
+        entity_map = self._verify_current_entity_map(
+            base=base,
+            logical_entity_map_id=logical_entity_map_id,
+            pointer_id=pointer_id,
+            reconciliation_profile_id=reconciliation_profile_id,
+            current_pointer_ref=current_pointer_ref,
+            current_entity_map_ref=current_entity_map_ref,
+        )
+        assert current_pointer_ref is not None
+        return ValidatedEntityMapCurrent(
+            entity_map=entity_map,
+            entity_map_ref=current_entity_map_ref,
+            validation_report_ref=_require_a4_validation_report(
+                self.store,
+                artifact_id=a4_validation_artifact_id(base),
+                revision=current_entity_map_ref.revision,
+                expected_report=build_a4_validation_report(
+                    entity_map, current_entity_map_ref
+                ),
+            ),
+            current_pointer_ref=current_pointer_ref,
         )
 
     # -- post-generation publish -------------------------------------------

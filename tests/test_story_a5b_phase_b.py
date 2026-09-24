@@ -5,17 +5,21 @@ the Phase A input binding / index:
 
   * deterministic text normalization (``a5-text-normalization-v1``);
   * fact / event / relationship blocking-v1 pair generation (bucket/index
-    based, never the naive N-choose-2 cross product) with the exact signal set;
+    based, never the naive N-choose-2 cross product) where each pair plan
+    carries its COMPLETE set of frozen atomic signals;
   * a structural proof that the planner does NOT materialize the naive N^2
     cross product;
   * exact-safe auto-same keys (fact / event / relationship) and the
     ``None`` vs ``""`` distinction for the optional relationship state;
-  * the deterministic decision set (auto_same only, deterministic id,
-    method/reason, null prompt/provenance, stable evidence union + dedupe);
+  * the deterministic decision set (A5A-domain decisions reusing the A5A
+    ``ConsolidationDecisionSet`` -- no second decision contract; auto_same only,
+    deterministic id, method/reason, null prompt/provenance, stable evidence
+    union + dedupe);
   * the deterministic plan hash (over the documented material incl. policy
     ids; deterministic; changes with the index);
   * frozen blocking-policy-id verification (fail closed on mismatch);
-  * the pair-plan structure (left < right, sorted, integer signal counts,
+  * the pair-plan structure (left < right, sorted, complete atomic signal set
+    that is non-empty / sorted / unique / a subset of the domain vocabulary,
     only ``auto_same`` / ``needs_semantic_decision`` states, no
     ``not_compared`` materialization);
   * the Alice zero-provider smoke test (exact acceptance gates, read-only,
@@ -38,16 +42,22 @@ import pytest
 from short_drama.artifacts.canonical import content_hash
 from short_drama.story import (
     A5B_BLOCKING_POLICY_ID,
+    DETERMINISTIC_METHOD,
     EXACT_SAFE_POLICY_ID,
-    PLANNING_POLICY_ID,
+    EVENT_SIGNALS,
+    FACT_SIGNALS,
     PAIR_STATE_AUTO_SAME,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
+    PLANNING_POLICY_ID,
+    RELATIONSHIP_SIGNALS,
     TEXT_NORMALIZATION_POLICY_ID,
-    DeterministicConsolidationDecision,
-    DeterministicConsolidationDecisionSet,
+    ConsolidationDecisionSet,
     EventCandidate,
+    EventSemanticDecision,
     FactCandidate,
+    FactSemanticDecision,
     RelationshipCandidate,
+    RelationshipSemanticDecision,
     StoryIntegrityError,
     build_consolidation_planning,
     event_exact_safe_key,
@@ -153,6 +163,15 @@ def _pair_by_refs(plans, left, right):
     return None
 
 
+def _all_decisions(decision_set) -> tuple:
+    """All A5A-domain decisions across the three domains, in stable order."""
+    return (
+        *decision_set.fact_decisions,
+        *decision_set.event_decisions,
+        *decision_set.relationship_decisions,
+    )
+
+
 def _global_refs_for(result, category: str, ids) -> dict:
     """Map a local candidate id to its A5 global ref (``<chunk_id>:<local_id>``)."""
     out = {}
@@ -213,7 +232,7 @@ def test_fact_signal_exact_normalized_statement(tmp_path):
     refs = _global_refs_for(result, "facts", {"cand_fact_001", "cand_fact_002"})
     plan = _pair_by_refs(result.fact_pair_plans, refs["cand_fact_001"], refs["cand_fact_002"])
     assert plan is not None, "same normalized statement must form a candidate pair"
-    assert plan.blocking_signal_counts.get("exact_normalized_statement") == 1
+    assert "exact_normalized_statement" in plan.signals
 
 
 def test_fact_signal_evidence_paragraph_overlap(tmp_path):
@@ -235,7 +254,7 @@ def test_fact_signal_evidence_paragraph_overlap(tmp_path):
     refs = _global_refs_for(result, "facts", {"cand_fact_001", "cand_fact_002"})
     plan = _pair_by_refs(result.fact_pair_plans, refs["cand_fact_001"], refs["cand_fact_002"])
     assert plan is not None, "shared evidence paragraph must form a candidate pair"
-    assert plan.blocking_signal_counts.get("evidence_paragraph_overlap") == 1
+    assert "evidence_paragraph_overlap" in plan.signals
 
 
 def test_fact_signal_same_type_bound_entity(tmp_path):
@@ -261,7 +280,8 @@ def test_fact_signal_same_type_bound_entity(tmp_path):
     refs = _global_refs_for(result, "facts", {"cand_fact_001", "cand_fact_002"})
     plan = _pair_by_refs(result.fact_pair_plans, refs["cand_fact_001"], refs["cand_fact_002"])
     assert plan is not None, "same type + shared bound entity must form a candidate pair"
-    assert plan.blocking_signal_counts.get("same_fact_type_bound_entity_overlap") == 1
+    assert "bound_entity_overlap" in plan.signals
+    assert "same_fact_type" in plan.signals
 
 
 def test_fact_signal_same_chunk(tmp_path):
@@ -283,7 +303,8 @@ def test_fact_signal_same_chunk(tmp_path):
     refs = _global_refs_for(result, "facts", {"cand_fact_001", "cand_fact_002"})
     plan = _pair_by_refs(result.fact_pair_plans, refs["cand_fact_001"], refs["cand_fact_002"])
     assert plan is not None
-    assert plan.blocking_signal_counts.get("same_fact_type_same_chunk") == 1
+    assert "same_chunk" in plan.signals
+    assert "same_fact_type" in plan.signals
 
 
 def test_fact_signal_adjacent_chunk(tmp_path):
@@ -307,7 +328,8 @@ def test_fact_signal_adjacent_chunk(tmp_path):
     refs = _global_refs_for(result, "facts", {"cand_fact_001", "cand_fact_002"})
     plan = _pair_by_refs(result.fact_pair_plans, refs["cand_fact_001"], refs["cand_fact_002"])
     assert plan is not None
-    assert plan.blocking_signal_counts.get("same_fact_type_adjacent_chunk") == 1
+    assert "adjacent_chunk" in plan.signals
+    assert "same_fact_type" in plan.signals
 
 
 def test_fact_far_chunk_no_signals_not_materialized(tmp_path):
@@ -360,7 +382,7 @@ def test_event_signal_exact_normalized_summary(tmp_path):
     refs = _global_refs_for(result, "events", {"cand_evt_001", "cand_evt_002"})
     plan = _pair_by_refs(result.event_pair_plans, refs["cand_evt_001"], refs["cand_evt_002"])
     assert plan is not None
-    assert plan.blocking_signal_counts.get("exact_normalized_summary") == 1
+    assert "exact_normalized_summary" in plan.signals
 
 
 def test_event_signal_same_chunk_and_adjacent(tmp_path):
@@ -390,10 +412,11 @@ def test_event_signal_same_chunk_and_adjacent(tmp_path):
     refs = _global_refs_for(result, "events", {"cand_evt_001", "cand_evt_002", "cand_evt_003"})
     plan_same = _pair_by_refs(result.event_pair_plans, refs["cand_evt_001"], refs["cand_evt_002"])
     assert plan_same is not None
-    assert plan_same.blocking_signal_counts.get("same_chunk") == 1
+    assert "same_chunk" in plan_same.signals
     plan_adj = _pair_by_refs(result.event_pair_plans, refs["cand_evt_001"], refs["cand_evt_003"])
     assert plan_adj is not None
-    assert plan_adj.blocking_signal_counts.get("adjacent_chunk_shared_entity") == 1
+    assert "adjacent_chunk" in plan_adj.signals
+    assert "bound_entity_overlap" in plan_adj.signals
 
 
 def test_event_signal_participant_location_overlap(tmp_path):
@@ -419,7 +442,8 @@ def test_event_signal_participant_location_overlap(tmp_path):
     refs = _global_refs_for(result, "events", {"cand_evt_001", "cand_evt_002"})
     plan = _pair_by_refs(result.event_pair_plans, refs["cand_evt_001"], refs["cand_evt_002"])
     assert plan is not None
-    assert plan.blocking_signal_counts.get("participant_location_overlap") == 1
+    assert "participant_overlap" in plan.signals
+    assert "location_overlap" in plan.signals
 
 
 def test_event_no_signals_not_materialized(tmp_path):
@@ -452,8 +476,9 @@ def test_event_no_signals_not_materialized(tmp_path):
 
 
 def test_relationship_same_endpoint_group_pairs(tmp_path):
-    # Same endpoint group (same two endpoints), different direction order and
-    # different type/state -> all in the same endpoint group -> candidate pairs.
+    # Same direction-aware endpoint identity (same direction + source + target)
+    # with a different type/state -> both fall in the same endpoint-identity
+    # bucket -> candidate pair (not auto_same because type/state differ).
     specs = [
         ChunkSpec(
             "CH001", ("CH001_P0001",),
@@ -461,7 +486,7 @@ def test_relationship_same_endpoint_group_pairs(tmp_path):
             rels=(
                 _mk_rel("cand_rel_001", source_ref="cand_char_001", target_ref="cand_char_002",
                         relationship_type_zh="helps", state_zh="x", para="CH001_P0001"),
-                _mk_rel("cand_rel_002", source_ref="cand_char_002", target_ref="cand_char_001",
+                _mk_rel("cand_rel_002", source_ref="cand_char_001", target_ref="cand_char_002",
                         relationship_type_zh="fears", state_zh=None, para="CH001_P0001"),
             ),
         ),
@@ -471,7 +496,7 @@ def test_relationship_same_endpoint_group_pairs(tmp_path):
     refs = _global_refs_for(result, "relationships", {"cand_rel_001", "cand_rel_002"})
     plan = _pair_by_refs(result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_002"])
     assert plan is not None, "same endpoint group must form a candidate pair"
-    assert plan.blocking_signal_counts.get("same_endpoint_group") == 1
+    assert "same_endpoint_group" in plan.signals
 
 
 def test_relationship_different_endpoint_group_not_materialized(tmp_path):
@@ -531,6 +556,67 @@ def test_planner_does_not_materialize_n2_cross_product(tmp_path):
     assert planned == n - 1
     assert naive > planned * 10, f"planned {planned} should be far below naive {naive}"
     assert planned < naive
+
+
+def test_planner_uses_bucket_index_not_n2_probe(tmp_path):
+    # Direct structural proof (BLOCK 5): instrument the fact block generator with
+    # a probe and assert the internal pair-composition count is O(n) (bucket /
+    # index based), NOT the whole-domain naive n-choose-2.
+    #
+    # Corpus: n facts in n consecutive chunks, all the same type, each with a
+    # distinct statement / paragraph / bound entity. The only firing condition is
+    # F4(b) (same type + adjacent chunk), so the planner emits exactly n-1 pairs
+    # and the probe records only the adjacent-chunk cross compositions -- never
+    # the naive n*(n-1)//2 whole-domain cross product.
+    from short_drama.story.consolidation_planning import (
+        _PairGenerationProbe,
+        _chunk_ordinal_from_source_order_key,
+        _fact_block_pairs,
+    )
+
+    n = 80
+    specs = []
+    for i in range(n):
+        para = f"CH{i + 1:03d}_P0001"
+        specs.append(
+            ChunkSpec(
+                f"CH{i + 1:03d}",
+                (para,),
+                chars=(_char(f"cand_char_{i + 1:03d}", f"Char{i}"),),
+                facts=(_mk_fact(
+                    f"cand_fact_{i + 1:03d}",
+                    statement_zh=f"distinct statement {i}",
+                    subject_refs=(f"cand_char_{i + 1:03d}",),
+                    para=para,
+                ),),
+            )
+        )
+    tree = _build_multi_chunk_tree(tmp_path, *specs)
+    result = _plan(tree)
+    assert len(result.index.facts) == n
+
+    # Build the exact same candidate -> chunk-ordinal map the production planner
+    # uses, then re-run the fact block generator with the probe to measure the
+    # internal composition count.
+    ordinal = {
+        cand.global_candidate_ref: _chunk_ordinal_from_source_order_key(
+            cand.source_order_key
+        )
+        for cand in result.index.facts
+    }
+    probe = _PairGenerationProbe()
+    _fact_block_pairs(result.index.facts, ordinal, probe=probe)
+
+    naive = n * (n - 1) // 2
+    materialized = len(result.fact_pair_plans)
+    assert materialized == n - 1
+    # No bucket ever held more than one candidate (each type/paragraph/entity
+    # bucket is size 1); the only cross work is the O(n) adjacent-chunk links.
+    assert probe.max_bucket_size == 1
+    # Each adjacent-chunk link is examined once from each side -> 2*(n-1).
+    assert probe.total_compositions == 2 * (n - 1)
+    # The internal composition count is far below the whole-domain naive count.
+    assert probe.total_compositions * 10 < naive
 
 
 # ---------------------------------------------------------------------------
@@ -645,8 +731,10 @@ def test_relationship_exact_safe_auto_same_and_none_vs_state(tmp_path):
 
 
 def test_relationship_opposite_direction_not_auto_same(tmp_path):
-    # Same endpoint group + type + state but OPPOSITE directed order -> the
-    # endpoint identity key differs -> NOT auto_same (needs a semantic decision).
+    # Same endpoints + type + state but OPPOSITE directed order -> the
+    # direction-aware endpoint identity key differs ((directed, s, t) vs
+    # (directed, t, s)) -> the two fall in different buckets -> NO candidate
+    # pair is materialized at all (stronger than merely "not auto_same").
     specs = [
         ChunkSpec(
             "CH001", ("CH001_P0001",),
@@ -663,8 +751,10 @@ def test_relationship_opposite_direction_not_auto_same(tmp_path):
     result = _plan(tree)
     refs = _global_refs_for(result, "relationships", {"cand_rel_001", "cand_rel_002"})
     plan = _pair_by_refs(result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_002"])
-    assert plan is not None
-    assert plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
+    assert plan is None, (
+        "opposite directed endpoints have different direction-aware endpoint "
+        "identity keys -> no candidate pair is materialized"
+    )
 
 
 def test_exact_safe_keys_pure():
@@ -770,22 +860,24 @@ def test_decision_set_auto_same_only_and_fields(tmp_path):
     tree = _build_multi_chunk_tree(tmp_path, *_rich_corpus())
     result = _plan(tree)
     decision_set = result.deterministic_decision_set
-    assert isinstance(decision_set, DeterministicConsolidationDecisionSet)
+    assert isinstance(decision_set, ConsolidationDecisionSet)
     auto_pairs = {
         frozenset((p.left_ref, p.right_ref))
         for plans in (result.fact_pair_plans, result.event_pair_plans,
                       result.relationship_pair_plans)
         for p in plans if p.state == PAIR_STATE_AUTO_SAME
     }
-    decision_pairs = {frozenset((d.left_ref, d.right_ref)) for d in decision_set.decisions}
+    decision_pairs = {
+        frozenset((d.left_candidate_ref, d.right_candidate_ref))
+        for d in _all_decisions(decision_set)
+    }
     assert decision_pairs == auto_pairs
-    for d in decision_set.decisions:
-        assert d.method == "deterministic"
-        assert d.reason_code == "exact_safe"
+    for d in _all_decisions(decision_set):
+        assert d.method == DETERMINISTIC_METHOD
+        assert d.decision in ("same_fact", "same_event", "same_relationship")
         assert d.prompt_id is None
         assert d.prompt_version is None
         assert d.generation_provenance is None
-        assert d.pair_kind in ("fact", "event", "relationship")
         assert d.decision_id.startswith("dec_")
         assert len(d.decision_id) == 4 + 20
         assert d.reason_zh
@@ -811,11 +903,14 @@ def test_decision_id_deterministic_and_evidence_union(tmp_path):
     ]
     tree = _build_multi_chunk_tree(tmp_path, *specs)
     result = _plan(tree)
-    assert len(result.deterministic_decision_set.decisions) == 1
-    decision = result.deterministic_decision_set.decisions[0]
+    assert len(_all_decisions(result.deterministic_decision_set)) == 1
+    decision = _all_decisions(result.deterministic_decision_set)[0]
     assert tuple(e.paragraph_id for e in decision.evidence_refs) == (para_a, para_b)
     result2 = _plan(tree)
-    assert result2.deterministic_decision_set.decisions[0].decision_id == decision.decision_id
+    assert (
+        _all_decisions(result2.deterministic_decision_set)[0].decision_id
+        == decision.decision_id
+    )
 
 
 def test_decision_evidence_stable_exact_dedupe(tmp_path):
@@ -835,8 +930,8 @@ def test_decision_evidence_stable_exact_dedupe(tmp_path):
     ]
     tree = _build_multi_chunk_tree(tmp_path, *specs)
     result = _plan(tree)
-    assert len(result.deterministic_decision_set.decisions) == 1
-    decision = result.deterministic_decision_set.decisions[0]
+    assert len(_all_decisions(result.deterministic_decision_set)) == 1
+    decision = _all_decisions(result.deterministic_decision_set)[0]
     assert len(decision.evidence_refs) == 1
     assert decision.evidence_refs[0].paragraph_id == para
 
@@ -928,8 +1023,10 @@ def test_profile_policy_ids_are_frozen():
 def test_pair_plan_structure(tmp_path):
     tree = _build_multi_chunk_tree(tmp_path, *_rich_corpus())
     result = _plan(tree)
-    for plans in (
-        result.fact_pair_plans, result.event_pair_plans, result.relationship_pair_plans
+    for plans, vocab in (
+        (result.fact_pair_plans, FACT_SIGNALS),
+        (result.event_pair_plans, EVENT_SIGNALS),
+        (result.relationship_pair_plans, RELATIONSHIP_SIGNALS),
     ):
         keys = [(p.left_ref, p.right_ref) for p in plans]
         assert keys == sorted(keys)
@@ -937,11 +1034,10 @@ def test_pair_plan_structure(tmp_path):
         for plan in plans:
             assert plan.left_ref < plan.right_ref
             assert plan.state in (PAIR_STATE_AUTO_SAME, PAIR_STATE_NEEDS_SEMANTIC_DECISION)
-            assert plan.blocking_signal_counts
-            for signal, count in plan.blocking_signal_counts.items():
-                assert isinstance(signal, str)
-                assert count == 1
-                assert isinstance(count, int) and not isinstance(count, bool)
+            assert len(plan.signals) >= 1
+            assert plan.signals == tuple(sorted(plan.signals))
+            assert len(set(plan.signals)) == len(plan.signals)
+            assert set(plan.signals) <= set(vocab)
 
 
 def test_no_not_compared_state_anywhere(tmp_path):
@@ -1003,9 +1099,13 @@ def test_alice_zero_provider_smoke():
     assert auto_total == 0
     assert fact_total <= 5300
     assert event_total <= 4300
-    assert rel_total == 845
+    # Direction-aware relationship acceptance (section 9.1): the explicit count
+    # equals the direction-aware endpoint bucket count (428 for Alice) and is
+    # <= the unordered Phase-A ceiling (845).
+    assert rel_total == 428
+    assert rel_total <= 845
     assert total_plans <= 10450
-    assert len(result.deterministic_decision_set.decisions) == 0
+    assert len(_all_decisions(result.deterministic_decision_set)) == 0
 
     result2 = build_consolidation_planning(
         store, pointers, project_id=_ALICE_PROJECT, document_id=_ALICE_DOCUMENT,
@@ -1035,8 +1135,11 @@ def test_semantic_stream_boundary(tmp_path):
         assert not hasattr(plan, "prompt_id")
         assert not hasattr(plan, "generation_provenance")
         assert not hasattr(plan, "provider")
-    for decision in result.deterministic_decision_set.decisions:
-        assert isinstance(decision, DeterministicConsolidationDecision)
+    for decision in _all_decisions(result.deterministic_decision_set):
+        assert isinstance(
+            decision,
+            (FactSemanticDecision, EventSemanticDecision, RelationshipSemanticDecision),
+        )
         assert decision.prompt_id is None
         assert decision.generation_provenance is None
     assert not hasattr(result, "canonical_facts")

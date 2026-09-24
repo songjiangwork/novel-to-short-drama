@@ -33,7 +33,7 @@ import argparse
 import re
 import sys
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,11 +55,14 @@ DEFAULT_PROFILE = "entity-reconciliation-v2"
 DEFAULT_CONSOLIDATION_PROFILE = REPO_ROOT / "profiles" / "consolidation_v1.yaml"
 
 # Frozen Alice v1.2-A5B blocking-v1 acceptance gates (post-audit refinement).
-# ``relationship`` is an EXACT expectation; the rest are upper bounds; auto_same
-# is an EXACT zero expectation (the Alice corpus produces no deterministic merges).
+# ``relationship`` is a DIRECTION-AWARE expectation: the actual explicit count
+# must equal the independently-computed direction-aware endpoint bucket count
+# AND be <= the unordered Phase-A ceiling (845). The rest are upper bounds;
+# auto_same is an EXACT zero expectation (the Alice corpus produces no
+# deterministic merges).
 ALICE_GATE_FACT_MAX = 5300
 ALICE_GATE_EVENT_MAX = 4300
-ALICE_GATE_RELATIONSHIP_EXACT = 845
+ALICE_GATE_RELATIONSHIP_MAX = 845
 ALICE_GATE_TOTAL_MAX = 10450
 ALICE_GATE_AUTO_SAME_EXACT = 0
 
@@ -168,6 +171,53 @@ def _artifact_ref_str(ref: ArtifactRef) -> str:
 def _naive_pair_count(n: int) -> int:
     """Exact n-choose-2 pair count (n * (n - 1) // 2)."""
     return n * (n - 1) // 2
+
+
+def _decision_set_size(decision_set) -> int:
+    """Total number of A5A-domain deterministic decisions in the set.
+
+    The Phase B deterministic decisions are A5A-domain ``Fact`` / ``Event`` /
+    ``Relationship`` semantic decisions grouped in the A5A ``ConsolidationDecisionSet``
+    (BLOCK 4); there is no separate ``decisions`` attribute.
+    """
+    return (
+        len(decision_set.fact_decisions)
+        + len(decision_set.event_decisions)
+        + len(decision_set.relationship_decisions)
+    )
+
+
+def _relationship_direction_aware_expected(index) -> int:
+    """Independently-computed DIRECTION-AWARE relationship endpoint bucket count.
+
+    Uses the frozen production ``_endpoint_identity_key`` (section 9.1) directly --
+    NOT the production pair planner's output -- so the acceptance gate is not a
+    tautology. This is the exact relationship explicit-pair count the direction-aware
+    blocking-v1 generator is expected to produce.
+    """
+    from short_drama.story.consolidation_planning import _endpoint_identity_key
+
+    buckets: dict = defaultdict(int)
+    for rel in index.relationships:
+        key = _endpoint_identity_key(
+            rel.source_entity_ref, rel.target_entity_ref, rel.direction
+        )
+        buckets[key] += 1
+    return sum(_naive_pair_count(count) for count in buckets.values())
+
+
+def _relationship_unordered_ceiling(index) -> int:
+    """The unordered Phase-A relationship endpoint-group ceiling (n-choose-2 over the
+    unordered frozenset of the two bound endpoints, direction-agnostic).
+
+    This is the historical Phase-A relationship blocking count (845 for Alice) and is
+    the upper bound the direction-aware count must satisfy.
+    """
+    buckets: dict = defaultdict(int)
+    for rel in index.relationships:
+        key = frozenset((rel.source_entity_ref, rel.target_entity_ref))
+        buckets[key] += 1
+    return sum(_naive_pair_count(count) for count in buckets.values())
 
 
 def _source_distance_label(ordinal_a: int, ordinal_b: int) -> str:
@@ -502,7 +552,11 @@ def _distance_for(chunk_ordinal: dict[str, int], a, b) -> str:
 
 
 def _audit_checks(
-    result: ConsolidationPlanningResult, *, alice_gates: bool = False
+    result: ConsolidationPlanningResult,
+    *,
+    alice_gates: bool = False,
+    direction_aware_expected: int | None = None,
+    unordered_ceiling: int | None = None,
 ) -> list[tuple[str, bool]]:
     index = result.index
     coverage = result.coverage
@@ -557,10 +611,11 @@ def _audit_checks(
     n_event = len(result.event_pair_plans)
     n_rel = len(result.relationship_pair_plans)
     total = n_fact + n_event + n_rel
+    decision_total = _decision_set_size(result.deterministic_decision_set)
     checks.append(
         (
             "deterministic decision set size == auto_same pair count",
-            len(result.deterministic_decision_set.decisions) == auto_total,
+            decision_total == auto_total,
         )
     )
     checks.append(
@@ -593,69 +648,26 @@ def _audit_checks(
             n_event <= ALICE_GATE_EVENT_MAX,
         )
     )
+    # Relationship acceptance is direction-aware (section 9.1): the actual
+    # explicit count must equal the independently-computed direction-aware
+    # endpoint bucket count AND be <= the unordered Phase-A ceiling (845).
+    if direction_aware_expected is None:
+        direction_aware_expected = _relationship_direction_aware_expected(index)
+    if unordered_ceiling is None:
+        unordered_ceiling = _relationship_unordered_ceiling(index)
     checks.append(
         (
-            f"relationship pair plans == {ALICE_GATE_RELATIONSHIP_EXACT} (got {n_rel})",
-            n_rel == ALICE_GATE_RELATIONSHIP_EXACT,
+            f"relationship pair plans == direction_aware_expected "
+            f"{direction_aware_expected} and <= unordered ceiling "
+            f"{ALICE_GATE_RELATIONSHIP_MAX} (got {n_rel})",
+            n_rel == direction_aware_expected
+            and n_rel <= ALICE_GATE_RELATIONSHIP_MAX,
         )
     )
     checks.append(
         (
             f"total pair plans <= {ALICE_GATE_TOTAL_MAX} (got {total})",
             total <= ALICE_GATE_TOTAL_MAX,
-        )
-    )
-    return checks
-    fact_auto, _ = _pair_plan_split(result.fact_pair_plans)
-    event_auto, _ = _pair_plan_split(result.event_pair_plans)
-    rel_auto, _ = _pair_plan_split(result.relationship_pair_plans)
-    auto_total = fact_auto + event_auto + rel_auto
-    n_fact = len(result.fact_pair_plans)
-    n_event = len(result.event_pair_plans)
-    n_rel = len(result.relationship_pair_plans)
-    total = n_fact + n_event + n_rel
-    checks.append(
-        (
-            f"auto_same pair count == {ALICE_GATE_AUTO_SAME_EXACT} (got {auto_total})",
-            auto_total == ALICE_GATE_AUTO_SAME_EXACT,
-        )
-    )
-    checks.append(
-        (
-            f"fact pair plans <= {ALICE_GATE_FACT_MAX} (got {n_fact})",
-            n_fact <= ALICE_GATE_FACT_MAX,
-        )
-    )
-    checks.append(
-        (
-            f"event pair plans <= {ALICE_GATE_EVENT_MAX} (got {n_event})",
-            n_event <= ALICE_GATE_EVENT_MAX,
-        )
-    )
-    checks.append(
-        (
-            f"relationship pair plans == {ALICE_GATE_RELATIONSHIP_EXACT} (got {n_rel})",
-            n_rel == ALICE_GATE_RELATIONSHIP_EXACT,
-        )
-    )
-    checks.append(
-        (
-            f"total pair plans <= {ALICE_GATE_TOTAL_MAX} (got {total})",
-            total <= ALICE_GATE_TOTAL_MAX,
-        )
-    )
-    checks.append(
-        (
-            "deterministic decision set size == auto_same pair count",
-            len(result.deterministic_decision_set.decisions) == auto_total,
-        )
-    )
-    checks.append(
-        (
-            "plan hash is a 64-hex canonical content hash",
-            isinstance(result.plan_hash, str)
-            and len(result.plan_hash) == 64
-            and all(c in "0123456789abcdef" for c in result.plan_hash),
         )
     )
     return checks
@@ -834,40 +846,96 @@ def _pair_plan_split(plans) -> tuple[int, int]:
     return auto, needs
 
 
-def _print_pair_planning(result: ConsolidationPlanningResult) -> None:
+def _signal_combination_lines(plans, *, top: int = 25) -> list[str]:
+    """Deterministic atomic-signal-combination distribution for a plan list.
+
+    Each pair plan carries the COMPLETE set of frozen atomic signals (a
+    lexical-sorted, unique tuple). This reports how many pairs share each
+    distinct signal combination (bounded to ``top`` for a stable report).
+    """
+    combos: dict = Counter(tuple(p.signals) for p in plans)
+    lines = [
+        f"      distinct signal combinations: {len(combos)}  (pairs: {len(plans)})"
+    ]
+    for combo, count in sorted(combos.items(), key=lambda item: (-item[1], item[0]))[:top]:
+        lines.append(f"      [{', '.join(combo)}]: {count}")
+    if len(combos) > top:
+        lines.append(f"      ... ({len(combos) - top} more combinations)")
+    return lines
+
+
+def _print_pair_planning(
+    result: ConsolidationPlanningResult,
+    *,
+    direction_aware_expected: int,
+    unordered_ceiling: int,
+) -> None:
     """Report the production blocking-v1 pair plans (Phase B, zero-provider).
 
     This is the deterministic, no-N^2 pair generation output -- the exact
     material that would feed the semantic stream (#52/#53). It is NOT the
     diagnostic corpus-shape enumeration above.
     """
+    index = result.index
+    n_fact = len(index.facts)
+    n_event = len(index.events)
+    n_rel = len(index.relationships)
     fact_auto, fact_needs = _pair_plan_split(result.fact_pair_plans)
     event_auto, event_needs = _pair_plan_split(result.event_pair_plans)
     rel_auto, rel_needs = _pair_plan_split(result.relationship_pair_plans)
     auto_total = fact_auto + event_auto + rel_auto
-    total = len(result.fact_pair_plans) + len(result.event_pair_plans) + len(
-        result.relationship_pair_plans
+    semantic_total = fact_needs + event_needs + rel_needs
+    fact_explicit = len(result.fact_pair_plans)
+    event_explicit = len(result.event_pair_plans)
+    rel_explicit = len(result.relationship_pair_plans)
+    explicit_total = fact_explicit + event_explicit + rel_explicit
+    naive_total = (
+        _naive_pair_count(n_fact) + _naive_pair_count(n_event) + _naive_pair_count(n_rel)
     )
-    print("=== PRODUCTION PAIR PLANNING (blocking-v1) ===")
+
+    print("=== A5B ALICE PRODUCTION PLANNING ===")
     print(f"blocking_policy_id:            {result.blocking_policy_id}")
     print(f"text_normalization_policy_id:  {result.text_normalization_policy_id}")
     print(f"exact_safe_policy_id:          {result.exact_safe_policy_id}")
     print(f"planning_policy_id:            {result.planning_policy_id}")
-    print(
-        f"fact_pair_plans:               {len(result.fact_pair_plans):5d}  "
-        f"(auto_same={fact_auto}, needs_semantic_decision={fact_needs})"
-    )
-    print(
-        f"event_pair_plans:              {len(result.event_pair_plans):5d}  "
-        f"(auto_same={event_auto}, needs_semantic_decision={event_needs})"
-    )
-    print(
-        f"relationship_pair_plans:       {len(result.relationship_pair_plans):5d}  "
-        f"(auto_same={rel_auto}, needs_semantic_decision={rel_needs})"
-    )
-    print(f"total_pair_plans:              {total:5d}")
-    print(f"deterministic_decisions:       {len(result.deterministic_decision_set.decisions):5d}")
-    print(f"plan_hash:                     {result.plan_hash}")
+    print()
+    print("Fact:")
+    print(f"  candidate:   {n_fact}")
+    print(f"  naive:       {_naive_pair_count(n_fact)}")
+    print(f"  explicit:    {fact_explicit}")
+    print(f"  auto_same:   {fact_auto}")
+    print(f"  semantic:    {fact_needs}")
+    print("Event:")
+    print(f"  candidate:   {n_event}")
+    print(f"  naive:       {_naive_pair_count(n_event)}")
+    print(f"  explicit:    {event_explicit}")
+    print(f"  auto_same:   {event_auto}")
+    print(f"  semantic:    {event_needs}")
+    print("Relationship:")
+    print(f"  candidate:   {n_rel}")
+    print(f"  naive:       {_naive_pair_count(n_rel)}")
+    print(f"  unordered_phase_a_ceiling:  {unordered_ceiling}")
+    print(f"  direction_aware_expected:   {direction_aware_expected}")
+    print(f"  explicit:    {rel_explicit}")
+    print(f"  auto_same:   {rel_auto}")
+    print(f"  semantic:    {rel_needs}")
+    print("Totals:")
+    print(f"  naive:       {naive_total}")
+    print(f"  explicit:    {explicit_total}")
+    print(f"  auto_same:   {auto_total}")
+    print(f"  semantic:    {semantic_total}")
+    print(f"plan_hash:     {result.plan_hash}")
+    print()
+    print("Production atomic signal combinations:")
+    print("  Fact:")
+    for line in _signal_combination_lines(result.fact_pair_plans):
+        print(line)
+    print("  Event:")
+    for line in _signal_combination_lines(result.event_pair_plans):
+        print(line)
+    print("  Relationship:")
+    for line in _signal_combination_lines(result.relationship_pair_plans):
+        print(line)
     print()
 
 
@@ -969,6 +1037,12 @@ def run_audit(
     )
     index = result.index
     ordinal = _chunk_ordinal_by_chunk_id(result.snapshot)
+    # Direction-aware relationship acceptance (section 9.1): the independently
+    # computed direction-aware endpoint bucket count and the unordered Phase-A
+    # ceiling (845 for Alice). These are NOT read from the production planner's
+    # own output, so the relationship gate is not a tautology.
+    rel_direction_aware = _relationship_direction_aware_expected(index)
+    rel_unordered_ceiling = _relationship_unordered_ceiling(index)
 
     print("=== A5B ZERO-PROVIDER ALICE AUDIT ===")
     print(f"project:              {project_id}")
@@ -991,7 +1065,11 @@ def run_audit(
     # 7. Naive pair universe
     _print_naive_pair_universe(result)
     # 7b. Production blocking-v1 pair plans (Phase B, zero-provider)
-    _print_pair_planning(result)
+    _print_pair_planning(
+        result,
+        direction_aware_expected=rel_direction_aware,
+        unordered_ceiling=rel_unordered_ceiling,
+    )
     # 8. Source distance (also returns the pair analyses reused below)
     analyses = _print_source_distance(result)
 
@@ -1027,7 +1105,12 @@ def run_audit(
 
     # Read-only audit checks (gate)
     print("=== AUDIT CHECKS ===")
-    checks = _audit_checks(result, alice_gates=alice_gates)
+    checks = _audit_checks(
+        result,
+        alice_gates=alice_gates,
+        direction_aware_expected=rel_direction_aware,
+        unordered_ceiling=rel_unordered_ceiling,
+    )
     all_pass = True
     for label, passed in checks:
         all_pass = all_pass and passed

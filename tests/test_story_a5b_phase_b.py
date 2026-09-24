@@ -757,6 +757,67 @@ def test_relationship_opposite_direction_not_auto_same(tmp_path):
     )
 
 
+def test_relationship_symmetric_reverse_orientation_auto_same(tmp_path):
+    # SYMMETRIC direction, reversed endpoints: A/B and B/A canonicalize to the
+    # SAME direction-aware endpoint identity key (min/max) -> the pair IS
+    # materialized. With identical type + state the exact-safe keys are equal ->
+    # auto_same. Frozen regression: symmetric A/B == symmetric B/A.
+    specs = [
+        ChunkSpec(
+            "CH001", ("CH001_P0001",),
+            chars=(_char("cand_char_001", "Alice"), _char("cand_char_002", "Bob")),
+            rels=(
+                _mk_rel("cand_rel_001", source_ref="cand_char_001", target_ref="cand_char_002",
+                        relationship_type_zh="helps", state_zh="x", direction="symmetric",
+                        para="CH001_P0001"),
+                _mk_rel("cand_rel_002", source_ref="cand_char_002", target_ref="cand_char_001",
+                        relationship_type_zh="helps", state_zh="x", direction="symmetric",
+                        para="CH001_P0001"),
+            ),
+        ),
+    ]
+    tree = _build_multi_chunk_tree(tmp_path, *specs)
+    result = _plan(tree)
+    refs = _global_refs_for(result, "relationships", {"cand_rel_001", "cand_rel_002"})
+    plan = _pair_by_refs(result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_002"])
+    assert plan is not None, (
+        "symmetric A/B and symmetric B/A share the same canonical endpoint "
+        "identity key -> the pair must be materialized"
+    )
+    assert plan.state == PAIR_STATE_AUTO_SAME
+    assert "same_endpoint_group" in plan.signals
+    assert "exact_safe_key" in plan.signals
+
+
+def test_relationship_unknown_reverse_orientation_not_materialized(tmp_path):
+    # UNKNOWN direction, reversed endpoints: A->B and B->A have DIFFERENT
+    # direction-aware endpoint identity keys ((unknown, s, t) vs (unknown, t, s))
+    # -> the two fall in different buckets -> NO candidate pair is materialized.
+    # Frozen regression: unknown A->B != unknown B->A (unknown is NOT symmetry).
+    specs = [
+        ChunkSpec(
+            "CH001", ("CH001_P0001",),
+            chars=(_char("cand_char_001", "Alice"), _char("cand_char_002", "Bob")),
+            rels=(
+                _mk_rel("cand_rel_001", source_ref="cand_char_001", target_ref="cand_char_002",
+                        relationship_type_zh="helps", state_zh="x", direction="unknown",
+                        para="CH001_P0001"),
+                _mk_rel("cand_rel_002", source_ref="cand_char_002", target_ref="cand_char_001",
+                        relationship_type_zh="helps", state_zh="x", direction="unknown",
+                        para="CH001_P0001"),
+            ),
+        ),
+    ]
+    tree = _build_multi_chunk_tree(tmp_path, *specs)
+    result = _plan(tree)
+    refs = _global_refs_for(result, "relationships", {"cand_rel_001", "cand_rel_002"})
+    plan = _pair_by_refs(result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_002"])
+    assert plan is None, (
+        "unknown A->B and unknown B->A have different direction-aware endpoint "
+        "identity keys -> no candidate pair is materialized (unknown != symmetry)"
+    )
+
+
 def test_exact_safe_keys_pure():
     """The exact-safe key functions are pure and expose the documented material."""
     from short_drama.artifacts import ArtifactRef

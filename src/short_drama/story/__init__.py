@@ -317,7 +317,6 @@ from .consolidation_semantic import (
     resolve_event_semantic_ambiguity,
     resolve_relationship_semantic_ambiguity,
     FactSemanticBlock,
-    FactSemanticBlock,
     FactSemanticBlockResult,
     FactSemanticPackingPolicy,
     FactSemanticPreparation,

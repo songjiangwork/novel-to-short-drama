@@ -2740,10 +2740,6 @@ RELATIONSHIP_SEMANTIC_PACKING_V1: RelationshipSemanticPackingPolicy = (
     )
 )
 
-# Shared A5 selector regex (same as A5C fact: A5_EVIDENCE_SELECTOR_PATTERN).
-_EVENT_EVIDENCE_SELECTOR_RE = re.compile(A5_EVIDENCE_SELECTOR_PATTERN)
-_RELATIONSHIP_EVIDENCE_SELECTOR_RE = re.compile(A5_EVIDENCE_SELECTOR_PATTERN)
-
 
 # ---------------------------------------------------------------------------
 # Result models (A5D-B)
@@ -2988,7 +2984,6 @@ def _validate_selector_block_payload(
     payload_decisions: list,
     pair_refs: tuple[tuple[str, str], ...],
     endpoint_evidence: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]],
-    selector_re: re.Pattern,
     domain: str,
 ) -> tuple[bool, str, list[tuple[EvidenceRef, ...]]]:
     """Validate a block's provider payload against the exact requested pairs.
@@ -3030,7 +3025,7 @@ def _validate_selector_block_payload(
         seen_selectors: set[str] = set()
         validated_selectors: list[str] = []
         for selector in item.evidence_selectors:
-            if selector_re.fullmatch(selector) is None:
+            if re.fullmatch(A5_EVIDENCE_SELECTOR_PATTERN, selector) is None:
                 return (
                     False,
                     f"pair {i}: invalid evidence selector {selector!r}; only "
@@ -3407,7 +3402,6 @@ def resolve_event_semantic_ambiguity(
                     list(payload.decisions),
                     block.pair_refs,
                     endpoint_evidence,
-                    _EVENT_EVIDENCE_SELECTOR_RE,
                     "event",
                 )
             )
@@ -3545,7 +3539,6 @@ def resolve_relationship_semantic_ambiguity(
                     list(payload.decisions),
                     block.pair_refs,
                     endpoint_evidence,
-                    _RELATIONSHIP_EVIDENCE_SELECTOR_RE,
                     "relationship",
                 )
             )

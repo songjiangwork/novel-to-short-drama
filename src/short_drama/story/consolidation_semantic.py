@@ -82,9 +82,13 @@ from .consolidation import (
     ConsolidationCandidateRef,
     ConsolidationProfile,
     ConsolidationSemanticPass,
+    EVENT_DECISIONS,
     FACT_DECISIONS,
+    RELATIONSHIP_DECISIONS,
+    EventSemanticDecision,
     FactSelectorDecisionPayload,
     FactSemanticDecision,
+    RelationshipSemanticDecision,
 )
 from .consolidation_planning import (
     ConsolidationPlanningResult,
@@ -2695,5 +2699,900 @@ def resolve_fact_semantic_ambiguity(
         preparation=preparation,
         semantic_decisions=tuple(all_semantic_decisions),
         all_fact_decisions=all_fact_decisions,
+        block_results=tuple(all_block_results),
+    )
+
+
+# ---------------------------------------------------------------------------
+# A5D-B -- event + relationship semantic provider execution + selector resolution
+#
+# The event / relationship equivalents of the A5C-B fact provider-execution path.
+# They reuse the EXACT A5C-B patterns: provenance verification (FAIL CLOSED),
+# typed selector-payload load, exact pair coverage/order, pair-local selector
+# validation, canonical selector order, exact endpoint EvidenceRef resolution,
+# stable exact-EvidenceRef alias dedupe, domain SemanticDecision(method="llm")
+# construction, and exact whole-domain decision coverage.
+#
+# A5D-B does NOT persist, does NOT write CURRENT, does NOT build canonical event/
+# relationship IDs, StateTransition, StoryConflict, or graph components.
+# ---------------------------------------------------------------------------
+
+# Frozen production event / relationship semantic packing policies (A5D-B).
+#
+# ``event-semantic-packing-v1`` and ``relationship-semantic-packing-v1`` are the
+# FROZEN POST-AUDIT policies (docs ``v1.2-A5D-event-relationship-semantic-packing-v1.md``):
+# 12 pairs / 24 candidates each (audit candidate P2). The canonical packing
+# material is the frozen behavioral limits (12 / 24), NOT the policy label:
+# ``to_dict()`` carries only the two limits, so these policies produce
+# byte-identical block ids and request hashes to the audited P2 preparation.
+# A5D-B consumes these exact policies and never re-selects P1 / P2 / P3 at
+# runtime.
+EVENT_SEMANTIC_PACKING_V1: EventSemanticPackingPolicy = EventSemanticPackingPolicy(
+    "event-semantic-packing-v1",
+    12,
+    24,
+)
+RELATIONSHIP_SEMANTIC_PACKING_V1: RelationshipSemanticPackingPolicy = (
+    RelationshipSemanticPackingPolicy(
+        "relationship-semantic-packing-v1",
+        12,
+        24,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Result models (A5D-B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EventSemanticBlockResult:
+    """In-memory result of executing one event semantic block (A5D-B).
+
+    In-memory only; A5D-B does NOT persist. ``semantic_rounds`` is the number
+    of semantic generation rounds consumed until this block succeeded. ``decisions``
+    are the block's LLM event decisions in the block's pair order.
+    """
+
+    block_id: str
+    request_hash: str
+    semantic_rounds: int
+    decisions: tuple[EventSemanticDecision, ...]
+    generation_provenance: LLMInvocationProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class EventSemanticResolutionResult:
+    """In-memory A5D-B event semantic resolution result.
+
+    In-memory only; A5D-B does NOT persist, does NOT allocate canonical event
+    ids, and does NOT build StateTransition / StoryConflict / graph components.
+    """
+
+    planning_result: ConsolidationPlanningResult
+    preparation: EventSemanticPreparation
+    semantic_decisions: tuple[EventSemanticDecision, ...]
+    all_event_decisions: tuple[EventSemanticDecision, ...]
+    block_results: tuple[EventSemanticBlockResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipSemanticBlockResult:
+    """In-memory result of executing one relationship semantic block (A5D-B)."""
+
+    block_id: str
+    request_hash: str
+    semantic_rounds: int
+    decisions: tuple[RelationshipSemanticDecision, ...]
+    generation_provenance: LLMInvocationProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipSemanticResolutionResult:
+    """In-memory A5D-B relationship semantic resolution result.
+
+    In-memory only; A5D-B does NOT persist, does NOT allocate canonical
+    relationship ids, and does NOT build state histories / graph components.
+    """
+
+    planning_result: ConsolidationPlanningResult
+    preparation: RelationshipSemanticPreparation
+    semantic_decisions: tuple[RelationshipSemanticDecision, ...]
+    all_relationship_decisions: tuple[RelationshipSemanticDecision, ...]
+    block_results: tuple[RelationshipSemanticBlockResult, ...]
+
+
+# ---------------------------------------------------------------------------
+# Decision id (event / relationship -- backend-neutral semantic identity)
+# ---------------------------------------------------------------------------
+
+
+def compute_event_llm_decision_id(
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    prompt_id: str,
+    prompt_version: int,
+    request_hash: str,
+) -> str:
+    """Compute the deterministic A5D event LLM decision id.
+
+    Backend-neutral: binds domain, pair, decision, method, reason, evidence,
+    prompt identity, and request_hash. Does NOT include runtime provider
+    metadata.
+    """
+    material = {
+        "domain": "event",
+        "left_candidate_ref": left_ref,
+        "right_candidate_ref": right_ref,
+        "decision": decision,
+        "method": "llm",
+        "reason_zh": reason_zh,
+        "evidence_refs": [e.to_dict() for e in evidence_refs],
+        "prompt_id": prompt_id,
+        "prompt_version": prompt_version,
+        "request_hash": request_hash,
+    }
+    return "dec_" + content_hash(material)[:20]
+
+
+def compute_relationship_llm_decision_id(
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    prompt_id: str,
+    prompt_version: int,
+    request_hash: str,
+) -> str:
+    """Compute the deterministic A5D relationship LLM decision id."""
+    material = {
+        "domain": "relationship",
+        "left_candidate_ref": left_ref,
+        "right_candidate_ref": right_ref,
+        "decision": decision,
+        "method": "llm",
+        "reason_zh": reason_zh,
+        "evidence_refs": [e.to_dict() for e in evidence_refs],
+        "prompt_id": prompt_id,
+        "prompt_version": prompt_version,
+        "request_hash": request_hash,
+    }
+    return "dec_" + content_hash(material)[:20]
+
+
+# ---------------------------------------------------------------------------
+# Generic provenance verification (FAIL CLOSED, no semantic retry)
+# ---------------------------------------------------------------------------
+
+
+def _verify_semantic_provenance(
+    provenance: LLMInvocationProvenance,
+    request: StructuredGenerationRequest,
+    semantic_profile: SemanticLLMProfile,
+) -> None:
+    """Verify a successful generation's provenance matches the exact request.
+
+    Checks backend-neutral semantic/request identity only. Any mismatch raises
+    :class:`ConsolidationProvenanceError` (FAIL CLOSED, NO semantic retry).
+    provider_family / model / provider_response_id / usage / finish_reason are
+    audit provenance only and are deliberately NOT compared.
+    """
+    rendered = request.rendered_prompt
+    schema = request.output_schema
+    expected = {
+        "semantic_profile_id": semantic_profile.profile_id,
+        "semantic_profile_hash": semantic_profile.semantic_profile_hash,
+        "prompt_id": rendered.prompt_id,
+        "prompt_version": rendered.prompt_version,
+        "prompt_content_hash": rendered.prompt_content_hash,
+        "rendered_prompt_hash": rendered.rendered_prompt_hash,
+        "output_schema_id": schema.schema_id,
+        "output_schema_version": schema.schema_version,
+        "output_schema_hash": schema.schema_hash,
+        "request_hash": request.request_hash,
+    }
+    actual = {
+        "semantic_profile_id": provenance.semantic_profile_id,
+        "semantic_profile_hash": provenance.semantic_profile_hash,
+        "prompt_id": provenance.prompt_id,
+        "prompt_version": provenance.prompt_version,
+        "prompt_content_hash": provenance.prompt_content_hash,
+        "rendered_prompt_hash": provenance.rendered_prompt_hash,
+        "output_schema_id": provenance.output_schema_id,
+        "output_schema_version": provenance.output_schema_version,
+        "output_schema_hash": provenance.output_schema_hash,
+        "request_hash": provenance.request_hash,
+    }
+    for key in expected:
+        if expected[key] != actual[key]:
+            raise ConsolidationProvenanceError(
+                f"provenance field {key!r} mismatch: expected "
+                f"{expected[key]!r}, got {actual[key]!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Generic pair-local selector canonicalization + exact endpoint evidence resolution
+# ---------------------------------------------------------------------------
+
+
+def _canonicalize_selectors(selectors: list[str]) -> list[str]:
+    """Canonicalize validated, unique pair-local selectors to the frozen order.
+
+    All left selectors first (numeric ascending), then all right selectors
+    (numeric ascending). Must already be validated and duplicate-free.
+    """
+    left = sorted((s for s in selectors if s[0] == "L"), key=lambda s: int(s[1:]))
+    right = sorted((s for s in selectors if s[0] == "R"), key=lambda s: int(s[1:]))
+    return left + right
+
+
+def _evidence_exact_identity(ev: EvidenceRef) -> tuple[str, str, str, "str | None"]:
+    """The exact persisted EvidenceRef identity tuple for alias dedup."""
+    return (ev.paragraph_id, ev.role, ev.strength, ev.excerpt)
+
+
+def _event_block_endpoint_evidence(
+    planning: ConsolidationPlanningResult,
+    pair_refs: tuple[tuple[str, str], ...],
+) -> list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]]:
+    """Per-pair endpoint evidence for event selector resolution."""
+    events_by_ref = {c.global_candidate_ref: c for c in planning.index.events}
+    out: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]] = []
+    for left_ref, right_ref in pair_refs:
+        left = events_by_ref.get(left_ref)
+        right = events_by_ref.get(right_ref)
+        if left is None or right is None:
+            raise StoryIntegrityError(
+                "event pair endpoint missing from the event candidate index"
+            )
+        out.append((left.evidence_refs, right.evidence_refs))
+    return out
+
+
+def _relationship_block_endpoint_evidence(
+    planning: ConsolidationPlanningResult,
+    pair_refs: tuple[tuple[str, str], ...],
+) -> list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]]:
+    """Per-pair endpoint evidence for relationship selector resolution."""
+    rels_by_ref = {
+        c.global_candidate_ref: c for c in planning.index.relationships
+    }
+    out: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]] = []
+    for left_ref, right_ref in pair_refs:
+        left = rels_by_ref.get(left_ref)
+        right = rels_by_ref.get(right_ref)
+        if left is None or right is None:
+            raise StoryIntegrityError(
+                "relationship pair endpoint missing from the relationship candidate index"
+            )
+        out.append((left.evidence_refs, right.evidence_refs))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Generic selector block payload validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_selector_block_payload(
+    payload_decisions: list,
+    pair_refs: tuple[tuple[str, str], ...],
+    endpoint_evidence: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]],
+    domain: str,
+) -> tuple[bool, str, list[tuple[EvidenceRef, ...]]]:
+    """Validate a block's provider payload against the exact requested pairs.
+
+    Generic for fact / event / relationship. Returns ``(is_valid, failure_detail,
+    resolved_evidence)``. ``resolved_evidence`` is aligned with the payload
+    decisions when valid, otherwise empty.
+    """
+    requested_count = len(pair_refs)
+    decisions = payload_decisions
+
+    if len(decisions) != requested_count:
+        return (
+            False,
+            f"decision count mismatch: expected {requested_count}, "
+            f"got {len(decisions)}",
+            [],
+        )
+
+    resolved: list[tuple[EvidenceRef, ...]] = []
+    for i, item in enumerate(decisions):
+        expected_left, expected_right = pair_refs[i]
+        if item.left_candidate_ref != expected_left:
+            return (
+                False,
+                f"pair {i}: left_candidate_ref mismatch: expected "
+                f"{expected_left!r}, got {item.left_candidate_ref!r}",
+                [],
+            )
+        if item.right_candidate_ref != expected_right:
+            return (
+                False,
+                f"pair {i}: right_candidate_ref mismatch: expected "
+                f"{expected_right!r}, got {item.right_candidate_ref!r}",
+                [],
+            )
+
+        left_evidence, right_evidence = endpoint_evidence[i]
+        seen_selectors: set[str] = set()
+        validated_selectors: list[str] = []
+        for selector in item.evidence_selectors:
+            if re.fullmatch(A5_EVIDENCE_SELECTOR_PATTERN, selector) is None:
+                return (
+                    False,
+                    f"pair {i}: invalid evidence selector {selector!r}; only "
+                    f"L<index>/R<index> forms are legal",
+                    [],
+                )
+            if selector in seen_selectors:
+                return (
+                    False,
+                    f"pair {i}: duplicate evidence selector: {selector!r}",
+                    [],
+                )
+            seen_selectors.add(selector)
+            index = int(selector[1:])
+            if selector[0] == "L":
+                if index >= len(left_evidence):
+                    return (
+                        False,
+                        f"pair {i}: evidence selector {selector!r} out of range "
+                        f"for the left endpoint ({len(left_evidence)} evidence "
+                        f"item(s))",
+                        [],
+                    )
+            else:
+                if index >= len(right_evidence):
+                    return (
+                        False,
+                        f"pair {i}: evidence selector {selector!r} out of range "
+                        f"for the right endpoint ({len(right_evidence)} evidence "
+                        f"item(s))",
+                        [],
+                    )
+            validated_selectors.append(selector)
+
+        canonical_selectors = _canonicalize_selectors(validated_selectors)
+
+        decision_evidence: list[EvidenceRef] = []
+        seen_exact: set[tuple[str, str, str, "str | None"]] = set()
+        for selector in canonical_selectors:
+            index = int(selector[1:])
+            ev = (
+                left_evidence[index]
+                if selector[0] == "L"
+                else right_evidence[index]
+            )
+            identity = _evidence_exact_identity(ev)
+            if identity not in seen_exact:
+                seen_exact.add(identity)
+                decision_evidence.append(ev)
+        resolved.append(tuple(decision_evidence))
+
+    return True, "", resolved
+
+
+# ---------------------------------------------------------------------------
+# Decision conversion (event / relationship)
+# ---------------------------------------------------------------------------
+
+
+def _convert_to_event_decision(
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    request_hash: str,
+    prompt_id: str,
+    prompt_version: int,
+    provenance: LLMInvocationProvenance,
+) -> EventSemanticDecision:
+    """Convert a valid, selector-resolved event decision to EventSemanticDecision."""
+    decision_id = compute_event_llm_decision_id(
+        left_ref=left_ref,
+        right_ref=right_ref,
+        decision=decision,
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        request_hash=request_hash,
+    )
+    return EventSemanticDecision(
+        decision_id=decision_id,
+        left_candidate_ref=left_ref,
+        right_candidate_ref=right_ref,
+        decision=decision,
+        method="llm",
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        generation_provenance=provenance,
+    )
+
+
+def _convert_to_relationship_decision(
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    request_hash: str,
+    prompt_id: str,
+    prompt_version: int,
+    provenance: LLMInvocationProvenance,
+) -> RelationshipSemanticDecision:
+    """Convert a valid, selector-resolved relationship decision to RelationshipSemanticDecision."""
+    decision_id = compute_relationship_llm_decision_id(
+        left_ref=left_ref,
+        right_ref=right_ref,
+        decision=decision,
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        request_hash=request_hash,
+    )
+    return RelationshipSemanticDecision(
+        decision_id=decision_id,
+        left_candidate_ref=left_ref,
+        right_candidate_ref=right_ref,
+        decision=decision,
+        method="llm",
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        generation_provenance=provenance,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Whole-domain decision coverage (event / relationship)
+# ---------------------------------------------------------------------------
+
+
+def _validate_event_decision_coverage(
+    planning: ConsolidationPlanningResult,
+    deterministic_decisions: tuple[EventSemanticDecision, ...],
+    semantic_decisions: tuple[EventSemanticDecision, ...],
+) -> tuple[EventSemanticDecision, ...]:
+    """Validate and combine all event decisions against the authoritative plans.
+
+    Enforces: every explicit event pair plan has exactly one decision; state/
+    method consistency; canonical order by (left, right).
+    """
+    from .consolidation import EVENT_DECISIONS
+
+    all_decisions = list(deterministic_decisions) + list(semantic_decisions)
+
+    decision_by_pair: dict[tuple[str, str], EventSemanticDecision] = {}
+    for d in all_decisions:
+        key = (d.left_candidate_ref, d.right_candidate_ref)
+        if key in decision_by_pair:
+            raise ConsolidationSemanticError(
+                f"duplicate decision for event pair {key!r}"
+            )
+        decision_by_pair[key] = d
+
+    expected_pairs: set[tuple[str, str]] = set()
+    pair_state: dict[tuple[str, str], str] = {}
+    for plan in planning.event_pair_plans:
+        pair_key = (plan.left_ref, plan.right_ref)
+        expected_pairs.add(pair_key)
+        pair_state[pair_key] = plan.state
+
+    for pair_key in decision_by_pair:
+        if pair_key not in expected_pairs:
+            raise ConsolidationSemanticError(
+                f"event decision found for pair {pair_key!r} not present in "
+                f"planning_result.event_pair_plans; invalid decision coverage"
+            )
+
+    for pair_key in expected_pairs:
+        if pair_key not in decision_by_pair:
+            raise ConsolidationSemanticError(
+                f"no decision found for event pair {pair_key!r}; incomplete "
+                f"event decision coverage"
+            )
+
+    for pair_key, state in pair_state.items():
+        d = decision_by_pair[pair_key]
+        if state == PAIR_STATE_AUTO_SAME:
+            if d.method != "deterministic":
+                raise ConsolidationSemanticError(
+                    f"event pair {pair_key!r} (auto_same) has method "
+                    f"{d.method!r}; expected 'deterministic'"
+                )
+            if d.decision != "same_event":
+                raise ConsolidationSemanticError(
+                    f"event pair {pair_key!r} (auto_same) has decision "
+                    f"{d.decision!r}; expected 'same_event'"
+                )
+        elif state == PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            if d.method != "llm":
+                raise ConsolidationSemanticError(
+                    f"event pair {pair_key!r} (needs_semantic_decision) has "
+                    f"method {d.method!r}; expected 'llm'"
+                )
+            if d.decision not in EVENT_DECISIONS:
+                raise ConsolidationSemanticError(
+                    f"event pair {pair_key!r} (needs_semantic_decision) has "
+                    f"decision {d.decision!r}; expected one of "
+                    f"{sorted(EVENT_DECISIONS)}"
+                )
+
+    all_decisions.sort(key=lambda d: (d.left_candidate_ref, d.right_candidate_ref))
+    return tuple(all_decisions)
+
+
+def _validate_relationship_decision_coverage(
+    planning: ConsolidationPlanningResult,
+    deterministic_decisions: tuple[RelationshipSemanticDecision, ...],
+    semantic_decisions: tuple[RelationshipSemanticDecision, ...],
+) -> tuple[RelationshipSemanticDecision, ...]:
+    """Validate and combine all relationship decisions against the authoritative plans."""
+    from .consolidation import RELATIONSHIP_DECISIONS
+
+    all_decisions = list(deterministic_decisions) + list(semantic_decisions)
+
+    decision_by_pair: dict[tuple[str, str], RelationshipSemanticDecision] = {}
+    for d in all_decisions:
+        key = (d.left_candidate_ref, d.right_candidate_ref)
+        if key in decision_by_pair:
+            raise ConsolidationSemanticError(
+                f"duplicate decision for relationship pair {key!r}"
+            )
+        decision_by_pair[key] = d
+
+    expected_pairs: set[tuple[str, str]] = set()
+    pair_state: dict[tuple[str, str], str] = {}
+    for plan in planning.relationship_pair_plans:
+        pair_key = (plan.left_ref, plan.right_ref)
+        expected_pairs.add(pair_key)
+        pair_state[pair_key] = plan.state
+
+    for pair_key in decision_by_pair:
+        if pair_key not in expected_pairs:
+            raise ConsolidationSemanticError(
+                f"relationship decision found for pair {pair_key!r} not present in "
+                f"planning_result.relationship_pair_plans; invalid decision coverage"
+            )
+
+    for pair_key in expected_pairs:
+        if pair_key not in decision_by_pair:
+            raise ConsolidationSemanticError(
+                f"no decision found for relationship pair {pair_key!r}; incomplete "
+                f"relationship decision coverage"
+            )
+
+    for pair_key, state in pair_state.items():
+        d = decision_by_pair[pair_key]
+        if state == PAIR_STATE_AUTO_SAME:
+            if d.method != "deterministic":
+                raise ConsolidationSemanticError(
+                    f"relationship pair {pair_key!r} (auto_same) has method "
+                    f"{d.method!r}; expected 'deterministic'"
+                )
+            if d.decision != "same_relationship":
+                raise ConsolidationSemanticError(
+                    f"relationship pair {pair_key!r} (auto_same) has decision "
+                    f"{d.decision!r}; expected 'same_relationship'"
+                )
+        elif state == PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            if d.method != "llm":
+                raise ConsolidationSemanticError(
+                    f"relationship pair {pair_key!r} (needs_semantic_decision) has "
+                    f"method {d.method!r}; expected 'llm'"
+                )
+            if d.decision not in RELATIONSHIP_DECISIONS:
+                raise ConsolidationSemanticError(
+                    f"relationship pair {pair_key!r} (needs_semantic_decision) has "
+                    f"decision {d.decision!r}; expected one of "
+                    f"{sorted(RELATIONSHIP_DECISIONS)}"
+                )
+
+    all_decisions.sort(key=lambda d: (d.left_candidate_ref, d.right_candidate_ref))
+    return tuple(all_decisions)
+
+
+# ---------------------------------------------------------------------------
+# Main entry points (A5D-B)
+# ---------------------------------------------------------------------------
+
+
+def resolve_event_semantic_ambiguity(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    llm_client: LLMClient,
+    *,
+    prompts: PromptRegistry,
+) -> EventSemanticResolutionResult:
+    """Execute A5D-B event semantic ambiguity resolution.
+
+    Consumes the A5B ``ConsolidationPlanningResult`` and resolves every
+    ``needs_semantic_decision`` event pair via bounded LLM semantic generation.
+
+    Per block (block atomicity):
+      * ``llm_client.generate_structured(...)`` (A-I3 owns the provider call);
+      * provenance verification (FAIL CLOSED, no semantic retry);
+      * ``EventSelectorDecisionPayload.from_dict(...)`` (typed load);
+      * exact pair coverage/order + pair-local selector validation;
+      * canonical selector order + exact endpoint EvidenceRef resolution;
+      * ``EventSemanticDecision(method="llm")`` construction.
+
+    Semantic rounds are bounded to ``max_generation_rounds`` (2). An ``LLMError``
+    raised by the provider is PROPAGATED (not a semantic retry). Provenance
+    mismatch fails closed with no retry. Two semantic-invalid rounds raise
+    ``ConsolidationSemanticGenerationError``. ``uncertain`` is a valid
+    successful semantic result and is NOT retried.
+    """
+    from .consolidation import EventSelectorDecisionPayload
+
+    preparation = build_event_semantic_preparation(
+        planning_result,
+        consolidation_profile,
+        semantic_profile,
+        prompts=prompts,
+        packing_policy=EVENT_SEMANTIC_PACKING_V1,
+    )
+    blocks = preparation.blocks
+
+    deterministic_event_decisions = (
+        planning_result.deterministic_decision_set.event_decisions
+    )
+
+    if not blocks:
+        all_event_decisions = _validate_event_decision_coverage(
+            planning_result, deterministic_event_decisions, ()
+        )
+        return EventSemanticResolutionResult(
+            planning_result=planning_result,
+            preparation=preparation,
+            semantic_decisions=(),
+            all_event_decisions=all_event_decisions,
+            block_results=(),
+        )
+
+    all_semantic_decisions: list[EventSemanticDecision] = []
+    all_block_results: list[EventSemanticBlockResult] = []
+
+    for block, request in zip(blocks, preparation.structured_requests):
+        rendered_prompt = request.rendered_prompt
+        output_schema = request.output_schema
+
+        endpoint_evidence = _event_block_endpoint_evidence(
+            planning_result, block.pair_refs
+        )
+
+        max_rounds = consolidation_profile.max_generation_rounds
+        block_decisions: list[EventSemanticDecision] = []
+        block_provenance: LLMInvocationProvenance | None = None
+        rounds_attempted = 0
+        last_failure = ""
+
+        for round_number in range(1, max_rounds + 1):
+            rounds_attempted = round_number
+
+            result = llm_client.generate_structured(
+                rendered_prompt, output_schema, semantic_profile
+            )
+
+            _verify_semantic_provenance(result.provenance, request, semantic_profile)
+
+            try:
+                payload = EventSelectorDecisionPayload.from_dict(result.parsed_json)
+            except ConsolidationModelError:
+                last_failure = "typed payload load failed"
+                continue
+
+            is_valid, failure_detail, resolved_evidence = (
+                _validate_selector_block_payload(
+                    list(payload.decisions),
+                    block.pair_refs,
+                    endpoint_evidence,
+                    "event",
+                )
+            )
+            if not is_valid:
+                last_failure = failure_detail
+                continue
+
+            for item, resolved in zip(payload.decisions, resolved_evidence):
+                block_decisions.append(
+                    _convert_to_event_decision(
+                        left_ref=item.left_candidate_ref,
+                        right_ref=item.right_candidate_ref,
+                        decision=item.decision,
+                        reason_zh=item.reason_zh,
+                        evidence_refs=resolved,
+                        request_hash=request.request_hash,
+                        prompt_id=rendered_prompt.prompt_id,
+                        prompt_version=rendered_prompt.prompt_version,
+                        provenance=result.provenance,
+                    )
+                )
+            block_provenance = result.provenance
+            break
+
+        if block_decisions:
+            all_semantic_decisions.extend(block_decisions)
+            all_block_results.append(
+                EventSemanticBlockResult(
+                    block_id=block.block_id,
+                    request_hash=request.request_hash,
+                    semantic_rounds=rounds_attempted,
+                    decisions=tuple(block_decisions),
+                    generation_provenance=block_provenance,  # type: ignore[arg-type]
+                )
+            )
+        else:
+            raise ConsolidationSemanticGenerationError(
+                block_id=block.block_id,
+                request_hash=request.request_hash,
+                rounds_attempted=rounds_attempted,
+                last_failure_details=last_failure,
+                expected_pairs=tuple(block.pair_refs),
+            )
+
+    all_event_decisions = _validate_event_decision_coverage(
+        planning_result, deterministic_event_decisions, tuple(all_semantic_decisions)
+    )
+
+    return EventSemanticResolutionResult(
+        planning_result=planning_result,
+        preparation=preparation,
+        semantic_decisions=tuple(all_semantic_decisions),
+        all_event_decisions=all_event_decisions,
+        block_results=tuple(all_block_results),
+    )
+
+
+def resolve_relationship_semantic_ambiguity(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    llm_client: LLMClient,
+    *,
+    prompts: PromptRegistry,
+) -> RelationshipSemanticResolutionResult:
+    """Execute A5D-B relationship semantic ambiguity resolution.
+
+    Consumes the A5B ``ConsolidationPlanningResult`` and resolves every
+    ``needs_semantic_decision`` relationship pair via bounded LLM semantic
+    generation. Same block-atomicity and provenance rules as the event path.
+    """
+    from .consolidation import RelationshipSelectorDecisionPayload
+
+    preparation = build_relationship_semantic_preparation(
+        planning_result,
+        consolidation_profile,
+        semantic_profile,
+        prompts=prompts,
+        packing_policy=RELATIONSHIP_SEMANTIC_PACKING_V1,
+    )
+    blocks = preparation.blocks
+
+    deterministic_rel_decisions = (
+        planning_result.deterministic_decision_set.relationship_decisions
+    )
+
+    if not blocks:
+        all_rel_decisions = _validate_relationship_decision_coverage(
+            planning_result, deterministic_rel_decisions, ()
+        )
+        return RelationshipSemanticResolutionResult(
+            planning_result=planning_result,
+            preparation=preparation,
+            semantic_decisions=(),
+            all_relationship_decisions=all_rel_decisions,
+            block_results=(),
+        )
+
+    all_semantic_decisions: list[RelationshipSemanticDecision] = []
+    all_block_results: list[RelationshipSemanticBlockResult] = []
+
+    for block, request in zip(blocks, preparation.structured_requests):
+        rendered_prompt = request.rendered_prompt
+        output_schema = request.output_schema
+
+        endpoint_evidence = _relationship_block_endpoint_evidence(
+            planning_result, block.pair_refs
+        )
+
+        max_rounds = consolidation_profile.max_generation_rounds
+        block_decisions: list[RelationshipSemanticDecision] = []
+        block_provenance: LLMInvocationProvenance | None = None
+        rounds_attempted = 0
+        last_failure = ""
+
+        for round_number in range(1, max_rounds + 1):
+            rounds_attempted = round_number
+
+            result = llm_client.generate_structured(
+                rendered_prompt, output_schema, semantic_profile
+            )
+
+            _verify_semantic_provenance(result.provenance, request, semantic_profile)
+
+            try:
+                payload = RelationshipSelectorDecisionPayload.from_dict(
+                    result.parsed_json
+                )
+            except ConsolidationModelError:
+                last_failure = "typed payload load failed"
+                continue
+
+            is_valid, failure_detail, resolved_evidence = (
+                _validate_selector_block_payload(
+                    list(payload.decisions),
+                    block.pair_refs,
+                    endpoint_evidence,
+                    "relationship",
+                )
+            )
+            if not is_valid:
+                last_failure = failure_detail
+                continue
+
+            for item, resolved in zip(payload.decisions, resolved_evidence):
+                block_decisions.append(
+                    _convert_to_relationship_decision(
+                        left_ref=item.left_candidate_ref,
+                        right_ref=item.right_candidate_ref,
+                        decision=item.decision,
+                        reason_zh=item.reason_zh,
+                        evidence_refs=resolved,
+                        request_hash=request.request_hash,
+                        prompt_id=rendered_prompt.prompt_id,
+                        prompt_version=rendered_prompt.prompt_version,
+                        provenance=result.provenance,
+                    )
+                )
+            block_provenance = result.provenance
+            break
+
+        if block_decisions:
+            all_semantic_decisions.extend(block_decisions)
+            all_block_results.append(
+                RelationshipSemanticBlockResult(
+                    block_id=block.block_id,
+                    request_hash=request.request_hash,
+                    semantic_rounds=rounds_attempted,
+                    decisions=tuple(block_decisions),
+                    generation_provenance=block_provenance,  # type: ignore[arg-type]
+                )
+            )
+        else:
+            raise ConsolidationSemanticGenerationError(
+                block_id=block.block_id,
+                request_hash=request.request_hash,
+                rounds_attempted=rounds_attempted,
+                last_failure_details=last_failure,
+                expected_pairs=tuple(block.pair_refs),
+            )
+
+    all_rel_decisions = _validate_relationship_decision_coverage(
+        planning_result,
+        deterministic_rel_decisions,
+        tuple(all_semantic_decisions),
+    )
+
+    return RelationshipSemanticResolutionResult(
+        planning_result=planning_result,
+        preparation=preparation,
+        semantic_decisions=tuple(all_semantic_decisions),
+        all_relationship_decisions=all_rel_decisions,
         block_results=tuple(all_block_results),
     )

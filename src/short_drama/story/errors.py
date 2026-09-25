@@ -86,6 +86,57 @@ class ConsolidationModelError(StoryError):
     """
 
 
+class ConsolidationSemanticError(StoryError):
+    """A5C fact semantic ambiguity resolution failure.
+
+    Base error for the A5C-B provider-neutral fact semantic resolution slice.
+    It is deliberately distinct from A5A model errors, A5B planning errors,
+    and A-I3 LLM transport errors.
+    """
+
+
+class ConsolidationProvenanceError(ConsolidationSemanticError):
+    """A successful structured-generation result's provenance does not
+    correspond to the exact semantic request that produced it.
+
+    This is an A5C integrity failure (not an A-I3 transport error): a
+    fake/broken client that returns provenance from a different request must
+    fail closed and never be published. A5C does NOT route this into a
+    semantic-regeneration round (FAIL CLOSED, no retry).
+    """
+
+
+class ConsolidationSemanticGenerationError(ConsolidationSemanticError):
+    """All permitted A5C fact semantic generation rounds produced valid
+    provider results that were rejected by typed payload / pair / selector
+    validation; no block decisions could be produced.
+
+    Carries deterministic diagnostics for tests/review. A5C does not persist,
+    so no partially-current A5 state exists. This is a *semantic* failure, not
+    a transport error: the underlying A-I3 provider calls all succeeded.
+    """
+
+    def __init__(
+        self,
+        *,
+        block_id: str,
+        request_hash: str,
+        rounds_attempted: int,
+        last_failure_details: str,
+        expected_pairs: tuple[tuple[str, str], ...],
+    ) -> None:
+        self.block_id = block_id
+        self.request_hash = request_hash
+        self.rounds_attempted = rounds_attempted
+        self.last_failure_details = last_failure_details
+        self.expected_pairs = expected_pairs
+        super().__init__(
+            f"A5C fact semantic block {block_id!r} failed after "
+            f"{rounds_attempted} semantic generation round(s): "
+            f"{last_failure_details}"
+        )
+
+
 class ConsolidationCurrentMissingError(StoryError):
     """A5 requires a current-eligible A4 CURRENT that does not exist.
 

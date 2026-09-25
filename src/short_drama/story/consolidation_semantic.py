@@ -55,6 +55,7 @@ rendered ``StructuredGenerationRequest`` set.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -62,6 +63,8 @@ from typing import Any, Mapping
 from short_drama.artifacts.canonical import canonical_json_bytes, content_hash
 from short_drama.io import load_json
 from short_drama.llm import (
+    LLMClient,
+    LLMInvocationProvenance,
     PromptRegistry,
     build_structured_request,
     load_semantic_profile,
@@ -75,9 +78,13 @@ from short_drama.llm.models import (
 from short_drama.paths import PROFILES_DIR, SCHEMAS_DIR
 
 from .consolidation import (
+    A5_EVIDENCE_SELECTOR_PATTERN,
     ConsolidationCandidateRef,
     ConsolidationProfile,
     ConsolidationSemanticPass,
+    FACT_DECISIONS,
+    FactSelectorDecisionPayload,
+    FactSemanticDecision,
 )
 from .consolidation_planning import (
     ConsolidationPlanningResult,
@@ -86,7 +93,14 @@ from .consolidation_planning import (
     PAIR_STATE_AUTO_SAME,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
 )
-from .errors import ConsolidationModelError, StoryIntegrityError
+from .errors import (
+    ConsolidationModelError,
+    ConsolidationProvenanceError,
+    ConsolidationSemanticError,
+    ConsolidationSemanticGenerationError,
+    StoryIntegrityError,
+)
+from .extraction import EvidenceRef
 
 # ---------------------------------------------------------------------------
 # Frozen A5C fact semantic identity (A5C-A BLOCK 2 / BLOCK 4)
@@ -188,6 +202,28 @@ A5C_PACKING_CANDIDATES: tuple[FactSemanticPackingPolicy, ...] = (
     FactSemanticPackingPolicy("P2", 12, 24),
     FactSemanticPackingPolicy("P3", 24, 48),
 )
+
+# FROZEN production fact semantic packing policy (A5C-B).
+#
+# ``fact-semantic-packing-v1`` is the FROZEN POST-AUDIT policy (docs
+# ``v1.2-A5C-fact-semantic-packing-v1.md``): 12 pairs / 24 candidates (audit
+# candidate P2). The canonical packing material is the frozen behavioral limits
+# (12 / 24), NOT the policy label: ``FactSemanticPackingPolicy.to_dict()``
+# carries only the two limits, so this policy produces byte-identical block ids
+# and request hashes to the audited P2 preparation (identical block
+# membership, request hashes). A5C-B consumes this exact policy and never
+# re-selects P1 / P2 / P3 at runtime.
+FACT_SEMANTIC_PACKING_V1: FactSemanticPackingPolicy = FactSemanticPackingPolicy(
+    "fact-semantic-packing-v1",
+    12,
+    24,
+)
+
+# A5 pair-local evidence selector (L0 / R0 / L1 / ...). This is the single
+# A5C authority for selector syntax; it reuses the frozen A5A pattern (no
+# duplicate, subtly different regex). Pair-scoped range / duplicate /
+# resolution validation is A5C-B (below).
+_FACT_EVIDENCE_SELECTOR_RE = re.compile(A5_EVIDENCE_SELECTOR_PATTERN)
 
 
 # ---------------------------------------------------------------------------
@@ -863,3 +899,627 @@ def build_fact_packing_audit(
             }
         )
     return tuple(audit)
+
+
+# ---------------------------------------------------------------------------
+# A5C-B -- fact semantic provider execution + selector resolution
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FactSemanticBlockResult:
+    """In-memory result of executing one fact semantic block (A5C-B).
+
+    In-memory only; A5C-B does NOT persist. ``semantic_rounds`` is the number
+    of semantic generation rounds consumed until this block succeeded (1 for a
+    first-round success, 2 for a retry-then-success). ``decisions`` are the
+    block's LLM fact decisions in the block's pair order; ``request_hash`` is
+    the exact backend-neutral request identity for the block (identical across
+    every retry round); ``generation_provenance`` is the exact provenance of
+    the successful provider call.
+    """
+
+    block_id: str
+    request_hash: str
+    semantic_rounds: int
+    decisions: tuple[FactSemanticDecision, ...]
+    generation_provenance: LLMInvocationProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class FactSemanticResolutionResult:
+    """In-memory A5C-B fact semantic resolution result.
+
+    In-memory only; A5C-B does NOT persist, does NOT allocate canonical fact
+    ids, and does NOT build StateTransition / StoryConflict. Carries:
+      * the exact A5B ``ConsolidationPlanningResult``;
+      * the A5C-A ``FactSemanticPreparation`` the execution was driven from;
+      * the LLM fact decisions only (``semantic_decisions``);
+      * the combined deterministic auto_same + LLM fact decisions
+        (``all_fact_decisions``), in canonical ``(left, right)`` order;
+      * the per-block execution results (``block_results``).
+    """
+
+    planning_result: ConsolidationPlanningResult
+    preparation: FactSemanticPreparation
+    semantic_decisions: tuple[FactSemanticDecision, ...]
+    all_fact_decisions: tuple[FactSemanticDecision, ...]
+    block_results: tuple[FactSemanticBlockResult, ...]
+
+
+# ---------------------------------------------------------------------------
+# Decision id (backend-neutral semantic identity, NOT runtime provenance)
+# ---------------------------------------------------------------------------
+
+
+def compute_fact_llm_decision_id(
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    prompt_id: str,
+    prompt_version: int,
+    request_hash: str,
+) -> str:
+    """Compute the deterministic A5C fact LLM decision id.
+
+    The single authority for A5C fact LLM decision ids. The canonical semantic
+    material is backend-neutral: it binds the domain, the pair, the decision,
+    the method (``llm``), the reason, the resolved exact (canonical,
+    exact-deduped) evidence refs, the prompt identity, and the backend-neutral
+    ``request_hash``. It does NOT include provider_family / model /
+    provider_response_id / usage / finish_reason / endpoint / timeout /
+    timestamp / PID: those are audit provenance only, so changing them alone
+    does not alter the recomputed decision id.
+    """
+    material = {
+        "domain": "fact",
+        "left_candidate_ref": left_ref,
+        "right_candidate_ref": right_ref,
+        "decision": decision,
+        "method": "llm",
+        "reason_zh": reason_zh,
+        "evidence_refs": [e.to_dict() for e in evidence_refs],
+        "prompt_id": prompt_id,
+        "prompt_version": prompt_version,
+        "request_hash": request_hash,
+    }
+    return "dec_" + content_hash(material)[:20]
+
+
+# ---------------------------------------------------------------------------
+# Provenance verification (FAIL CLOSED, no semantic retry)
+# ---------------------------------------------------------------------------
+
+
+def _verify_fact_provenance(
+    provenance: LLMInvocationProvenance,
+    request: StructuredGenerationRequest,
+    semantic_profile: SemanticLLMProfile,
+) -> None:
+    """Verify a successful generation's provenance matches the exact request.
+
+    Checks backend-neutral semantic/request identity only:
+      semantic_profile_id / hash
+      prompt_id / version / content_hash
+      rendered_prompt_hash
+      output_schema_id / version / hash
+      request_hash
+
+    Any mismatch raises :class:`ConsolidationProvenanceError` (FAIL CLOSED, NO
+    semantic retry). provider_family / model / provider_response_id / usage /
+    finish_reason are audit provenance only and are deliberately NOT compared.
+    """
+    rendered = request.rendered_prompt
+    schema = request.output_schema
+    expected = {
+        "semantic_profile_id": semantic_profile.profile_id,
+        "semantic_profile_hash": semantic_profile.semantic_profile_hash,
+        "prompt_id": rendered.prompt_id,
+        "prompt_version": rendered.prompt_version,
+        "prompt_content_hash": rendered.prompt_content_hash,
+        "rendered_prompt_hash": rendered.rendered_prompt_hash,
+        "output_schema_id": schema.schema_id,
+        "output_schema_version": schema.schema_version,
+        "output_schema_hash": schema.schema_hash,
+        "request_hash": request.request_hash,
+    }
+    actual = {
+        "semantic_profile_id": provenance.semantic_profile_id,
+        "semantic_profile_hash": provenance.semantic_profile_hash,
+        "prompt_id": provenance.prompt_id,
+        "prompt_version": provenance.prompt_version,
+        "prompt_content_hash": provenance.prompt_content_hash,
+        "rendered_prompt_hash": provenance.rendered_prompt_hash,
+        "output_schema_id": provenance.output_schema_id,
+        "output_schema_version": provenance.output_schema_version,
+        "output_schema_hash": provenance.output_schema_hash,
+        "request_hash": provenance.request_hash,
+    }
+    for key in expected:
+        if expected[key] != actual[key]:
+            raise ConsolidationProvenanceError(
+                f"provenance field {key!r} mismatch: expected "
+                f"{expected[key]!r}, got {actual[key]!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Pair-local selector canonicalization + exact endpoint evidence resolution
+# ---------------------------------------------------------------------------
+
+
+def _canonicalize_fact_selectors(selectors: list[str]) -> list[str]:
+    """Canonicalize validated, unique pair-local selectors to the frozen order.
+
+    Frozen pair-local order (authoritative for persistence): all left
+    selectors first (numeric index ascending), then all right selectors
+    (numeric index ascending). ``["R2", "L1", "R0", "L0"]`` ->
+    ``["L0", "L1", "R0", "R2"]``. ``selectors`` must already be validated
+    (``L<index>`` / ``R<index>`` form) and duplicate-free; nothing is
+    re-validated or dropped here. This is NOT repair of invalid selectors.
+    """
+    left = sorted((s for s in selectors if s[0] == "L"), key=lambda s: int(s[1:]))
+    right = sorted((s for s in selectors if s[0] == "R"), key=lambda s: int(s[1:]))
+    return left + right
+
+
+def _fact_evidence_exact_identity(
+    ev: EvidenceRef,
+) -> tuple[str, str, str, "str | None"]:
+    """The exact persisted EvidenceRef identity tuple.
+
+    Two EvidenceRefs are the same evidence for exact-alias dedupe purposes iff
+    ``(paragraph_id, role, strength, excerpt)`` are equal. ``excerpt=None`` is
+    distinct from any string value. No normalization or case-folding.
+    """
+    return (ev.paragraph_id, ev.role, ev.strength, ev.excerpt)
+
+
+def _block_endpoint_evidence(
+    planning: ConsolidationPlanningResult,
+    pair_refs: tuple[tuple[str, str], ...],
+) -> list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]]:
+    """Per-pair endpoint evidence for selector resolution (aligned with pairs).
+
+    Element ``i`` is pair ``i``'s ``(left_endpoint_evidence,
+    right_endpoint_evidence)`` -- each the EXACT indexed A5B
+    ``cand.evidence_refs`` tuple in order. ``L<n>`` therefore resolves to
+    ``left_endpoint_evidence[n]`` and ``R<n>`` to ``right_endpoint_evidence[n]``
+    (zero-based, in indexed order). This reuses the exact indexed candidates
+    (no reload / re-sort), so the resolved EvidenceRef is byte-for-byte the
+    endpoint's own EvidenceRef.
+    """
+    facts_by_ref = {c.global_candidate_ref: c for c in planning.index.facts}
+    out: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]] = []
+    for left_ref, right_ref in pair_refs:
+        left = facts_by_ref.get(left_ref)
+        right = facts_by_ref.get(right_ref)
+        if left is None or right is None:
+            raise StoryIntegrityError(
+                "fact pair endpoint missing from the fact candidate index"
+            )
+        out.append((left.evidence_refs, right.evidence_refs))
+    return out
+
+
+def _validate_fact_selector_block_payload(
+    payload: FactSelectorDecisionPayload,
+    pair_refs: tuple[tuple[str, str], ...],
+    endpoint_evidence: list[tuple[tuple[EvidenceRef, ...], tuple[EvidenceRef, ...]]],
+) -> tuple[bool, str, list[tuple[EvidenceRef, ...]]]:
+    """Validate a fact block's provider payload against the exact requested pairs.
+
+    The single A5C-B authority for fact selector validity. ``endpoint_evidence``
+    is aligned with ``pair_refs``; ``L<n>`` resolves to the pair's own left
+    endpoint evidence item ``n`` and ``R<n>`` to the right endpoint evidence
+    item ``n`` (both zero-based, in indexed order).
+
+    Returns ``(is_valid, failure_detail, resolved_evidence)``.
+    ``resolved_evidence`` is aligned with ``payload.decisions`` when valid (each
+    a tuple of the exact endpoint EvidenceRefs in canonical pair-local selector
+    order with exact-EvidenceRef alias deduplication), otherwise empty.
+
+    Checks: count exact, order exact, left/right refs exact; each selector
+    matches ``L<index>`` / ``R<index>`` (invalid prefix / negative / non-integer
+    index rejected); index in range for the pair's own endpoint (a selector can
+    never reach a third candidate / another pair / block-level evidence); no
+    duplicate selector string within a decision. Only after every selector in a
+    decision passes syntax + range + duplicate validation is the selector set
+    canonicalized and resolved to exact endpoint EvidenceRefs, then projected to
+    the canonical exact-EvidenceRef form (first occurrence in canonical selector
+    order wins). Invalid selectors always fail BEFORE canonicalization and
+    consume a bounded semantic round.
+    """
+    requested_count = len(pair_refs)
+    decisions = payload.decisions
+
+    if len(decisions) != requested_count:
+        return (
+            False,
+            f"decision count mismatch: expected {requested_count}, "
+            f"got {len(decisions)}",
+            [],
+        )
+
+    resolved: list[tuple[EvidenceRef, ...]] = []
+    for i, item in enumerate(decisions):
+        expected_left, expected_right = pair_refs[i]
+        if item.left_candidate_ref != expected_left:
+            return (
+                False,
+                f"pair {i}: left_candidate_ref mismatch: expected "
+                f"{expected_left!r}, got {item.left_candidate_ref!r}",
+                [],
+            )
+        if item.right_candidate_ref != expected_right:
+            return (
+                False,
+                f"pair {i}: right_candidate_ref mismatch: expected "
+                f"{expected_right!r}, got {item.right_candidate_ref!r}",
+                [],
+            )
+
+        left_evidence, right_evidence = endpoint_evidence[i]
+        seen_selectors: set[str] = set()
+        validated_selectors: list[str] = []
+        for selector in item.evidence_selectors:
+            if _FACT_EVIDENCE_SELECTOR_RE.fullmatch(selector) is None:
+                return (
+                    False,
+                    f"pair {i}: invalid evidence selector {selector!r}; only "
+                    f"L<index>/R<index> forms are legal",
+                    [],
+                )
+            if selector in seen_selectors:
+                return (
+                    False,
+                    f"pair {i}: duplicate evidence selector: {selector!r}",
+                    [],
+                )
+            seen_selectors.add(selector)
+            index = int(selector[1:])
+            if selector[0] == "L":
+                if index >= len(left_evidence):
+                    return (
+                        False,
+                        f"pair {i}: evidence selector {selector!r} out of range "
+                        f"for the left endpoint ({len(left_evidence)} evidence "
+                        f"item(s))",
+                        [],
+                    )
+            else:  # "R"
+                if index >= len(right_evidence):
+                    return (
+                        False,
+                        f"pair {i}: evidence selector {selector!r} out of range "
+                        f"for the right endpoint ({len(right_evidence)} evidence "
+                        f"item(s))",
+                        [],
+                    )
+            validated_selectors.append(selector)
+
+        canonical_selectors = _canonicalize_fact_selectors(validated_selectors)
+
+        decision_evidence: list[EvidenceRef] = []
+        seen_exact: set[tuple[str, str, str, "str | None"]] = set()
+        for selector in canonical_selectors:
+            index = int(selector[1:])
+            ev = (
+                left_evidence[index]
+                if selector[0] == "L"
+                else right_evidence[index]
+            )
+            identity = _fact_evidence_exact_identity(ev)
+            if identity not in seen_exact:
+                seen_exact.add(identity)
+                decision_evidence.append(ev)
+        resolved.append(tuple(decision_evidence))
+
+    return True, "", resolved
+
+
+def _convert_to_fact_decision(
+    left_ref: str,
+    right_ref: str,
+    decision: str,
+    reason_zh: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    request_hash: str,
+    prompt_id: str,
+    prompt_version: int,
+    provenance: LLMInvocationProvenance,
+) -> FactSemanticDecision:
+    """Convert a valid, selector-resolved decision to a FactSemanticDecision.
+
+    ``evidence_refs`` are the exact endpoint EvidenceRefs resolved from the
+    provider's pair-local selectors in canonical pair-local selector order with
+    stable exact-EvidenceRef alias deduplication. The persisted decision carries
+    those exact EvidenceRefs (no selector strings), ``method="llm"``, the exact
+    prompt identity, the exact provider provenance, and the deterministic LLM
+    decision id.
+    """
+    decision_id = compute_fact_llm_decision_id(
+        left_ref=left_ref,
+        right_ref=right_ref,
+        decision=decision,
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        request_hash=request_hash,
+    )
+    return FactSemanticDecision(
+        decision_id=decision_id,
+        left_candidate_ref=left_ref,
+        right_candidate_ref=right_ref,
+        decision=decision,
+        method="llm",
+        reason_zh=reason_zh,
+        evidence_refs=evidence_refs,
+        prompt_id=prompt_id,
+        prompt_version=prompt_version,
+        generation_provenance=provenance,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Whole-fact decision coverage (deterministic auto_same + LLM semantic)
+# ---------------------------------------------------------------------------
+
+
+def _validate_fact_decision_coverage(
+    planning: ConsolidationPlanningResult,
+    deterministic_decisions: tuple[FactSemanticDecision, ...],
+    semantic_decisions: tuple[FactSemanticDecision, ...],
+) -> tuple[FactSemanticDecision, ...]:
+    """Validate and combine all fact decisions against the authoritative plans.
+
+    Enforces the frozen invariant:
+      * every explicit A5B fact pair in ``planning.fact_pair_plans`` has exactly
+        one decision;
+      * no extra decision for a pair not in the plans;
+      * no duplicate pair decision;
+      * state/method consistency:
+          auto_same -> method=deterministic, decision=same_fact
+          needs_semantic_decision -> method=llm, decision in the six fact
+            decisions
+      * unblocked / not_compared pairs are not present (only explicit pairs).
+
+    Returns canonical order by ``(left_candidate_ref, right_candidate_ref)``.
+    """
+    all_decisions = list(deterministic_decisions) + list(semantic_decisions)
+
+    decision_by_pair: dict[tuple[str, str], FactSemanticDecision] = {}
+    for d in all_decisions:
+        key = (d.left_candidate_ref, d.right_candidate_ref)
+        if key in decision_by_pair:
+            raise ConsolidationSemanticError(
+                f"duplicate decision for fact pair {key!r}"
+            )
+        decision_by_pair[key] = d
+
+    expected_pairs: set[tuple[str, str]] = set()
+    pair_state: dict[tuple[str, str], str] = {}
+    for plan in planning.fact_pair_plans:
+        pair_key = (plan.left_ref, plan.right_ref)
+        expected_pairs.add(pair_key)
+        pair_state[pair_key] = plan.state
+
+    for pair_key in decision_by_pair:
+        if pair_key not in expected_pairs:
+            raise ConsolidationSemanticError(
+                f"fact decision found for pair {pair_key!r} not present in "
+                f"planning_result.fact_pair_plans; invalid decision coverage"
+            )
+
+    for pair_key in expected_pairs:
+        if pair_key not in decision_by_pair:
+            raise ConsolidationSemanticError(
+                f"no decision found for fact pair {pair_key!r}; incomplete "
+                f"fact decision coverage"
+            )
+
+    for pair_key, state in pair_state.items():
+        d = decision_by_pair[pair_key]
+        if state == PAIR_STATE_AUTO_SAME:
+            if d.method != "deterministic":
+                raise ConsolidationSemanticError(
+                    f"fact pair {pair_key!r} (auto_same) has method "
+                    f"{d.method!r}; expected 'deterministic'"
+                )
+            if d.decision != "same_fact":
+                raise ConsolidationSemanticError(
+                    f"fact pair {pair_key!r} (auto_same) has decision "
+                    f"{d.decision!r}; expected 'same_fact'"
+                )
+        elif state == PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            if d.method != "llm":
+                raise ConsolidationSemanticError(
+                    f"fact pair {pair_key!r} (needs_semantic_decision) has "
+                    f"method {d.method!r}; expected 'llm'"
+                )
+            if d.decision not in FACT_DECISIONS:
+                raise ConsolidationSemanticError(
+                    f"fact pair {pair_key!r} (needs_semantic_decision) has "
+                    f"decision {d.decision!r}; expected one of "
+                    f"{sorted(FACT_DECISIONS)}"
+                )
+
+    all_decisions.sort(key=lambda d: (d.left_candidate_ref, d.right_candidate_ref))
+    return tuple(all_decisions)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def resolve_fact_semantic_ambiguity(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    llm_client: LLMClient,
+    *,
+    prompts: PromptRegistry,
+) -> FactSemanticResolutionResult:
+    """Execute A5C-B fact semantic ambiguity resolution.
+
+    Consumes the A5B ``ConsolidationPlanningResult`` and resolves every
+    ``needs_semantic_decision`` fact pair via bounded LLM semantic generation.
+
+    The deterministic, zero-provider request construction is delegated to
+    :func:`build_fact_semantic_preparation` with the FROZEN production policy
+    :data:`FACT_SEMANTIC_PACKING_V1` (12 pairs / 24 candidates, identical block
+    ids / request hashes to the audited P2). This function only drives the
+    provider per block (sequentially, in exact preparation order) and merges the
+    results. A5C-B does NOT persist, does NOT write CURRENT, and does NOT build
+    CanonicalFactSet / StateTransition / StoryConflict.
+
+    Per block (block atomicity):
+      * ``llm_client.generate_structured(...)`` (A-I3 owns the provider call and
+        technical retry);
+      * provenance verification (FAIL CLOSED, no semantic retry);
+      * ``FactSelectorDecisionPayload.from_dict(...)`` (typed load);
+      * exact pair coverage/order + pair-local selector validation;
+      * canonical selector order + exact endpoint EvidenceRef resolution +
+        stable exact-EvidenceRef alias dedupe;
+      * ``FactSemanticDecision(method="llm")`` construction.
+
+    Semantic rounds are bounded to :data:`A5C_FACT_MAX_GENERATION_ROUNDS` (2).
+    An ``LLMError`` raised by the provider after A-I3 technical retry is
+    PROPAGATED (not turned into a semantic retry). Provenance mismatch fails
+    closed with no retry. Two semantic-invalid rounds raise
+    :class:`ConsolidationSemanticGenerationError` (the whole block is invalid; no
+    partial decisions are retained). ``decision == uncertain`` is a valid
+    successful semantic result and is NOT retried.
+
+    After all blocks succeed, the combined deterministic auto_same + LLM fact
+    decisions are validated for exact whole-fact-stream coverage.
+    """
+    preparation = build_fact_semantic_preparation(
+        planning_result,
+        consolidation_profile,
+        semantic_profile,
+        prompts=prompts,
+        packing_policy=FACT_SEMANTIC_PACKING_V1,
+    )
+    blocks = preparation.blocks
+
+    deterministic_fact_decisions = (
+        planning_result.deterministic_decision_set.fact_decisions
+    )
+
+    # 1. Zero semantic pairs -> zero blocks -> validate deterministic coverage.
+    if not blocks:
+        all_fact_decisions = _validate_fact_decision_coverage(
+            planning_result, deterministic_fact_decisions, ()
+        )
+        return FactSemanticResolutionResult(
+            planning_result=planning_result,
+            preparation=preparation,
+            semantic_decisions=(),
+            all_fact_decisions=all_fact_decisions,
+            block_results=(),
+        )
+
+    all_semantic_decisions: list[FactSemanticDecision] = []
+    all_block_results: list[FactSemanticBlockResult] = []
+
+    # 2. Process each block sequentially in exact preparation order.
+    for block, request in zip(blocks, preparation.structured_requests):
+        rendered_prompt = request.rendered_prompt
+        output_schema = request.output_schema
+
+        endpoint_evidence = _block_endpoint_evidence(planning_result, block.pair_refs)
+
+        max_rounds = consolidation_profile.max_generation_rounds
+        block_decisions: list[FactSemanticDecision] = []
+        block_provenance: LLMInvocationProvenance | None = None
+        rounds_attempted = 0
+        last_failure = ""
+
+        for round_number in range(1, max_rounds + 1):
+            rounds_attempted = round_number
+
+            # One provider call (A-I3 owns technical retry). An LLMError after
+            # A-I3 technical retry PROPAGATES (not a semantic retry).
+            result = llm_client.generate_structured(
+                rendered_prompt, output_schema, semantic_profile
+            )
+
+            # Provenance verification (FAIL CLOSED, NO semantic retry).
+            _verify_fact_provenance(result.provenance, request, semantic_profile)
+
+            # Typed domain load (typed-model rejection -> semantic invalid).
+            try:
+                payload = FactSelectorDecisionPayload.from_dict(result.parsed_json)
+            except ConsolidationModelError:
+                last_failure = "typed payload load failed"
+                continue
+
+            # Exact pair coverage/order + pair-local selector validation
+            # (fail closed; consumes a bounded semantic round on any failure).
+            is_valid, failure_detail, resolved_evidence = (
+                _validate_fact_selector_block_payload(
+                    payload, block.pair_refs, endpoint_evidence
+                )
+            )
+            if not is_valid:
+                last_failure = failure_detail
+                continue
+
+            # Valid: resolve selectors to exact endpoint EvidenceRefs (canonical
+            # order, exact-alias deduped) and convert to LLM decisions.
+            for item, resolved in zip(payload.decisions, resolved_evidence):
+                block_decisions.append(
+                    _convert_to_fact_decision(
+                        left_ref=item.left_candidate_ref,
+                        right_ref=item.right_candidate_ref,
+                        decision=item.decision,
+                        reason_zh=item.reason_zh,
+                        evidence_refs=resolved,
+                        request_hash=request.request_hash,
+                        prompt_id=rendered_prompt.prompt_id,
+                        prompt_version=rendered_prompt.prompt_version,
+                        provenance=result.provenance,
+                    )
+                )
+            block_provenance = result.provenance
+            break  # success, stop retrying
+
+        if block_decisions:
+            all_semantic_decisions.extend(block_decisions)
+            all_block_results.append(
+                FactSemanticBlockResult(
+                    block_id=block.block_id,
+                    request_hash=request.request_hash,
+                    semantic_rounds=rounds_attempted,
+                    decisions=tuple(block_decisions),
+                    generation_provenance=block_provenance,  # type: ignore[arg-type]
+                )
+            )
+        else:
+            # Semantic exhaustion: both rounds invalid for this block. Do not
+            # return partial decisions; do not continue to later blocks.
+            raise ConsolidationSemanticGenerationError(
+                block_id=block.block_id,
+                request_hash=request.request_hash,
+                rounds_attempted=rounds_attempted,
+                last_failure_details=last_failure,
+                expected_pairs=tuple(block.pair_refs),
+            )
+
+    # 3. Combine deterministic + LLM fact decisions; validate exact coverage.
+    all_fact_decisions = _validate_fact_decision_coverage(
+        planning_result, deterministic_fact_decisions, tuple(all_semantic_decisions)
+    )
+
+    return FactSemanticResolutionResult(
+        planning_result=planning_result,
+        preparation=preparation,
+        semantic_decisions=tuple(all_semantic_decisions),
+        all_fact_decisions=all_fact_decisions,
+        block_results=tuple(all_block_results),
+    )

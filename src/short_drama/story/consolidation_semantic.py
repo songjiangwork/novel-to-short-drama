@@ -88,10 +88,14 @@ from .consolidation import (
 )
 from .consolidation_planning import (
     ConsolidationPlanningResult,
+    EventPairPlan,
     FactPairPlan,
+    IndexedEventCandidate,
     IndexedFactCandidate,
+    IndexedRelationshipCandidate,
     PAIR_STATE_AUTO_SAME,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
+    RelationshipPairPlan,
 )
 from .errors import (
     ConsolidationModelError,
@@ -556,20 +560,149 @@ def _validate_fact_semantic_stream(
 # ---------------------------------------------------------------------------
 
 
-def _canonical_candidate_refs(
-    refs: set[str], facts_by_ref: Mapping[str, IndexedFactCandidate]
-) -> tuple[str, ...]:
+def _greedy_pack(
+    stream,
+    max_pairs_per_block: int,
+    max_candidates_per_block: int,
+) -> list[list]:
+    """Deterministic greedy two-limit packing (domain-agnostic).
+
+    ``stream`` is an iterable of pair plans in canonical
+    ``(left_ref, right_ref)`` order (each with ``.left_ref`` / ``.right_ref``).
+    A block is closed when appending the next pair would exceed either the pair
+    limit or the unique-endpoint limit. No pair is split, lost, duplicated, or
+    reordered. Returns the stream partitioned into a list of blocks (each a
+    list of pair plans, in the original canonical order).
+    """
+    blocks: list[list] = []
+    current: list = []
+    current_endpoints: set[str] = set()
+    for plan in stream:
+        endpoints = {plan.left_ref, plan.right_ref}
+        if current and (
+            len(current) + 1 > max_pairs_per_block
+            or len(current_endpoints | endpoints) > max_candidates_per_block
+        ):
+            blocks.append(current)
+            current = []
+            current_endpoints = set()
+        current.append(plan)
+        current_endpoints |= endpoints
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _canonical_candidate_refs_ordered(refs: set[str], source_order_key_for_ref) -> tuple[str, ...]:
     """Stable unique union ordered by candidate source_order_key then ref."""
-    keyed: list[tuple[str, str]] = []
-    for ref in refs:
-        cand = facts_by_ref.get(ref)
-        if cand is None:
-            raise StoryIntegrityError(
-                f"candidate ref {ref!r} is not in the fact candidate index"
-            )
-        keyed.append((cand.source_order_key, ref))
+    keyed = [(source_order_key_for_ref(ref), ref) for ref in refs]
     keyed.sort()
     return tuple(ref for _so, ref in keyed)
+
+
+def _compute_semantic_block_id(
+    *,
+    plan_hash: str,
+    block_prefix: str,
+    packing_policy_material: Mapping[str, Any],
+    block_ordinal: int,
+    pair_refs: tuple[tuple[str, str], ...],
+    candidate_refs: tuple[str, ...],
+    domain: str | None = None,
+) -> str:
+    """Bind a semantic block id to the frozen material (no runtime data).
+
+    Shared by the A5C fact / A5D event / A5D relationship block identities:
+    ``block_prefix`` + first ``A5C_BLOCK_ID_HEX_LENGTH`` hex chars of the
+    ``content_hash`` of the canonical material (plan hash, packing-policy
+    limits, block ordinal, ordered requested pairs, ordered candidate refs).
+
+    The A5D event / relationship block identities also bind the explicit
+    ``domain`` (per the A5D plan BLOCK 12); the A5C fact block identity passes
+    no domain (preserving the A5C fact block id byte-for-byte).
+    """
+    material = {
+        "plan_hash": plan_hash,
+        "packing_policy": dict(packing_policy_material),
+        "block_ordinal": block_ordinal,
+        "ordered_requested_pairs": [list(pair) for pair in pair_refs],
+        "ordered_candidate_refs": list(candidate_refs),
+    }
+    if domain is not None:
+        material["domain"] = domain
+    return block_prefix + content_hash(material)[:A5C_BLOCK_ID_HEX_LENGTH]
+
+
+def _indexed_source_order_key(by_ref: Mapping, domain: str):
+    """A ``source_order_key`` lookup that fails closed on a missing ref."""
+
+    def _so(ref: str) -> str:
+        cand = by_ref.get(ref)
+        if cand is None:
+            raise StoryIntegrityError(
+                f"candidate ref {ref!r} is not in the {domain} candidate index"
+            )
+        return cand.source_order_key
+
+    return _so
+
+
+def _build_semantic_blocks(
+    *,
+    block_cls: type,
+    block_prefix: str,
+    packing_policy_material: Mapping[str, Any],
+    plan_hash: str,
+    max_pairs_per_block: int,
+    max_candidates_per_block: int,
+    semantic_stream,
+    source_order_key_for_ref,
+    pair_context_builder,
+    domain: str | None = None,
+) -> tuple:
+    """Pack the semantic stream under BOTH limits into domain-specific blocks.
+
+    Shared by the A5C fact / A5D event / A5D relationship preparation builders:
+    greedy two-limit packing (``_greedy_pack``), stable candidate refs, the
+    pair-local contexts, the deterministic block id, and the canonical
+    ``pair_contexts_json``. ``block_cls`` is the domain block dataclass (the
+    fact / event / relationship blocks share the identical field layout).
+    """
+    blocks: list = []
+    for group in _greedy_pack(
+        semantic_stream, max_pairs_per_block, max_candidates_per_block
+    ):
+        ordinal = len(blocks)
+        pair_refs = tuple((p.left_ref, p.right_ref) for p in group)
+        endpoints: set[str] = set()
+        for p in group:
+            endpoints.add(p.left_ref)
+            endpoints.add(p.right_ref)
+        candidate_refs = _canonical_candidate_refs_ordered(
+            endpoints, source_order_key_for_ref
+        )
+        pair_contexts = tuple(pair_context_builder(p) for p in group)
+        blocks.append(
+            block_cls(
+                block_ordinal=ordinal,
+                block_id=_compute_semantic_block_id(
+                    plan_hash=plan_hash,
+                    block_prefix=block_prefix,
+                    packing_policy_material=packing_policy_material,
+                    block_ordinal=ordinal,
+                    pair_refs=pair_refs,
+                    candidate_refs=candidate_refs,
+                    domain=domain,
+                ),
+                pair_contexts=pair_contexts,
+                candidate_refs=candidate_refs,
+                pair_refs=pair_refs,
+                pair_contexts_json=canonical_json_bytes(
+                    [dict(pc) for pc in pair_contexts]
+                ).decode("utf-8"),
+            )
+        )
+    return tuple(blocks)
 
 
 def _compute_block_id(
@@ -579,15 +712,15 @@ def _compute_block_id(
     pair_refs: tuple[tuple[str, str], ...],
     candidate_refs: tuple[str, ...],
 ) -> str:
-    """A5C-A BLOCK 4: bind the block id to the frozen material (no runtime data)."""
-    material = {
-        "plan_hash": plan_hash,
-        "packing_policy": policy.to_dict(),
-        "block_ordinal": block_ordinal,
-        "ordered_requested_pairs": [list(pair) for pair in pair_refs],
-        "ordered_candidate_refs": list(candidate_refs),
-    }
-    return A5C_BLOCK_PREFIX + content_hash(material)[:A5C_BLOCK_ID_HEX_LENGTH]
+    """A5C-A BLOCK 4: bind the fact block id to the frozen material."""
+    return _compute_semantic_block_id(
+        plan_hash=plan_hash,
+        block_prefix=A5C_BLOCK_PREFIX,
+        packing_policy_material=policy.to_dict(),
+        block_ordinal=block_ordinal,
+        pair_refs=pair_refs,
+        candidate_refs=candidate_refs,
+    )
 
 
 def _build_fact_blocks(
@@ -596,53 +729,24 @@ def _build_fact_blocks(
     facts_by_ref: Mapping[str, IndexedFactCandidate],
     semantic_stream: tuple[FactPairPlan, ...],
 ) -> tuple[FactSemanticBlock, ...]:
-    """Deterministically pack the semantic stream under BOTH policy limits.
+    """Deterministically pack the fact semantic stream under BOTH policy limits.
 
     The stream is consumed in its canonical ``(left_ref, right_ref)`` order. A
     block is closed when appending the next pair would exceed either the pair
     limit or the unique-candidate limit. No pair is split, lost, duplicated, or
-    reordered.
+    reordered. (Shared two-limit packing: :func:`_build_semantic_blocks`.)
     """
-    blocks: list[FactSemanticBlock] = []
-    current_pairs: list[FactPairPlan] = []
-    current_candidates: set[str] = set()
-
-    def _close() -> None:
-        nonlocal current_pairs, current_candidates
-        if not current_pairs:
-            return
-        ordinal = len(blocks)
-        pair_refs = tuple((p.left_ref, p.right_ref) for p in current_pairs)
-        candidate_refs = _canonical_candidate_refs(current_candidates, facts_by_ref)
-        pair_contexts = tuple(
-            build_fact_pair_context(p, facts_by_ref) for p in current_pairs
-        )
-        blocks.append(
-            FactSemanticBlock(
-                block_ordinal=ordinal,
-                block_id=_compute_block_id(plan_hash, policy, ordinal, pair_refs, candidate_refs),
-                pair_contexts=pair_contexts,
-                candidate_refs=candidate_refs,
-                pair_refs=pair_refs,
-                pair_contexts_json=canonical_json_bytes(
-                    [dict(pc) for pc in pair_contexts]
-                ).decode("utf-8"),
-            )
-        )
-        current_pairs = []
-        current_candidates = set()
-
-    for plan in semantic_stream:
-        pair_candidates = {plan.left_ref, plan.right_ref}
-        if current_pairs and (
-            len(current_pairs) + 1 > policy.max_pairs_per_block
-            or len(current_candidates | pair_candidates) > policy.max_candidates_per_block
-        ):
-            _close()
-        current_pairs.append(plan)
-        current_candidates |= pair_candidates
-    _close()
-    return tuple(blocks)
+    return _build_semantic_blocks(
+        block_cls=FactSemanticBlock,
+        block_prefix=A5C_BLOCK_PREFIX,
+        packing_policy_material=policy.to_dict(),
+        plan_hash=plan_hash,
+        max_pairs_per_block=policy.max_pairs_per_block,
+        max_candidates_per_block=policy.max_candidates_per_block,
+        semantic_stream=semantic_stream,
+        source_order_key_for_ref=_indexed_source_order_key(facts_by_ref, "fact"),
+        pair_context_builder=lambda plan: build_fact_pair_context(plan, facts_by_ref),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +968,1076 @@ def build_fact_packing_audit(
     audit: list[dict[str, Any]] = []
     for policy in candidates:
         prep = build_fact_semantic_preparation(
+            planning_result,
+            consolidation_profile,
+            semantic_profile,
+            prompts=prompts,
+            packing_policy=policy,
+        )
+        blocks = prep.blocks
+        requests = prep.structured_requests
+        hashes = prep.semantic_request_hashes
+        audit.append(
+            {
+                "packing_name": policy.name,
+                "max_pairs_per_block": policy.max_pairs_per_block,
+                "max_candidates_per_block": policy.max_candidates_per_block,
+                "block_count": len(blocks),
+                "total_pairs_in_blocks": sum(b.pair_count for b in blocks),
+                "pairs_per_block": _distribution([b.pair_count for b in blocks]),
+                "unique_candidates_per_block": _distribution(
+                    [len(b.candidate_refs) for b in blocks]
+                ),
+                "evidence_items_per_block": _distribution(
+                    [_block_evidence_item_count(b) for b in blocks]
+                ),
+                "pair_contexts_json_bytes": _distribution(
+                    [b.payload_bytes for b in blocks]
+                ),
+                "rendered_prompt_bytes": _distribution(
+                    [_request_prompt_bytes(r) for r in requests]
+                ),
+                "request_hash_count": len(hashes),
+                "unique_request_hash_count": len(set(hashes)),
+                "largest_block": _select_largest_block(prep),
+            }
+        )
+    return tuple(audit)
+
+
+# ---------------------------------------------------------------------------
+# A5D-A -- event + relationship semantic preparation (zero provider)
+#
+# The event / relationship equivalents of the A5C-A fact preparation. They
+# reuse the EXACT A5C-A packing algorithm (``_build_semantic_blocks`` /
+# ``_greedy_pack``) and the same pair-local endpoint-packet + request-rendering
+# pattern, with domain-specific endpoint fields, pair-context signals, block-id
+# prefixes, and the tracked event / relationship prompt + schema identity.
+#
+# As with A5C-A: NO provider call, NO persistence. Only the zero-provider
+# preparation + packing audit + real ``StructuredGenerationRequest`` rendering
+# is implemented. Response parsing, selector resolution, the ``method=llm``
+# decision model, persistence, CURRENT, and A5D-B are all OUT OF SCOPE.
+# ---------------------------------------------------------------------------
+
+
+# --- Frozen event / relationship semantic identity (BLOCK 3 / BLOCK 4) ---
+
+#: Tracked A5 event consolidation prompt identity.
+A5D_EVENT_PROMPT_ID = "a5.event-consolidation"
+A5D_EVENT_PROMPT_VERSION = 1
+
+#: Tracked A5 event selector-payload output schema identity.
+A5D_EVENT_OUTPUT_SCHEMA_ID = "consolidation-event-selector-payload"
+A5D_EVENT_OUTPUT_SCHEMA_VERSION = 1
+A5D_EVENT_OUTPUT_SCHEMA_PATH = SCHEMAS_DIR / "consolidation-event-selector-payload.schema.json"
+
+#: Tracked A5 relationship consolidation prompt identity.
+A5D_RELATIONSHIP_PROMPT_ID = "a5.relationship-consolidation"
+A5D_RELATIONSHIP_PROMPT_VERSION = 1
+
+#: Tracked A5 relationship selector-payload output schema identity.
+A5D_RELATIONSHIP_OUTPUT_SCHEMA_ID = "consolidation-relationship-selector-payload"
+A5D_RELATIONSHIP_OUTPUT_SCHEMA_VERSION = 1
+A5D_RELATIONSHIP_OUTPUT_SCHEMA_PATH = SCHEMAS_DIR / "consolidation-relationship-selector-payload.schema.json"
+
+#: Tracked A5 semantic LLM profile identity (generation semantics only, shared
+#: by the fact / event / relationship passes).
+A5D_SEMANTIC_PROFILE_ID = "consolidation-llm-v1"
+A5D_SEMANTIC_PROFILE_PATH = PROFILES_DIR / "consolidation_llm_v1.yaml"
+
+#: A5 event block id prefix (distinct from fact ``a5fblk_`` / relationship).
+A5D_EVENT_BLOCK_PREFIX = "a5eblk_"
+#: A5 relationship block id prefix.
+A5D_RELATIONSHIP_BLOCK_PREFIX = "a5rblk_"
+
+#: Frozen requirement: the event / relationship semantic pass generation budget
+#: (the single ``consolidation_profile.max_generation_rounds`` pin).
+A5D_MAX_GENERATION_ROUNDS = 2
+
+#: The exact A5D event semantic endpoint-packet fields (BLOCK 7).
+A5D_EVENT_ENDPOINT_PACKET_FIELDS = (
+    "candidate_ref",
+    "chunk_id",
+    "local_candidate_id",
+    "summary_zh",
+    "participants",
+    "locations",
+    "temporal_mode",
+    "evidence_strength",
+    "source_order_key",
+    "evidence",
+)
+
+#: The exact A5D relationship semantic endpoint-packet fields (BLOCK 8).
+A5D_RELATIONSHIP_ENDPOINT_PACKET_FIELDS = (
+    "candidate_ref",
+    "chunk_id",
+    "local_candidate_id",
+    "source_entity_ref",
+    "target_entity_ref",
+    "relationship_type_zh",
+    "state_zh",
+    "direction",
+    "evidence_strength",
+    "source_order_key",
+    "evidence",
+)
+
+
+# ---------------------------------------------------------------------------
+# Packing policy (event / relationship -- audit-only, NOT frozen)
+# ---------------------------------------------------------------------------
+
+
+def _validate_semantic_packing_policy(name: str, max_pairs: int, max_candidates: int) -> None:
+    """Shared validation for the event / relationship packing policies."""
+    if not isinstance(name, str) or not name:
+        raise StoryIntegrityError("packing policy name must be a non-empty string")
+    if not isinstance(max_pairs, int) or max_pairs < 1:
+        raise StoryIntegrityError("max_pairs_per_block must be a positive integer")
+    # A single pair has two distinct endpoints, so the candidate limit must be
+    # able to hold at least one pair.
+    if not isinstance(max_candidates, int) or max_candidates < 2:
+        raise StoryIntegrityError(
+            "max_candidates_per_block must be an integer >= 2 (one pair has two endpoints)"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EventSemanticPackingPolicy:
+    """An explicit A5D event packing policy with TWO independent limits.
+
+    ``event-semantic-packing-v1`` is NOT YET FROZEN. The audit candidates below
+    are audit-only; A5D-A always requires an explicit policy (there is no
+    production default), and a later slice consumes the policy selected after
+    architecture review.
+    """
+
+    name: str
+    max_pairs_per_block: int
+    max_candidates_per_block: int
+
+    def __post_init__(self) -> None:
+        _validate_semantic_packing_policy(
+            self.name, self.max_pairs_per_block, self.max_candidates_per_block
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_pairs_per_block": self.max_pairs_per_block,
+            "max_candidates_per_block": self.max_candidates_per_block,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipSemanticPackingPolicy:
+    """An explicit A5D relationship packing policy with TWO independent limits.
+
+    ``relationship-semantic-packing-v1`` is NOT YET FROZEN. The audit
+    candidates below are audit-only; A5D-A always requires an explicit policy
+    (there is no production default).
+    """
+
+    name: str
+    max_pairs_per_block: int
+    max_candidates_per_block: int
+
+    def __post_init__(self) -> None:
+        _validate_semantic_packing_policy(
+            self.name, self.max_pairs_per_block, self.max_candidates_per_block
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_pairs_per_block": self.max_pairs_per_block,
+            "max_candidates_per_block": self.max_candidates_per_block,
+        }
+
+
+#: The three deterministic event block-packing candidates audited by A5D-A
+#: (BLOCK 10): P1 = 6 pairs / 12 candidates, P2 = 12 / 24, P3 = 24 / 48.
+#: Audit-only (NOT a production default).
+A5D_EVENT_PACKING_CANDIDATES: tuple[EventSemanticPackingPolicy, ...] = (
+    EventSemanticPackingPolicy("P1", 6, 12),
+    EventSemanticPackingPolicy("P2", 12, 24),
+    EventSemanticPackingPolicy("P3", 24, 48),
+)
+
+#: The three deterministic relationship block-packing candidates audited by
+#: A5D-A (BLOCK 11): P1 = 6 pairs / 12 candidates, P2 = 12 / 24, P3 = 24 / 48.
+#: Audit-only (NOT a production default).
+A5D_RELATIONSHIP_PACKING_CANDIDATES: tuple[RelationshipSemanticPackingPolicy, ...] = (
+    RelationshipSemanticPackingPolicy("P1", 6, 12),
+    RelationshipSemanticPackingPolicy("P2", 12, 24),
+    RelationshipSemanticPackingPolicy("P3", 24, 48),
+)
+
+
+# ---------------------------------------------------------------------------
+# Event / relationship semantic block (BLOCK 7 / BLOCK 8)
+# ---------------------------------------------------------------------------
+
+
+def _validate_semantic_block_shape(
+    block_ordinal: int, block_id: str, prefix: str, domain: str
+) -> None:
+    """Shared structural validation for the event / relationship blocks."""
+    if not isinstance(block_ordinal, int) or block_ordinal < 0:
+        raise StoryIntegrityError(f"{domain} block_ordinal must be a non-negative integer")
+    if not block_id.startswith(prefix):
+        raise StoryIntegrityError(
+            f"{domain} block_id must start with {prefix!r}: {block_id!r}"
+        )
+    hex_part = block_id[len(prefix):]
+    if len(hex_part) != A5C_BLOCK_ID_HEX_LENGTH or any(
+        c not in "0123456789abcdef" for c in hex_part
+    ):
+        raise StoryIntegrityError(
+            f"{domain} block_id must be {prefix!r} + {A5C_BLOCK_ID_HEX_LENGTH} "
+            f"lowercase hex chars: {block_id!r}"
+        )
+
+
+def _validate_semantic_block_payload(
+    pair_contexts: tuple[dict[str, Any], ...],
+    candidate_refs: tuple[str, ...],
+    pair_refs: tuple[tuple[str, str], ...],
+    domain: str,
+) -> None:
+    """Shared payload validation for the event / relationship blocks.
+
+    ``pair_refs`` must equal the pair contexts' (left, right) refs and
+    ``candidate_refs`` must equal the exact stable union of the block's pair
+    endpoints, ordered by candidate source_order_key then ref (never a
+    block-wide semantic or evidence pool).
+    """
+    if tuple(pair_refs) != tuple(
+        (pc["left_candidate_ref"], pc["right_candidate_ref"]) for pc in pair_contexts
+    ):
+        raise StoryIntegrityError(f"{domain} block pair_refs does not match the pair contexts")
+    keyed: list[tuple[str, str]] = []
+    for pc in pair_contexts:
+        for side in ("left", "right"):
+            packet = pc[side]
+            keyed.append((packet["source_order_key"], packet["candidate_ref"]))
+    expected_refs = tuple(ref for _so, ref in sorted(set(keyed)))
+    if tuple(candidate_refs) != expected_refs:
+        raise StoryIntegrityError(
+            f"{domain} candidate_refs must equal the stable union of the block pair "
+            "endpoints (ordered by candidate source_order_key then ref)"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EventSemanticBlock:
+    """One deterministic event consolidation block (pair-local contexts).
+
+    Mirrors :class:`FactSemanticBlock` (identical field layout) with the event
+    block id prefix ``a5eblk_`` and the event pair-local endpoint packets.
+    """
+
+    block_ordinal: int
+    block_id: str
+    pair_contexts: tuple[dict[str, Any], ...]
+    candidate_refs: tuple[str, ...]
+    pair_refs: tuple[tuple[str, str], ...]
+    pair_contexts_json: str
+
+    def __post_init__(self) -> None:
+        _validate_semantic_block_shape(
+            self.block_ordinal, self.block_id, A5D_EVENT_BLOCK_PREFIX, "event"
+        )
+        _validate_semantic_block_payload(
+            self.pair_contexts, self.candidate_refs, self.pair_refs, "event"
+        )
+
+    @property
+    def pair_count(self) -> int:
+        return len(self.pair_contexts)
+
+    @property
+    def payload_bytes(self) -> int:
+        return len(self.pair_contexts_json.encode("utf-8"))
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipSemanticBlock:
+    """One deterministic relationship consolidation block (pair-local contexts).
+
+    Mirrors :class:`FactSemanticBlock` (identical field layout) with the
+    relationship block id prefix ``a5rblk_`` and the relationship pair-local
+    endpoint packets.
+    """
+
+    block_ordinal: int
+    block_id: str
+    pair_contexts: tuple[dict[str, Any], ...]
+    candidate_refs: tuple[str, ...]
+    pair_refs: tuple[tuple[str, str], ...]
+    pair_contexts_json: str
+
+    def __post_init__(self) -> None:
+        _validate_semantic_block_shape(
+            self.block_ordinal, self.block_id, A5D_RELATIONSHIP_BLOCK_PREFIX, "relationship"
+        )
+        _validate_semantic_block_payload(
+            self.pair_contexts, self.candidate_refs, self.pair_refs, "relationship"
+        )
+
+    @property
+    def pair_count(self) -> int:
+        return len(self.pair_contexts)
+
+    @property
+    def payload_bytes(self) -> int:
+        return len(self.pair_contexts_json.encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Event / relationship semantic preparation result (BLOCK 2 / BLOCK 12 / 13)
+# ---------------------------------------------------------------------------
+
+
+def _validate_semantic_preparation_shape(
+    packing_policy: Any,
+    expected_policy: type,
+    policy_name: str,
+    blocks: tuple,
+    structured_requests: tuple,
+    semantic_request_hashes: tuple,
+) -> None:
+    """Shared structural validation for the event / relationship preparations."""
+    if not isinstance(packing_policy, expected_policy):
+        raise StoryIntegrityError(f"packing_policy must be a {policy_name}")
+    if len(blocks) != len(structured_requests):
+        raise StoryIntegrityError(
+            "each block must have exactly one structured request"
+        )
+    if len(blocks) != len(semantic_request_hashes):
+        raise StoryIntegrityError(
+            "each block must have exactly one semantic request hash"
+        )
+    expected_hash = tuple(request.request_hash for request in structured_requests)
+    if tuple(semantic_request_hashes) != expected_hash:
+        raise StoryIntegrityError(
+            "semantic_request_hashes must match the structured request hashes"
+        )
+    if [block.block_ordinal for block in blocks] != list(range(len(blocks))):
+        raise StoryIntegrityError("block_ordinal must be the contiguous 0..n-1 sequence")
+    for block in blocks:
+        if block.pair_count > packing_policy.max_pairs_per_block:
+            raise StoryIntegrityError(
+                "block pair count exceeds packing_policy.max_pairs_per_block"
+            )
+        if len(block.candidate_refs) > packing_policy.max_candidates_per_block:
+            raise StoryIntegrityError(
+                "block unique-candidate count exceeds packing_policy.max_candidates_per_block"
+            )
+
+
+@dataclass(frozen=True)
+class EventSemanticPreparation:
+    """Immutable event semantic preparation (A5B plan + blocks + requests + hashes).
+
+    Mirrors :class:`FactSemanticPreparation` for the event domain. No provider
+    is called and nothing is persisted.
+    """
+
+    planning_result: ConsolidationPlanningResult
+    consolidation_profile: ConsolidationProfile
+    semantic_profile: SemanticLLMProfile
+    prompt_id: str
+    prompt_version: int
+    prompt_content_hash: str
+    output_schema_id: str
+    output_schema_version: int
+    output_schema_hash: str
+    working_language: str
+    packing_policy: EventSemanticPackingPolicy
+    blocks: tuple[EventSemanticBlock, ...]
+    structured_requests: tuple[StructuredGenerationRequest, ...]
+    semantic_request_hashes: tuple[str, ...]
+    semantic_pair_count: int
+    auto_same_pair_count: int
+    total_event_pair_count: int
+
+    def __post_init__(self) -> None:
+        _validate_semantic_preparation_shape(
+            self.packing_policy,
+            EventSemanticPackingPolicy,
+            "EventSemanticPackingPolicy",
+            self.blocks,
+            self.structured_requests,
+            self.semantic_request_hashes,
+        )
+        total_pairs = sum(block.pair_count for block in self.blocks)
+        if total_pairs != self.semantic_pair_count:
+            raise StoryIntegrityError(
+                "block pair counts must sum to the semantic pair count"
+            )
+
+
+@dataclass(frozen=True)
+class RelationshipSemanticPreparation:
+    """Immutable relationship semantic preparation (A5B plan + blocks + requests + hashes).
+
+    Mirrors :class:`FactSemanticPreparation` for the relationship domain. No
+    provider is called and nothing is persisted.
+    """
+
+    planning_result: ConsolidationPlanningResult
+    consolidation_profile: ConsolidationProfile
+    semantic_profile: SemanticLLMProfile
+    prompt_id: str
+    prompt_version: int
+    prompt_content_hash: str
+    output_schema_id: str
+    output_schema_version: int
+    output_schema_hash: str
+    working_language: str
+    packing_policy: RelationshipSemanticPackingPolicy
+    blocks: tuple[RelationshipSemanticBlock, ...]
+    structured_requests: tuple[StructuredGenerationRequest, ...]
+    semantic_request_hashes: tuple[str, ...]
+    semantic_pair_count: int
+    auto_same_pair_count: int
+    total_relationship_pair_count: int
+
+    def __post_init__(self) -> None:
+        _validate_semantic_preparation_shape(
+            self.packing_policy,
+            RelationshipSemanticPackingPolicy,
+            "RelationshipSemanticPackingPolicy",
+            self.blocks,
+            self.structured_requests,
+            self.semantic_request_hashes,
+        )
+        total_pairs = sum(block.pair_count for block in self.blocks)
+        if total_pairs != self.semantic_pair_count:
+            raise StoryIntegrityError(
+                "block pair counts must sum to the semantic pair count"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Profile / schema loaders + verification (event / relationship)
+# ---------------------------------------------------------------------------
+
+
+def load_event_semantic_profile() -> SemanticLLMProfile:
+    """Load the tracked ``consolidation-llm-v1`` semantic profile (event pass)."""
+    return load_semantic_profile(A5D_SEMANTIC_PROFILE_PATH)
+
+
+def load_relationship_semantic_profile() -> SemanticLLMProfile:
+    """Load the tracked ``consolidation-llm-v1`` semantic profile (relationship pass)."""
+    return load_semantic_profile(A5D_SEMANTIC_PROFILE_PATH)
+
+
+def _load_selector_output_schema(schema_id: str, schema_version: int, path, domain: str) -> OutputSchema:
+    try:
+        schema_data = load_json(path)
+    except Exception as exc:  # noqa: BLE001
+        raise StoryIntegrityError(f"failed to load {domain} output schema: {exc}") from exc
+    if not isinstance(schema_data, dict):
+        raise StoryIntegrityError(f"{domain} output schema must be a JSON object")
+    return OutputSchema.create(
+        schema_id=schema_id, schema_version=schema_version, schema=schema_data
+    )
+
+
+def load_event_output_schema() -> OutputSchema:
+    """Load the tracked A5 event selector-payload output schema."""
+    return _load_selector_output_schema(
+        A5D_EVENT_OUTPUT_SCHEMA_ID,
+        A5D_EVENT_OUTPUT_SCHEMA_VERSION,
+        A5D_EVENT_OUTPUT_SCHEMA_PATH,
+        "event",
+    )
+
+
+def load_relationship_output_schema() -> OutputSchema:
+    """Load the tracked A5 relationship selector-payload output schema."""
+    return _load_selector_output_schema(
+        A5D_RELATIONSHIP_OUTPUT_SCHEMA_ID,
+        A5D_RELATIONSHIP_OUTPUT_SCHEMA_VERSION,
+        A5D_RELATIONSHIP_OUTPUT_SCHEMA_PATH,
+        "relationship",
+    )
+
+
+def _verify_semantic_pass_profile(
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    *,
+    pass_name: str,
+    prompt_id: str,
+    prompt_version: int,
+    output_schema_id: str,
+    output_schema_version: int,
+) -> None:
+    """Fail closed unless the pass pins the exact A5D identity."""
+    if not isinstance(consolidation_profile, ConsolidationProfile):
+        raise StoryIntegrityError("consolidation_profile must be a ConsolidationProfile")
+    if not isinstance(semantic_profile, SemanticLLMProfile):
+        raise StoryIntegrityError("semantic_profile must be a SemanticLLMProfile")
+    if consolidation_profile.max_generation_rounds != A5D_MAX_GENERATION_ROUNDS:
+        raise StoryIntegrityError(
+            "consolidation max_generation_rounds must be "
+            f"{A5D_MAX_GENERATION_ROUNDS}, got {consolidation_profile.max_generation_rounds}"
+        )
+    pass_pin: ConsolidationSemanticPass = getattr(consolidation_profile, pass_name)
+    if pass_pin.semantic_profile_id != A5D_SEMANTIC_PROFILE_ID:
+        raise StoryIntegrityError(
+            f"consolidation {pass_name}.semantic_profile_id must be "
+            f"{A5D_SEMANTIC_PROFILE_ID!r}, got {pass_pin.semantic_profile_id!r}"
+        )
+    if pass_pin.prompt_id != prompt_id or pass_pin.prompt_version != prompt_version:
+        raise StoryIntegrityError(
+            f"consolidation {pass_name} prompt must be {prompt_id!r} v{prompt_version}, "
+            f"got {pass_pin.prompt_id!r} v{pass_pin.prompt_version}"
+        )
+    if (
+        pass_pin.output_schema_id != output_schema_id
+        or pass_pin.output_schema_version != output_schema_version
+    ):
+        raise StoryIntegrityError(
+            f"consolidation {pass_name} output schema must be "
+            f"{output_schema_id!r} v{output_schema_version}, "
+            f"got {pass_pin.output_schema_id!r} v{pass_pin.output_schema_version}"
+        )
+    if semantic_profile.profile_id != A5D_SEMANTIC_PROFILE_ID:
+        raise StoryIntegrityError(
+            "semantic profile id must be "
+            f"{A5D_SEMANTIC_PROFILE_ID!r}, got {semantic_profile.profile_id!r}"
+        )
+
+
+def _verify_event_profile(
+    consolidation_profile: ConsolidationProfile, semantic_profile: SemanticLLMProfile
+) -> None:
+    """Fail closed unless the event pass pins the exact A5D identity."""
+    _verify_semantic_pass_profile(
+        consolidation_profile,
+        semantic_profile,
+        pass_name="event",
+        prompt_id=A5D_EVENT_PROMPT_ID,
+        prompt_version=A5D_EVENT_PROMPT_VERSION,
+        output_schema_id=A5D_EVENT_OUTPUT_SCHEMA_ID,
+        output_schema_version=A5D_EVENT_OUTPUT_SCHEMA_VERSION,
+    )
+
+
+def _verify_relationship_profile(
+    consolidation_profile: ConsolidationProfile, semantic_profile: SemanticLLMProfile
+) -> None:
+    """Fail closed unless the relationship pass pins the exact A5D identity."""
+    _verify_semantic_pass_profile(
+        consolidation_profile,
+        semantic_profile,
+        pass_name="relationship",
+        prompt_id=A5D_RELATIONSHIP_PROMPT_ID,
+        prompt_version=A5D_RELATIONSHIP_PROMPT_VERSION,
+        output_schema_id=A5D_RELATIONSHIP_OUTPUT_SCHEMA_ID,
+        output_schema_version=A5D_RELATIONSHIP_OUTPUT_SCHEMA_VERSION,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pair-local endpoint packets (event / relationship -- BLOCK 7 / BLOCK 8)
+# ---------------------------------------------------------------------------
+
+
+def _endpoint_evidence_items(cand, side: str) -> list[dict[str, Any]]:
+    """Pair-local evidence items labeled ``L0..`` / ``R0..`` in indexed order."""
+    prefix = "L" if side == "left" else "R"
+    return [
+        {
+            "selector": f"{prefix}{idx}",
+            "paragraph_id": ev.paragraph_id,
+            "role": ev.role,
+            "strength": ev.strength,
+            "excerpt": ev.excerpt,
+        }
+        for idx, ev in enumerate(cand.evidence_refs)
+    ]
+
+
+def build_event_endpoint_packet(cand: IndexedEventCandidate, side: str) -> dict[str, Any]:
+    """Build the pair-local endpoint packet for one side of an event pair.
+
+    ``side`` is ``"left"`` or ``"right"``. The evidence items are labeled with
+    pair-local selectors ``L0/L1/...`` (left) or ``R0/R1/...`` (right) in the
+    EXACT indexed A5B evidence order (no re-sort). The packet carries the exact
+    ``evidence_strength`` and ``source_order_key`` from the indexed candidate.
+    """
+    if side not in ("left", "right"):
+        raise StoryIntegrityError("side must be 'left' or 'right'")
+    return {
+        "candidate_ref": cand.global_candidate_ref,
+        "chunk_id": cand.chunk_id,
+        "local_candidate_id": cand.local_candidate_id,
+        "summary_zh": cand.summary_zh,
+        "participants": list(cand.participants),
+        "locations": list(cand.locations),
+        "temporal_mode": cand.temporal_mode,
+        "evidence_strength": cand.evidence_strength,
+        "source_order_key": cand.source_order_key,
+        "evidence": _endpoint_evidence_items(cand, side),
+    }
+
+
+def build_relationship_endpoint_packet(
+    cand: IndexedRelationshipCandidate, side: str
+) -> dict[str, Any]:
+    """Build the pair-local endpoint packet for one side of a relationship pair.
+
+    ``side`` is ``"left"`` or ``"right"``. The evidence items are labeled with
+    pair-local selectors ``L0/L1/...`` (left) or ``R0/R1/...`` (right) in the
+    EXACT indexed A5B evidence order (no re-sort). The packet carries the exact
+    ``evidence_strength`` and ``source_order_key`` from the indexed candidate.
+    ``state_zh`` may be ``None`` (carried through exactly as indexed).
+    """
+    if side not in ("left", "right"):
+        raise StoryIntegrityError("side must be 'left' or 'right'")
+    return {
+        "candidate_ref": cand.global_candidate_ref,
+        "chunk_id": cand.chunk_id,
+        "local_candidate_id": cand.local_candidate_id,
+        "source_entity_ref": cand.source_entity_ref,
+        "target_entity_ref": cand.target_entity_ref,
+        "relationship_type_zh": cand.relationship_type_zh,
+        "state_zh": cand.state_zh,
+        "direction": cand.direction,
+        "evidence_strength": cand.evidence_strength,
+        "source_order_key": cand.source_order_key,
+        "evidence": _endpoint_evidence_items(cand, side),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pair contexts (event / relationship)
+# ---------------------------------------------------------------------------
+
+
+def build_event_pair_context(
+    plan: EventPairPlan, events_by_ref: Mapping[str, IndexedEventCandidate]
+) -> dict[str, Any]:
+    """Build one event pair context (left/right refs + signals + endpoint packets)."""
+    left = events_by_ref.get(plan.left_ref)
+    right = events_by_ref.get(plan.right_ref)
+    if left is None or right is None:
+        raise StoryIntegrityError(
+            "event pair plan references a candidate missing from the index"
+        )
+    return {
+        "left_candidate_ref": plan.left_ref,
+        "right_candidate_ref": plan.right_ref,
+        "signals": list(plan.signals),
+        "left": build_event_endpoint_packet(left, "left"),
+        "right": build_event_endpoint_packet(right, "right"),
+    }
+
+
+def build_relationship_pair_context(
+    plan: RelationshipPairPlan, relationships_by_ref: Mapping[str, IndexedRelationshipCandidate]
+) -> dict[str, Any]:
+    """Build one relationship pair context (left/right refs + signals + endpoint packets)."""
+    left = relationships_by_ref.get(plan.left_ref)
+    right = relationships_by_ref.get(plan.right_ref)
+    if left is None or right is None:
+        raise StoryIntegrityError(
+            "relationship pair plan references a candidate missing from the index"
+        )
+    return {
+        "left_candidate_ref": plan.left_ref,
+        "right_candidate_ref": plan.right_ref,
+        "signals": list(plan.signals),
+        "left": build_relationship_endpoint_packet(left, "left"),
+        "right": build_relationship_endpoint_packet(right, "right"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Semantic stream validation (event / relationship)
+# ---------------------------------------------------------------------------
+
+
+def _validate_semantic_pair_stream(plans, namespace: str, domain: str):
+    """Validate a domain semantic stream fail closed and return it in order.
+
+    Enforces: every pair plan is in ``namespace`` with ``left_ref < right_ref``;
+    no duplicate pair; the plans are in canonical ``(left_ref, right_ref)``
+    order (verified, not silently re-sorted); the semantic stream is EXACTLY the
+    ``needs_semantic_decision`` pairs with ``auto_same`` excluded. Any deviation
+    raises :class:`StoryIntegrityError`.
+    """
+    seen_pairs: set[tuple[str, str]] = set()
+    prev_key: tuple[str, str] | None = None
+    semantic_count = 0
+    for plan in plans:
+        left, right = plan.left_ref, plan.right_ref
+        if _fact_ref_namespace(left) != namespace or _fact_ref_namespace(right) != namespace:
+            raise StoryIntegrityError(
+                f"{domain} pair plan is not in the {namespace} namespace: "
+                f"{left!r} <-> {right!r}"
+            )
+        if not left < right:
+            raise StoryIntegrityError(
+                f"{domain} pair plan is malformed (left_ref < right_ref): "
+                f"{left!r} !< {right!r}"
+            )
+        key = (left, right)
+        if key in seen_pairs:
+            raise StoryIntegrityError(f"duplicate {domain} pair plan: {left!r} <-> {right!r}")
+        seen_pairs.add(key)
+        if prev_key is not None and key < prev_key:
+            raise StoryIntegrityError(
+                f"{domain} pair plans are not in canonical (left_ref, right_ref) order at "
+                f"{left!r} <-> {right!r}"
+            )
+        prev_key = key
+        if plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION:
+            semantic_count += 1
+        elif plan.state != PAIR_STATE_AUTO_SAME:
+            raise StoryIntegrityError(
+                f"unexpected {domain} pair state {plan.state!r} "
+                "(must be needs_semantic_decision or auto_same)"
+            )
+    stream = tuple(plan for plan in plans if plan.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION)
+    if len(stream) != semantic_count:
+        raise StoryIntegrityError(f"{domain} semantic stream coverage mismatch")
+    return stream
+
+
+def _validate_event_semantic_stream(planning: ConsolidationPlanningResult) -> tuple[EventPairPlan, ...]:
+    """Validate the event semantic stream fail closed and return it in order."""
+    return _validate_semantic_pair_stream(planning.event_pair_plans, "event", "event")
+
+
+def _validate_relationship_semantic_stream(
+    planning: ConsolidationPlanningResult,
+) -> tuple[RelationshipPairPlan, ...]:
+    """Validate the relationship semantic stream fail closed and return it in order."""
+    return _validate_semantic_pair_stream(
+        planning.relationship_pair_plans, "relationship", "relationship"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Event / relationship preparation builders (BLOCK 2)
+# ---------------------------------------------------------------------------
+
+
+def build_event_semantic_preparation(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    *,
+    prompts: PromptRegistry,
+    packing_policy: EventSemanticPackingPolicy,
+) -> EventSemanticPreparation:
+    """Build the event semantic preparation from an A5B planning result.
+
+    Selects the ``needs_semantic_decision`` event pairs (the A5D event semantic
+    stream), validates the stream fail closed, builds the deterministic
+    pair-local pair contexts, packs them into blocks under the explicit
+    ``packing_policy`` (BOTH the pair and unique-candidate limits), and renders
+    one real ``StructuredGenerationRequest`` per block. ``packing_policy`` is
+    required (no production default). No provider is called and nothing is
+    persisted.
+    """
+    if not isinstance(packing_policy, EventSemanticPackingPolicy):
+        raise StoryIntegrityError(
+            "packing_policy is required (event-semantic-packing is not yet frozen)"
+        )
+    _verify_event_profile(consolidation_profile, semantic_profile)
+    prompt = prompts.load(A5D_EVENT_PROMPT_ID, version=A5D_EVENT_PROMPT_VERSION)
+    output_schema = load_event_output_schema()
+
+    events_by_ref = {
+        cand.global_candidate_ref: cand for cand in planning_result.index.events
+    }
+    event_plans = planning_result.event_pair_plans
+    semantic_stream = _validate_event_semantic_stream(planning_result)
+    auto_same_count = sum(1 for plan in event_plans if plan.state == PAIR_STATE_AUTO_SAME)
+    plan_hash = planning_result.plan_hash
+
+    blocks = _build_semantic_blocks(
+        block_cls=EventSemanticBlock,
+        block_prefix=A5D_EVENT_BLOCK_PREFIX,
+        packing_policy_material=packing_policy.to_dict(),
+        plan_hash=plan_hash,
+        max_pairs_per_block=packing_policy.max_pairs_per_block,
+        max_candidates_per_block=packing_policy.max_candidates_per_block,
+        semantic_stream=semantic_stream,
+        source_order_key_for_ref=_indexed_source_order_key(events_by_ref, "event"),
+        pair_context_builder=lambda plan: build_event_pair_context(plan, events_by_ref),
+        domain="event",
+    )
+
+    structured_requests: list[StructuredGenerationRequest] = []
+    for block in blocks:
+        variables = {
+            "block_id": block.block_id,
+            "pair_contexts_json": block.pair_contexts_json,
+        }
+        rendered = render_prompt(prompt, variables)
+        structured_requests.append(
+            build_structured_request(
+                rendered_prompt=rendered,
+                output_schema=output_schema,
+                semantic_profile=semantic_profile,
+            )
+        )
+    request_hashes = tuple(request.request_hash for request in structured_requests)
+
+    return EventSemanticPreparation(
+        planning_result=planning_result,
+        consolidation_profile=consolidation_profile,
+        semantic_profile=semantic_profile,
+        prompt_id=prompt.prompt_id,
+        prompt_version=prompt.version,
+        prompt_content_hash=prompt.content_hash,
+        output_schema_id=output_schema.schema_id,
+        output_schema_version=output_schema.schema_version,
+        output_schema_hash=output_schema.schema_hash,
+        working_language=consolidation_profile.working_language,
+        packing_policy=packing_policy,
+        blocks=blocks,
+        structured_requests=tuple(structured_requests),
+        semantic_request_hashes=request_hashes,
+        semantic_pair_count=len(semantic_stream),
+        auto_same_pair_count=auto_same_count,
+        total_event_pair_count=len(event_plans),
+    )
+
+
+def build_relationship_semantic_preparation(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    *,
+    prompts: PromptRegistry,
+    packing_policy: RelationshipSemanticPackingPolicy,
+) -> RelationshipSemanticPreparation:
+    """Build the relationship semantic preparation from an A5B planning result.
+
+    Selects the ``needs_semantic_decision`` relationship pairs (the A5D
+    relationship semantic stream), validates the stream fail closed, builds the
+    deterministic pair-local pair contexts, packs them into blocks under the
+    explicit ``packing_policy`` (BOTH the pair and unique-candidate limits), and
+    renders one real ``StructuredGenerationRequest`` per block. ``packing_policy``
+    is required (no production default). No provider is called and nothing is
+    persisted.
+    """
+    if not isinstance(packing_policy, RelationshipSemanticPackingPolicy):
+        raise StoryIntegrityError(
+            "packing_policy is required (relationship-semantic-packing is not yet frozen)"
+        )
+    _verify_relationship_profile(consolidation_profile, semantic_profile)
+    prompt = prompts.load(A5D_RELATIONSHIP_PROMPT_ID, version=A5D_RELATIONSHIP_PROMPT_VERSION)
+    output_schema = load_relationship_output_schema()
+
+    relationships_by_ref = {
+        cand.global_candidate_ref: cand for cand in planning_result.index.relationships
+    }
+    relationship_plans = planning_result.relationship_pair_plans
+    semantic_stream = _validate_relationship_semantic_stream(planning_result)
+    auto_same_count = sum(
+        1 for plan in relationship_plans if plan.state == PAIR_STATE_AUTO_SAME
+    )
+    plan_hash = planning_result.plan_hash
+
+    blocks = _build_semantic_blocks(
+        block_cls=RelationshipSemanticBlock,
+        block_prefix=A5D_RELATIONSHIP_BLOCK_PREFIX,
+        packing_policy_material=packing_policy.to_dict(),
+        plan_hash=plan_hash,
+        max_pairs_per_block=packing_policy.max_pairs_per_block,
+        max_candidates_per_block=packing_policy.max_candidates_per_block,
+        semantic_stream=semantic_stream,
+        source_order_key_for_ref=_indexed_source_order_key(
+            relationships_by_ref, "relationship"
+        ),
+        pair_context_builder=lambda plan: build_relationship_pair_context(
+            plan, relationships_by_ref
+        ),
+        domain="relationship",
+    )
+
+    structured_requests: list[StructuredGenerationRequest] = []
+    for block in blocks:
+        variables = {
+            "block_id": block.block_id,
+            "pair_contexts_json": block.pair_contexts_json,
+        }
+        rendered = render_prompt(prompt, variables)
+        structured_requests.append(
+            build_structured_request(
+                rendered_prompt=rendered,
+                output_schema=output_schema,
+                semantic_profile=semantic_profile,
+            )
+        )
+    request_hashes = tuple(request.request_hash for request in structured_requests)
+
+    return RelationshipSemanticPreparation(
+        planning_result=planning_result,
+        consolidation_profile=consolidation_profile,
+        semantic_profile=semantic_profile,
+        prompt_id=prompt.prompt_id,
+        prompt_version=prompt.version,
+        prompt_content_hash=prompt.content_hash,
+        output_schema_id=output_schema.schema_id,
+        output_schema_version=output_schema.schema_version,
+        output_schema_hash=output_schema.schema_hash,
+        working_language=consolidation_profile.working_language,
+        packing_policy=packing_policy,
+        blocks=blocks,
+        structured_requests=tuple(structured_requests),
+        semantic_request_hashes=request_hashes,
+        semantic_pair_count=len(semantic_stream),
+        auto_same_pair_count=auto_same_count,
+        total_relationship_pair_count=len(relationship_plans),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Event / relationship semantic identity (BLOCK 12 / BLOCK 13)
+# ---------------------------------------------------------------------------
+
+
+def _build_semantic_identity(
+    prep,
+    *,
+    total_pair_count_key: str,
+) -> dict[str, Any]:
+    """Shared canonical identity material for the event / relationship passes."""
+    planning = prep.planning_result
+    return {
+        "schema_version": 1,
+        "planning_policy_id": planning.planning_policy_id,
+        "blocking_policy_id": planning.blocking_policy_id,
+        "text_normalization_policy_id": planning.text_normalization_policy_id,
+        "exact_safe_policy_id": planning.exact_safe_policy_id,
+        "plan_hash": planning.plan_hash,
+        "profile_id": prep.consolidation_profile.profile_id,
+        "profile_hash": prep.consolidation_profile.content_hash(),
+        "working_language": prep.working_language,
+        "semantic_profile_id": prep.semantic_profile.profile_id,
+        "semantic_profile_hash": prep.semantic_profile.semantic_profile_hash,
+        "prompt_id": prep.prompt_id,
+        "prompt_version": prep.prompt_version,
+        "prompt_content_hash": prep.prompt_content_hash,
+        "output_schema_id": prep.output_schema_id,
+        "output_schema_version": prep.output_schema_version,
+        "output_schema_hash": prep.output_schema_hash,
+        "packing_policy": prep.packing_policy.to_dict(),
+        "semantic_pair_count": prep.semantic_pair_count,
+        "auto_same_pair_count": prep.auto_same_pair_count,
+        total_pair_count_key: getattr(prep, total_pair_count_key),
+        "block_count": len(prep.blocks),
+        "block_ids": tuple(block.block_id for block in prep.blocks),
+        "semantic_request_hashes": tuple(prep.semantic_request_hashes),
+    }
+
+
+def build_event_semantic_identity(prep: EventSemanticPreparation) -> dict[str, Any]:
+    """Build the canonical A5D event semantic identity material (no backend data)."""
+    return _build_semantic_identity(prep, total_pair_count_key="total_event_pair_count")
+
+
+def build_relationship_semantic_identity(
+    prep: RelationshipSemanticPreparation,
+) -> dict[str, Any]:
+    """Build the canonical A5D relationship semantic identity material."""
+    return _build_semantic_identity(
+        prep, total_pair_count_key="total_relationship_pair_count"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Event / relationship packing audit (BLOCK 10 / BLOCK 11 -- zero provider)
+# ---------------------------------------------------------------------------
+
+
+def build_event_packing_audit(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    *,
+    prompts: PromptRegistry,
+    candidates: tuple[EventSemanticPackingPolicy, ...] = A5D_EVENT_PACKING_CANDIDATES,
+) -> tuple[dict[str, Any], ...]:
+    """Audit deterministic event block-packing candidates (zero provider).
+
+    For each ``EventSemanticPackingPolicy`` candidate, build the event semantic
+    preparation and report the deterministic distribution statistics and
+    largest-block diagnostics. The candidates do NOT freeze the production
+    default.
+    """
+    audit: list[dict[str, Any]] = []
+    for policy in candidates:
+        prep = build_event_semantic_preparation(
+            planning_result,
+            consolidation_profile,
+            semantic_profile,
+            prompts=prompts,
+            packing_policy=policy,
+        )
+        blocks = prep.blocks
+        requests = prep.structured_requests
+        hashes = prep.semantic_request_hashes
+        audit.append(
+            {
+                "packing_name": policy.name,
+                "max_pairs_per_block": policy.max_pairs_per_block,
+                "max_candidates_per_block": policy.max_candidates_per_block,
+                "block_count": len(blocks),
+                "total_pairs_in_blocks": sum(b.pair_count for b in blocks),
+                "pairs_per_block": _distribution([b.pair_count for b in blocks]),
+                "unique_candidates_per_block": _distribution(
+                    [len(b.candidate_refs) for b in blocks]
+                ),
+                "evidence_items_per_block": _distribution(
+                    [_block_evidence_item_count(b) for b in blocks]
+                ),
+                "pair_contexts_json_bytes": _distribution(
+                    [b.payload_bytes for b in blocks]
+                ),
+                "rendered_prompt_bytes": _distribution(
+                    [_request_prompt_bytes(r) for r in requests]
+                ),
+                "request_hash_count": len(hashes),
+                "unique_request_hash_count": len(set(hashes)),
+                "largest_block": _select_largest_block(prep),
+            }
+        )
+    return tuple(audit)
+
+
+def build_relationship_packing_audit(
+    planning_result: ConsolidationPlanningResult,
+    consolidation_profile: ConsolidationProfile,
+    semantic_profile: SemanticLLMProfile,
+    *,
+    prompts: PromptRegistry,
+    candidates: tuple[
+        RelationshipSemanticPackingPolicy, ...
+    ] = A5D_RELATIONSHIP_PACKING_CANDIDATES,
+) -> tuple[dict[str, Any], ...]:
+    """Audit deterministic relationship block-packing candidates (zero provider).
+
+    For each ``RelationshipSemanticPackingPolicy`` candidate, build the
+    relationship semantic preparation and report the deterministic distribution
+    statistics and largest-block diagnostics. The candidates do NOT freeze the
+    production default.
+    """
+    audit: list[dict[str, Any]] = []
+    for policy in candidates:
+        prep = build_relationship_semantic_preparation(
             planning_result,
             consolidation_profile,
             semantic_profile,

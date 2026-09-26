@@ -758,11 +758,16 @@ def _validate_identity_components(
     candidate_by_ref = _candidate_index_by_ref(candidates, domain=domain)
     components = getattr(identity_plan, f"{domain}_components")
     expected_pattern = _DOMAIN_ID_PATTERN[domain]
+    canonical_id_prefix = {
+        "fact": "fact",
+        "event": "evt",
+        "relationship": "rel",
+    }[domain]
     covered: set[str] = set()
     canonical_ids: set[str] = set()
     previous_component_key: tuple[str, str] | None = None
 
-    for component in components:
+    for ordinal, component in enumerate(components, start=1):
         if not isinstance(component, ConsolidationIdentityComponent):
             raise ConsolidationFinalizationError(
                 f"{domain}: identity components must be ConsolidationIdentityComponent"
@@ -775,6 +780,13 @@ def _validate_identity_components(
             raise ConsolidationFinalizationError(
                 f"{domain}: component canonical id {component.canonical_id!r} has "
                 "wrong namespace"
+            )
+        expected_canonical_id = _canonical_id(canonical_id_prefix, ordinal)
+        if component.canonical_id != expected_canonical_id:
+            raise ConsolidationFinalizationError(
+                f"{domain}: component canonical id {component.canonical_id!r} does "
+                f"not match authoritative source-order ordinal {ordinal} "
+                f"({expected_canonical_id!r})"
             )
         if component.canonical_id in canonical_ids:
             raise ConsolidationFinalizationError(

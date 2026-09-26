@@ -239,6 +239,44 @@ class TestCanonicalEvent:
 
 
 class TestMalformedAndDeterminism:
+    @pytest.mark.parametrize(
+        "canonical_ids",
+        [
+            ("fact_000002",),
+            ("fact_000002", "fact_000001"),
+            ("fact_000001", "fact_000003"),
+        ],
+    )
+    def test_fact_canonical_ids_must_match_source_component_ordinals(self, canonical_ids):
+        facts = tuple(_fact(n) for n in range(1, len(canonical_ids) + 1))
+        planning = _planning(facts)
+        components = tuple(
+            replace(_component("fact", ordinal, _ref("fact", ordinal)), canonical_id=canonical_id)
+            for ordinal, canonical_id in enumerate(canonical_ids, start=1)
+        )
+        identity = _plan(planning, components)
+        with pytest.raises(ConsolidationFinalizationError, match="source-order ordinal"):
+            build_canonical_fact_set(planning, identity, _resolution(planning))
+
+    @pytest.mark.parametrize(
+        "canonical_ids",
+        [
+            ("evt_000002",),
+            ("evt_000002", "evt_000001"),
+            ("evt_000001", "evt_000003"),
+        ],
+    )
+    def test_event_canonical_ids_must_match_source_component_ordinals(self, canonical_ids):
+        events = tuple(_event(n) for n in range(1, len(canonical_ids) + 1))
+        planning = _planning(events=events)
+        components = tuple(
+            replace(_component("event", ordinal, _ref("event", ordinal)), canonical_id=canonical_id)
+            for ordinal, canonical_id in enumerate(canonical_ids, start=1)
+        )
+        identity = _plan(planning, event_components=components)
+        with pytest.raises(ConsolidationFinalizationError, match="source-order ordinal"):
+            build_canonical_event_set(planning, identity)
+
     def test_plan_hash_and_identity_plan_integrity_fail_closed(self):
         planning = _planning((_fact(1), _fact(2)))
         base = _plan(planning, (_component("fact", 1, _ref("fact", 1)), _component("fact", 2, _ref("fact", 2))))
@@ -246,7 +284,7 @@ class TestMalformedAndDeterminism:
         with pytest.raises(ConsolidationFinalizationError, match="planning identity"):
             build_canonical_fact_set(planning, bad_hash, _resolution(planning))
         duplicate_id = replace(base, fact_components=(base.fact_components[0], replace(base.fact_components[1], canonical_id="fact_000001")))
-        with pytest.raises(ConsolidationFinalizationError, match="duplicate canonical id"):
+        with pytest.raises(ConsolidationFinalizationError, match="canonical id"):
             build_canonical_fact_set(planning, duplicate_id, _resolution(planning))
         missing = replace(base, fact_components=(base.fact_components[0],))
         with pytest.raises(ConsolidationFinalizationError, match="coverage"):

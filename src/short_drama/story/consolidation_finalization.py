@@ -50,10 +50,10 @@ v1.2-A5E-deterministic-finalization-refinement-plan.md``):
   (ordered -- NOT treated as symmetric). A mismatch FAILS CLOSED.
 
 A5E1 is deterministic Python-only: **provider calls = 0**, **persistence
-writes = 0**, **CURRENT writes = 0**.  The A5E2 helpers below consume its
-Fact/Event components to construct CanonicalFact/CanonicalEvent plus only the
-fact-addressed side objects. Relationship finalization and final composition
-remain A5E3, and this module never persists anything.
+writes = 0**, **CURRENT writes = 0**.  The A5E2 helpers consume Fact/Event
+components for canonical assembly and fact-addressed side objects; A5E3 adds
+canonical relationship/state finalization and the final in-memory composition.
+This module never persists anything.
 """
 
 from __future__ import annotations
@@ -67,10 +67,13 @@ from .consolidation import (
     CanonicalEventSet,
     CanonicalFact,
     CanonicalFactSet,
+    CanonicalRelationship,
+    CanonicalRelationshipSet,
     ConsolidationCandidateRef,
     EVENT_ID_PATTERN,
     FACT_ID_PATTERN,
     RELATIONSHIP_ID_PATTERN,
+    RelationshipState,
     StateTransition,
     StoryConflict,
     StoryConflictSet,
@@ -655,6 +658,15 @@ def finalize_consolidation_identity(
         raise ConsolidationFinalizationError(
             "relationship_resolution must be a RelationshipSemanticResolutionResult"
         )
+    for domain, resolution in (
+        ("event", event_resolution),
+        ("relationship", relationship_resolution),
+    ):
+        if not isinstance(resolution.planning_result, ConsolidationPlanningResult):
+            raise ConsolidationFinalizationError(
+                f"{domain}_resolution.planning_result must be a "
+                "ConsolidationPlanningResult"
+            )
 
     plan_hash = planning_result.plan_hash
     for domain, resolution in (
@@ -1095,8 +1107,418 @@ def build_canonical_event_set(
     return CanonicalEventSet(schema_version=1, events=tuple(events))
 
 
+# ---------------------------------------------------------------------------
+# A5E3: Canonical relationships and final in-memory composition
+# ---------------------------------------------------------------------------
+
+
+def _relationship_source_ranks(
+    candidates: Sequence[IndexedRelationshipCandidate],
+) -> dict[str, int]:
+    """Return the frozen global relationship candidate source ranks (1-based)."""
+    candidate_by_ref = _candidate_index_by_ref(candidates, domain="relationship")
+    ordered_refs = sorted(
+        candidate_by_ref,
+        key=lambda ref: (candidate_by_ref[ref].source_order_key, ref),
+    )
+    return {ref: ordinal for ordinal, ref in enumerate(ordered_refs, start=1)}
+
+
+def _relationship_states(
+    members: Sequence[IndexedRelationshipCandidate],
+    source_ranks: dict[str, int],
+) -> tuple[RelationshipState, ...]:
+    """Build exact consecutive state groups from source-ordered members."""
+    groups: list[list[IndexedRelationshipCandidate]] = []
+    for member in members:
+        if member.state_zh is None:
+            continue
+        if groups and groups[-1][0].state_zh == member.state_zh:
+            groups[-1].append(member)
+        else:
+            groups.append([member])
+
+    states: list[RelationshipState] = []
+    for group in groups:
+        first = group[0]
+        evidence_refs = _stable_evidence_union(group)
+        _require_unique_evidence(
+            evidence_refs,
+            label=f"relationship state {first.state_zh!r}",
+        )
+        states.append(
+            RelationshipState(
+                state_zh=first.state_zh,
+                candidate_relationship_refs=tuple(
+                    member.global_candidate_ref for member in group
+                ),
+                evidence_refs=evidence_refs,
+                narrative_order=source_ranks[first.global_candidate_ref],
+            )
+        )
+    return tuple(states)
+
+
+def _validate_relationship_state_history(
+    relationship: CanonicalRelationship,
+    candidate_by_ref: dict[str, IndexedRelationshipCandidate],
+    source_ranks: dict[str, int],
+) -> None:
+    """Validate exact state provenance against its canonical parent (fail closed)."""
+    parent_refs = relationship.candidate_relationship_refs
+    parent_ref_set = set(parent_refs)
+    member_positions = {ref: position for position, ref in enumerate(parent_refs)}
+    previous_position = -1
+    for state in relationship.state_history:
+        if not isinstance(state, RelationshipState):
+            raise ConsolidationFinalizationError("relationship state_history has invalid item")
+        _require_unique_evidence(
+            state.evidence_refs,
+            label=f"relationship state {state.state_zh!r}",
+        )
+        if not state.candidate_relationship_refs:
+            raise ConsolidationFinalizationError("relationship state has no candidate refs")
+        positions: list[int] = []
+        contributors: list[IndexedRelationshipCandidate] = []
+        for ref in state.candidate_relationship_refs:
+            if ref not in parent_ref_set:
+                raise ConsolidationFinalizationError(
+                    f"relationship state candidate {ref!r} is outside its parent"
+                )
+            candidate = candidate_by_ref.get(ref)
+            if candidate is None:
+                raise ConsolidationFinalizationError(
+                    f"relationship state candidate {ref!r} is not indexed"
+                )
+            if candidate.state_zh != state.state_zh:
+                raise ConsolidationFinalizationError(
+                    f"relationship state candidate {ref!r} does not exactly match "
+                    "the state_zh"
+                )
+            positions.append(member_positions[ref])
+            contributors.append(candidate)
+        if positions != sorted(positions) or positions[0] <= previous_position:
+            raise ConsolidationFinalizationError(
+                "relationship state candidate refs are not in parent source order"
+            )
+        previous_position = positions[-1]
+        expected_evidence = _stable_evidence_union(contributors)
+        if state.evidence_refs != expected_evidence:
+            raise ConsolidationFinalizationError(
+                "relationship state evidence is not the exact stable contributor union"
+            )
+        expected_rank = source_ranks[state.candidate_relationship_refs[0]]
+        if state.narrative_order != expected_rank:
+            raise ConsolidationFinalizationError(
+                "relationship state narrative_order is not its global source rank"
+            )
+
+
+def build_canonical_relationship_set(
+    planning_result: ConsolidationPlanningResult,
+    identity_plan: ConsolidationIdentityPlan,
+) -> CanonicalRelationshipSet:
+    """Build A5E3 CanonicalRelationshipSet from checked A5E1 components.
+
+    Identity remains A5E1 authority.  This only assembles the representative
+    relationship payload and exact candidate-derived state histories.
+    """
+    components, candidate_by_ref = _validate_identity_components(
+        planning_result=planning_result,
+        identity_plan=identity_plan,
+        domain="relationship",
+    )
+    source_ranks = _relationship_source_ranks(planning_result.index.relationships)
+    relationships: list[CanonicalRelationship] = []
+    for component in components:
+        members = tuple(candidate_by_ref[ref] for ref in component.member_candidate_refs)
+        _check_relationship_signature(component.member_candidate_refs, candidate_by_ref)
+        direction, source, target = _relationship_signature(members[0])
+        relationship = CanonicalRelationship(
+            relationship_id=component.canonical_id,
+            source_entity_ref=source,
+            target_entity_ref=target,
+            direction=direction,
+            relationship_type_zh=members[0].relationship_type_zh,
+            candidate_relationship_refs=component.member_candidate_refs,
+            state_history=_relationship_states(members, source_ranks),
+            first_source_order=members[0].source_order_key,
+        )
+        _validate_relationship_state_history(relationship, candidate_by_ref, source_ranks)
+        relationships.append(relationship)
+
+    refs = {
+        ref for relationship in relationships for ref in relationship.candidate_relationship_refs
+    }
+    if refs != set(candidate_by_ref):
+        raise ConsolidationFinalizationError(
+            "relationship: canonical relationship candidate coverage is not exact"
+        )
+    if len(refs) != sum(len(r.candidate_relationship_refs) for r in relationships):
+        raise ConsolidationFinalizationError(
+            "relationship: canonical relationship candidate refs are not globally unique"
+        )
+    if len({r.relationship_id for r in relationships}) != len(relationships):
+        raise ConsolidationFinalizationError("relationship: canonical ids are not unique")
+    return CanonicalRelationshipSet(schema_version=1, relationships=tuple(relationships))
+
+
+@dataclass(frozen=True, slots=True)
+class A5FinalizationResult:
+    """Final A5E in-memory boundary; ``to_dict`` is comparison-only, not persistence."""
+
+    planning_result: ConsolidationPlanningResult
+    canonical_fact_set: CanonicalFactSet
+    canonical_event_set: CanonicalEventSet
+    canonical_relationship_set: CanonicalRelationshipSet
+    story_conflict_set: StoryConflictSet
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.planning_result, ConsolidationPlanningResult):
+            raise ConsolidationFinalizationError(
+                "planning_result must be a ConsolidationPlanningResult"
+            )
+        for name, expected_type in (
+            ("canonical_fact_set", CanonicalFactSet),
+            ("canonical_event_set", CanonicalEventSet),
+            ("canonical_relationship_set", CanonicalRelationshipSet),
+            ("story_conflict_set", StoryConflictSet),
+        ):
+            if not isinstance(getattr(self, name), expected_type):
+                raise ConsolidationFinalizationError(f"{name} has an invalid type")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Normalized in-memory comparison material; NOT a persistence schema."""
+        return {
+            "plan_hash": self.planning_result.plan_hash,
+            "canonical_fact_set": self.canonical_fact_set.to_dict(),
+            "canonical_event_set": self.canonical_event_set.to_dict(),
+            "canonical_relationship_set": self.canonical_relationship_set.to_dict(),
+            "story_conflict_set": self.story_conflict_set.to_dict(),
+        }
+
+
+def _validate_final_composition(
+    result: A5FinalizationResult,
+    identity_plan: ConsolidationIdentityPlan,
+    fact_resolution: FactSemanticResolutionResult,
+) -> None:
+    """Validate the frozen final A5E cross-artifact invariants (no mutation)."""
+    planning_result = result.planning_result
+    fact_components, fact_candidates = _validate_identity_components(
+        planning_result=planning_result, identity_plan=identity_plan, domain="fact"
+    )
+    event_components, event_candidates = _validate_identity_components(
+        planning_result=planning_result, identity_plan=identity_plan, domain="event"
+    )
+    relationship_components, relationship_candidates = _validate_identity_components(
+        planning_result=planning_result, identity_plan=identity_plan, domain="relationship"
+    )
+
+    facts_by_id = {fact.fact_id: fact for fact in result.canonical_fact_set.facts}
+    if (
+        len(facts_by_id) != len(result.canonical_fact_set.facts)
+        or len(result.canonical_fact_set.facts) != len(fact_components)
+    ):
+        raise ConsolidationFinalizationError("final facts have duplicate ids")
+    fact_ref_to_id: dict[str, tuple[str, int]] = {}
+    for ordinal, (component, fact) in enumerate(
+        zip(fact_components, result.canonical_fact_set.facts), start=1
+    ):
+        if fact.fact_id != component.canonical_id or fact.candidate_fact_refs != component.member_candidate_refs:
+            raise ConsolidationFinalizationError("final facts do not match identity components")
+        _require_unique_evidence(fact.evidence_refs, label=f"fact {fact.fact_id}")
+        for ref in fact.candidate_fact_refs:
+            if ref in fact_ref_to_id:
+                raise ConsolidationFinalizationError("final fact refs are not globally unique")
+            fact_ref_to_id[ref] = (fact.fact_id, ordinal)
+    if set(fact_ref_to_id) != set(fact_candidates):
+        raise ConsolidationFinalizationError("final fact candidate coverage is not exact")
+
+    decisions_by_id: dict[str, FactSemanticDecision] = {}
+    for decision in fact_resolution.all_fact_decisions:
+        if not isinstance(decision, FactSemanticDecision) or decision.decision_id in decisions_by_id:
+            raise ConsolidationFinalizationError("final fact decision lookup is ambiguous")
+        decisions_by_id[decision.decision_id] = decision
+    transition_decision_ids: set[str] = set()
+    for transition in result.canonical_fact_set.state_transitions:
+        _require_unique_evidence(transition.evidence_refs, label=transition.transition_id)
+        decision = decisions_by_id.get(transition.source_decision_ref)
+        if (
+            transition.transition_kind != "state_change"
+            or decision is None
+            or decision.decision != "state_change"
+            or transition.evidence_refs != decision.evidence_refs
+            or transition.from_fact_id not in facts_by_id
+            or transition.to_fact_id not in facts_by_id
+            or transition.from_fact_id == transition.to_fact_id
+        ):
+            raise ConsolidationFinalizationError("final StateTransition is invalid")
+        to_ordinal = next(
+            ordinal for fact_id, ordinal in fact_ref_to_id.values() if fact_id == transition.to_fact_id
+        )
+        if transition.narrative_order != to_ordinal:
+            raise ConsolidationFinalizationError("final StateTransition narrative_order is invalid")
+        left_id, left_ordinal = fact_ref_to_id[decision.left_candidate_ref]
+        right_id, right_ordinal = fact_ref_to_id[decision.right_candidate_ref]
+        expected_from, expected_to = (
+            (left_id, right_id)
+            if left_ordinal < right_ordinal
+            else (right_id, left_id)
+        )
+        if (transition.from_fact_id, transition.to_fact_id) != (expected_from, expected_to):
+            raise ConsolidationFinalizationError("final StateTransition direction is invalid")
+        transition_decision_ids.add(transition.source_decision_ref)
+    if transition_decision_ids != {
+        decision_id
+        for decision_id, decision in decisions_by_id.items()
+        if decision.decision == "state_change"
+    }:
+        raise ConsolidationFinalizationError("final StateTransition decision coverage is invalid")
+
+    events = result.canonical_event_set.events
+    if len(events) != len(event_components) or tuple(e.narrative_order for e in events) != tuple(range(1, len(events) + 1)):
+        raise ConsolidationFinalizationError("final event sequence is invalid")
+    event_refs: set[str] = set()
+    for ordinal, (component, event) in enumerate(zip(event_components, events), start=1):
+        if event.event_id != component.canonical_id or event.candidate_event_refs != component.member_candidate_refs:
+            raise ConsolidationFinalizationError("final events do not match identity components")
+        if event.event_id != _canonical_id("evt", ordinal):
+            raise ConsolidationFinalizationError("final event canonical id is invalid")
+        _require_unique_evidence(event.evidence_refs, label=f"event {event.event_id}")
+        if event_refs.intersection(event.candidate_event_refs):
+            raise ConsolidationFinalizationError("final event refs are not globally unique")
+        event_refs.update(event.candidate_event_refs)
+    if event_refs != set(event_candidates):
+        raise ConsolidationFinalizationError("final event candidate coverage is not exact")
+
+    relationships = result.canonical_relationship_set.relationships
+    if len(relationships) != len(relationship_components):
+        raise ConsolidationFinalizationError("final relationship count is invalid")
+    source_ranks = _relationship_source_ranks(planning_result.index.relationships)
+    relationship_refs: set[str] = set()
+    for ordinal, (component, relationship) in enumerate(
+        zip(relationship_components, relationships), start=1
+    ):
+        if (
+            relationship.relationship_id != component.canonical_id
+            or relationship.candidate_relationship_refs != component.member_candidate_refs
+        ):
+            raise ConsolidationFinalizationError(
+                "final relationships do not match identity components"
+            )
+        _check_relationship_signature(component.member_candidate_refs, relationship_candidates)
+        signature = _relationship_signature(relationship_candidates[component.member_candidate_refs[0]])
+        if (relationship.direction, relationship.source_entity_ref, relationship.target_entity_ref) != signature:
+            raise ConsolidationFinalizationError("final relationship endpoint signature is invalid")
+        representative = relationship_candidates[component.member_candidate_refs[0]]
+        if (
+            relationship.relationship_id != _canonical_id("rel", ordinal)
+            or relationship.relationship_type_zh != representative.relationship_type_zh
+            or relationship.first_source_order != representative.source_order_key
+        ):
+            raise ConsolidationFinalizationError("final relationship representative fields are invalid")
+        _validate_relationship_state_history(relationship, relationship_candidates, source_ranks)
+        expected_states = _relationship_states(
+            tuple(relationship_candidates[ref] for ref in component.member_candidate_refs),
+            source_ranks,
+        )
+        if relationship.state_history != expected_states:
+            raise ConsolidationFinalizationError("final relationship state history is invalid")
+        if relationship_refs.intersection(relationship.candidate_relationship_refs):
+            raise ConsolidationFinalizationError(
+                "final relationship refs are not globally unique"
+            )
+        relationship_refs.update(relationship.candidate_relationship_refs)
+    if relationship_refs != set(relationship_candidates):
+        raise ConsolidationFinalizationError("final relationship candidate coverage is not exact")
+
+    conflict_decision_ids: set[str] = set()
+    for conflict in result.story_conflict_set.conflicts:
+        _require_unique_evidence(conflict.evidence_refs, label=conflict.conflict_id)
+        if (
+            conflict.conflict_kind != "fact_conflict"
+            or conflict.relationship_ids != ()
+            or conflict.status != "unresolved"
+            or len(conflict.decision_refs) != 1
+            or any(fact_id not in facts_by_id for fact_id in conflict.fact_ids)
+            or any(ref not in fact_candidates for ref in conflict.candidate_refs)
+        ):
+            raise ConsolidationFinalizationError("final StoryConflict is invalid")
+        decision = decisions_by_id.get(conflict.decision_refs[0])
+        if (
+            decision is None
+            or decision.decision != "conflict"
+            or conflict.evidence_refs != decision.evidence_refs
+            or conflict.candidate_refs
+            != (decision.left_candidate_ref, decision.right_candidate_ref)
+        ):
+            raise ConsolidationFinalizationError("final StoryConflict decision reference is invalid")
+        expected_fact_ids = tuple(
+            fact_ref_to_id[ref][0]
+            for ref in sorted(
+                conflict.candidate_refs, key=lambda ref: fact_ref_to_id[ref][1]
+            )
+        )
+        if conflict.fact_ids != expected_fact_ids:
+            raise ConsolidationFinalizationError("final StoryConflict fact ordering is invalid")
+        conflict_decision_ids.add(conflict.decision_refs[0])
+    if conflict_decision_ids != {
+        decision_id
+        for decision_id, decision in decisions_by_id.items()
+        if decision.decision == "conflict"
+    }:
+        raise ConsolidationFinalizationError("final StoryConflict decision coverage is invalid")
+
+
+def finalize_consolidation(
+    planning_result: ConsolidationPlanningResult,
+    fact_resolution: FactSemanticResolutionResult,
+    event_resolution: EventSemanticResolutionResult,
+    relationship_resolution: RelationshipSemanticResolutionResult,
+) -> A5FinalizationResult:
+    """Finalize all A5E domains in memory, with no provider or persistence work."""
+    if not isinstance(planning_result, ConsolidationPlanningResult):
+        raise ConsolidationFinalizationError("planning_result must be a ConsolidationPlanningResult")
+    expected = (
+        ("fact", fact_resolution, FactSemanticResolutionResult),
+        ("event", event_resolution, EventSemanticResolutionResult),
+        ("relationship", relationship_resolution, RelationshipSemanticResolutionResult),
+    )
+    for domain, resolution, resolution_type in expected:
+        if not isinstance(resolution, resolution_type):
+            raise ConsolidationFinalizationError(f"{domain}_resolution has an invalid type")
+        if not isinstance(resolution.planning_result, ConsolidationPlanningResult):
+            raise ConsolidationFinalizationError(
+                f"{domain}_resolution.planning_result must be a ConsolidationPlanningResult"
+            )
+        if resolution.planning_result.plan_hash != planning_result.plan_hash:
+            raise ConsolidationFinalizationError(
+                f"{domain} resolution planning identity does not match planning_result.plan_hash"
+            )
+    identity_plan = finalize_consolidation_identity(
+        planning_result, fact_resolution, event_resolution, relationship_resolution
+    )
+    result = A5FinalizationResult(
+        planning_result=planning_result,
+        canonical_fact_set=build_canonical_fact_set(
+            planning_result, identity_plan, fact_resolution
+        ),
+        canonical_event_set=build_canonical_event_set(planning_result, identity_plan),
+        canonical_relationship_set=build_canonical_relationship_set(
+            planning_result, identity_plan
+        ),
+        story_conflict_set=build_fact_story_conflict_set(
+            planning_result, identity_plan, fact_resolution
+        ),
+    )
+    _validate_final_composition(result, identity_plan, fact_resolution)
+    return result
+
+
 __all__ = [
     "ConsolidationFinalizationError",
+    "A5FinalizationResult",
     "ConsolidationIdentityComponent",
     "ConsolidationIdentityPlan",
     "build_event_identity_components",
@@ -1105,5 +1527,7 @@ __all__ = [
     "build_canonical_event_set",
     "build_canonical_fact_set",
     "build_fact_story_conflict_set",
+    "build_canonical_relationship_set",
+    "finalize_consolidation",
     "finalize_consolidation_identity",
 ]

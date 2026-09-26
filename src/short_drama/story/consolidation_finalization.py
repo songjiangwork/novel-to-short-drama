@@ -1341,7 +1341,17 @@ def _validate_final_composition(
             raise ConsolidationFinalizationError("final fact decision lookup is ambiguous")
         decisions_by_id[decision.decision_id] = decision
     transition_decision_ids: set[str] = set()
-    for transition in result.canonical_fact_set.state_transitions:
+    for ordinal, transition in enumerate(
+        result.canonical_fact_set.state_transitions, start=1
+    ):
+        if transition.transition_id != _canonical_id("trans", ordinal):
+            raise ConsolidationFinalizationError(
+                "final StateTransition canonical id is invalid"
+            )
+        if transition.source_decision_ref in transition_decision_ids:
+            raise ConsolidationFinalizationError(
+                "final StateTransition source decision is duplicated"
+            )
         _require_unique_evidence(transition.evidence_refs, label=transition.transition_id)
         decision = decisions_by_id.get(transition.source_decision_ref)
         if (
@@ -1434,7 +1444,15 @@ def _validate_final_composition(
         raise ConsolidationFinalizationError("final relationship candidate coverage is not exact")
 
     conflict_decision_ids: set[str] = set()
-    for conflict in result.story_conflict_set.conflicts:
+    for ordinal, conflict in enumerate(result.story_conflict_set.conflicts, start=1):
+        if conflict.conflict_id != _canonical_id("conf", ordinal):
+            raise ConsolidationFinalizationError(
+                "final StoryConflict canonical id is invalid"
+            )
+        if len(conflict.decision_refs) == 1 and conflict.decision_refs[0] in conflict_decision_ids:
+            raise ConsolidationFinalizationError(
+                "final StoryConflict source decision is duplicated"
+            )
         _require_unique_evidence(conflict.evidence_refs, label=conflict.conflict_id)
         if (
             conflict.conflict_kind != "fact_conflict"

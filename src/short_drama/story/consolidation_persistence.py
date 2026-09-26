@@ -901,8 +901,10 @@ class ConsolidationPublication:
     """Outcome of an A5F2 validated publication.
 
     Carries the exact published A5 artifact refs (the six leaves, the manifest,
-    the PASS validation report) plus the CURRENT pointer target ref. A5F2 never
-    reuses (``reused`` is always ``False``); current-only exact reuse is A5F3.
+    the PASS validation report), the immutable current_pointer artifact ref
+    (``current_pointer_ref``), and the pointer target ref (which is the
+    ``consolidation_manifest_ref``). A5F2 never reuses (``reused`` is always
+    ``False``); current-only exact reuse is A5F3.
     """
 
     consolidation_candidate_index_ref: ArtifactRef
@@ -961,13 +963,22 @@ class ConsolidationPersistenceService:
         self, pointer_id: str
     ) -> tuple[ArtifactRef | None, ArtifactRef | None]:
         """Read the A5 CURRENT leniently: ``(pointer_ref, target_ref)`` or
-        ``(None, None)`` when absent."""
+        ``(None, None)`` when absent.
+
+        A5's frozen CURRENT contract requires ``PointerKind.CURRENT`` (never
+        ``CURRENT_APPROVED``). An existing pointer with a different kind is a
+        structural control-plane failure and fails closed.
+        """
         try:
             pointer_ref = self._pointers.resolve_current_pointer_ref(pointer_id)
             pointer = self._pointers.resolve_current(pointer_id)
-            return pointer_ref, pointer.target_ref
         except PointerNotFoundError:
             return None, None
+        if pointer.pointer_kind is not PointerKind.CURRENT:
+            raise StoryIntegrityError(
+                "A5 CURRENT pointer must use PointerKind.CURRENT"
+            )
+        return pointer_ref, pointer.target_ref
 
     def _verify_current_consolidation(
         self,

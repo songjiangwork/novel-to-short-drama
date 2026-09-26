@@ -38,7 +38,11 @@ from pathlib import Path
 
 import pytest
 
-from short_drama.artifacts import ArtifactNotFoundError, FileArtifactStore
+from short_drama.artifacts import (
+    ArtifactNotFoundError,
+    ArtifactRef,
+    FileArtifactStore,
+)
 from short_drama.foundation import (
     FilePointerStore,
     LineageRef,
@@ -1177,6 +1181,65 @@ def test_existing_current_corruption_fails_closed(tmp_path):
         )
     # The A5 CURRENT is unchanged (still the corrupt revision-1 target).
     assert _current_a5_target(tree) == pub.consolidation_manifest_ref
+
+
+def test_wrong_pointer_kind_fails_closed(tmp_path):
+    """A5 pointer with wrong kind (CURRENT_APPROVED) + valid manifest target
+    -> FAIL CLOSED for both require_current_validated and publish_validated.
+
+    The Foundation model rejects pointer_kind changes via CAS for an existing
+    pointer_id, so this exercises the production kind check via a narrowly
+    controlled monkeypatch of the pointer resolution seam (``resolve_current``
+    returns a ``CURRENT_APPROVED`` pointer with the valid A5 manifest target).
+
+    No new A5 revision is written.
+    """
+    tree, *_ = _build_tree_with_a4(tmp_path)
+    planning = _planning(tree)
+    first = _publish_a5(tree, planning)
+
+    # Monkeypatch resolve_current to return a CURRENT_APPROVED pointer (the
+    # real Foundation model rejects pointer_kind changes via CAS, so we
+    # exercise the production kind check via the resolution seam).
+    authority_ref = ArtifactRef(
+        artifact_type="approval_record",
+        artifact_id=f"{PROJECT}.{DOCUMENT}.approval",
+        revision=1,
+        content_hash="a" * 64,
+    )
+    original_resolve_current = tree.pointers.resolve_current
+
+    def fake_resolve_current(pointer_id):
+        pointer = original_resolve_current(pointer_id)
+        return replace(
+            pointer,
+            pointer_kind=PointerKind.CURRENT_APPROVED,
+            authority_ref=authority_ref,
+        )
+
+    tree.pointers.resolve_current = fake_resolve_current
+
+    service = ConsolidationPersistenceService(tree.store, tree.pointers)
+    # require_current_validated fails closed (wrong kind).
+    with pytest.raises(StoryIntegrityError, match="PointerKind.CURRENT"):
+        service.require_current_validated(
+            project_id=PROJECT,
+            document_id=DOCUMENT,
+            consolidation_profile_id=CONSOLIDATION_PROFILE_ID,
+        )
+    # publish_validated fails closed before a new revision.
+    base = a5_base_artifact_id(PROJECT, DOCUMENT, CONSOLIDATION_PROFILE_ID)
+    with pytest.raises(StoryIntegrityError, match="PointerKind.CURRENT"):
+        _publish_a5(tree, planning, service=service)
+    # No new A5 revision was written.
+    assert (
+        _highest_revision(
+            tree.store,
+            "consolidation_manifest",
+            consolidation_manifest_artifact_id(base),
+        )
+        == 1
+    )
 
 
 def test_wrong_logical_target_current_fails_closed(tmp_path):

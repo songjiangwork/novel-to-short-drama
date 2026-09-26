@@ -383,6 +383,66 @@ class TestMalformedFinalValidation:
         bad_set = replace(result.story_conflict_set, conflicts=(malformed,))
         self._assert_invalid(replace(result, story_conflict_set=bad_set), planning, fact_resolution, identity)
 
+    def test_duplicate_transition_decision_fails_closed(self):
+        planning, fact_resolution, identity, result = self._baseline()
+        transition = result.canonical_fact_set.state_transitions[0]
+        duplicate = replace(transition, transition_id="trans_000002")
+        bad_set = replace(
+            result.canonical_fact_set,
+            state_transitions=(transition, duplicate),
+        )
+        self._assert_invalid(
+            replace(result, canonical_fact_set=bad_set),
+            planning,
+            fact_resolution,
+            identity,
+        )
+
+    def test_duplicate_conflict_decision_fails_closed(self):
+        planning, fact_resolution, identity, result = self._baseline()
+        conflict = result.story_conflict_set.conflicts[0]
+        duplicate = replace(conflict, conflict_id="conf_000002")
+        bad_set = replace(
+            result.story_conflict_set,
+            conflicts=(conflict, duplicate),
+        )
+        self._assert_invalid(
+            replace(result, story_conflict_set=bad_set),
+            planning,
+            fact_resolution,
+            identity,
+        )
+
+    def test_transition_canonical_id_fails_closed(self):
+        planning, fact_resolution, identity, result = self._baseline()
+        transition = result.canonical_fact_set.state_transitions[0]
+        malformed = replace(transition, transition_id="trans_000002")
+        bad_set = replace(
+            result.canonical_fact_set,
+            state_transitions=(malformed,),
+        )
+        self._assert_invalid(
+            replace(result, canonical_fact_set=bad_set),
+            planning,
+            fact_resolution,
+            identity,
+        )
+
+    def test_conflict_canonical_id_fails_closed(self):
+        planning, fact_resolution, identity, result = self._baseline()
+        conflict = result.story_conflict_set.conflicts[0]
+        malformed = replace(conflict, conflict_id="conf_000002")
+        bad_set = replace(
+            result.story_conflict_set,
+            conflicts=(malformed,),
+        )
+        self._assert_invalid(
+            replace(result, story_conflict_set=bad_set),
+            planning,
+            fact_resolution,
+            identity,
+        )
+
     def test_relationship_state_change_emits_only_state_history(self):
         relationships = (_relationship(1, state="敌对"), _relationship(2, state="友好"))
         planning = _planning(relationships=relationships)

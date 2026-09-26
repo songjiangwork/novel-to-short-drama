@@ -347,6 +347,15 @@ from .consolidation_semantic import (
     load_relationship_semantic_profile,
     resolve_fact_semantic_ambiguity,
 )
+from .consolidation_finalization import (
+    ConsolidationFinalizationError,
+    ConsolidationIdentityComponent,
+    ConsolidationIdentityPlan,
+    build_event_identity_components,
+    build_fact_identity_components,
+    build_relationship_identity_components,
+    finalize_consolidation_identity,
+)
 from .extraction_batch import (
     ChunkExtractionBatchService,
     ChunkExtractionBatchSummary,
@@ -686,6 +695,13 @@ __all__ = [
     "load_fact_semantic_profile",
     "load_relationship_output_schema",
     "load_relationship_semantic_profile",
+    "ConsolidationFinalizationError",
+    "ConsolidationIdentityComponent",
+    "ConsolidationIdentityPlan",
+    "build_event_identity_components",
+    "build_fact_identity_components",
+    "build_relationship_identity_components",
+    "finalize_consolidation_identity",
     "a4_base_artifact_id",
     "a4_pointer_id",
     "a4_validation_artifact_id",

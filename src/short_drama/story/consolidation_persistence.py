@@ -585,6 +585,10 @@ def _verify_consolidation_manifest(
       * the manifest ref is the exact logical A5 manifest
         (``artifact_type == consolidation_manifest`` and
         ``artifact_id == <base>.manifest``);
+      * the manifest's OWN logical identity agrees with ``base``: the base
+        reconstructed from the manifest's ``project_id`` / ``document_id`` /
+        ``semantic_identity.consolidation_profile_id`` equals ``base`` (checked
+        before any leaf logical identity is trusted);
       * the upstream ``entity_map_ref`` is structurally an ``entity_map`` ref
         (A5F1 checks the type only; A4 CURRENT stability publication belongs
         to A5F2 and is deliberately NOT performed here);
@@ -602,6 +606,19 @@ def _verify_consolidation_manifest(
     if manifest_ref.artifact_id != consolidation_manifest_artifact_id(base):
         raise StoryIntegrityError(
             "ConsolidationManifest artifact_id does not match its logical identity"
+        )
+    # Bind the manifest's own content identity to ``base`` BEFORE trusting any
+    # leaf logical identity: the base must be exactly the deterministic base
+    # reconstructed from the manifest's own identity fields. This is checked by
+    # reconstructing ``base`` (never by splitting the base string on dots).
+    expected_base = a5_base_artifact_id(
+        manifest.project_id,
+        manifest.document_id,
+        manifest.semantic_identity.consolidation_profile_id,
+    )
+    if expected_base != base:
+        raise StoryIntegrityError(
+            "ConsolidationManifest content identity does not match the A5 base"
         )
     if manifest.entity_map_ref.artifact_type != ENTITY_MAP_ARTIFACT_TYPE:
         raise StoryIntegrityError(

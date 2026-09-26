@@ -105,7 +105,7 @@ from short_drama.story.consolidation_persistence import (
     persist_story_conflict_set,
     story_conflict_set_artifact_id,
 )
-from short_drama.story.errors import StoryIntegrityError
+from short_drama.story.errors import StoryIntegrityError, StoryPersistenceError
 from short_drama.story.reconciliation_persistence import ENTITY_MAP_ARTIFACT_TYPE
 
 
@@ -530,6 +530,78 @@ class TestIdentity:
 
 
 # ---------------------------------------------------------------------------
+# Package export seams
+# ---------------------------------------------------------------------------
+
+
+class TestPackageExports:
+    REQUIRED = (
+        "a5_base_artifact_id",
+        "a5_pointer_id",
+        "a5_validation_artifact_id",
+        "consolidation_candidate_index_artifact_id",
+        "consolidation_decision_set_artifact_id",
+        "canonical_fact_set_artifact_id",
+        "canonical_event_set_artifact_id",
+        "canonical_relationship_set_artifact_id",
+        "story_conflict_set_artifact_id",
+        "consolidation_manifest_artifact_id",
+        "next_a5_revision",
+        "persist_consolidation_candidate_index",
+        "persist_consolidation_decision_set",
+        "persist_canonical_fact_set",
+        "persist_canonical_event_set",
+        "persist_canonical_relationship_set",
+        "persist_story_conflict_set",
+        "persist_consolidation_manifest",
+        "load_consolidation_candidate_index",
+        "load_consolidation_decision_set",
+        "load_canonical_fact_set",
+        "load_canonical_event_set",
+        "load_canonical_relationship_set",
+        "load_story_conflict_set",
+        "load_consolidation_manifest",
+        "build_a5_validation_report",
+        "CANONICAL_EVENT_SET_ARTIFACT_TYPE",
+        "CANONICAL_FACT_SET_ARTIFACT_TYPE",
+        "CANONICAL_RELATIONSHIP_SET_ARTIFACT_TYPE",
+        "CONSOLIDATION_CANDIDATE_INDEX_ARTIFACT_TYPE",
+        "CONSOLIDATION_DECISION_SET_ARTIFACT_TYPE",
+        "CONSOLIDATION_MANIFEST_ARTIFACT_TYPE",
+        "STORY_CONFLICT_SET_ARTIFACT_TYPE",
+    )
+
+    PRIVATE = (
+        "_a5_revision_slots",
+        "_envelope",
+        "_put",
+        "_validate_schema",
+        "_load_typed",
+        "_verify_consolidation_manifest",
+        "_require_a5_validation_report",
+    )
+
+    def test_stable_a5f1_seams_importable_from_story(self):
+        import short_drama.story as story
+
+        for name in self.REQUIRED:
+            assert hasattr(story, name), (
+                f"{name} not importable from short_drama.story"
+            )
+            assert name in story.__all__, (
+                f"{name} missing from short_drama.story.__all__"
+            )
+
+    def test_private_helpers_are_not_exported(self):
+        import short_drama.story as story
+
+        for name in self.PRIVATE:
+            assert name not in story.__all__, (
+                f"{name} should stay private to consolidation_persistence"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Shared revision allocation
 # ---------------------------------------------------------------------------
 
@@ -717,6 +789,71 @@ class TestRoundTrip:
 
 
 # ---------------------------------------------------------------------------
+# Immutable-write semantics
+# ---------------------------------------------------------------------------
+
+
+class TestImmutableWrite:
+    def test_conflicting_content_fails_closed_and_preserves_original(self, store):
+        artifact_id = canonical_fact_set_artifact_id(BASE)
+        original = make_canonical_fact_set()
+        ref1 = persist_canonical_fact_set(
+            store, original, artifact_id=artifact_id, revision=1
+        )
+
+        # Different semantic content at the same logical id + revision.
+        different = CanonicalFactSet(
+            schema_version=1,
+            facts=(
+                CanonicalFact(
+                    fact_id="fact_999999",
+                    fact_type="identity",
+                    statement_zh="完全不同的事实内容。",
+                    subject_refs=("char_9999",),
+                    object_refs=(),
+                    candidate_fact_refs=(FACTOR_LEFT,),
+                    evidence_refs=(make_evidence(),),
+                    first_source_order="CH003_C005:P0017",
+                    continuity_relevant=True,
+                ),
+            ),
+            state_transitions=(),
+        )
+        assert different != original
+
+        # FAIL CLOSED through the A5 persistence wrapper (never overwrite).
+        with pytest.raises(StoryPersistenceError):
+            persist_canonical_fact_set(
+                store, different, artifact_id=artifact_id, revision=1
+            )
+
+        # The original artifact at that logical id + revision is unchanged.
+        loaded = load_canonical_fact_set(
+            store, ref1, expected_artifact_id=artifact_id
+        )
+        assert loaded == original
+        assert store.get(
+            CANONICAL_FACT_SET_ARTIFACT_TYPE, artifact_id, 1
+        ).content_hash == ref1.content_hash
+
+    def test_same_payload_is_idempotent(self, store):
+        artifact_id = canonical_fact_set_artifact_id(BASE)
+        ref1 = persist_canonical_fact_set(
+            store, make_canonical_fact_set(), artifact_id=artifact_id, revision=1
+        )
+        # Persisting the exact same payload to the same identity is idempotent
+        # (matches existing FileArtifactStore semantics).
+        ref2 = persist_canonical_fact_set(
+            store, make_canonical_fact_set(), artifact_id=artifact_id, revision=1
+        )
+        assert ref2 == ref1
+        loaded = load_canonical_fact_set(
+            store, ref1, expected_artifact_id=artifact_id
+        )
+        assert loaded == make_canonical_fact_set()
+
+
+# ---------------------------------------------------------------------------
 # Fail-closed loaders
 # ---------------------------------------------------------------------------
 
@@ -859,6 +996,42 @@ class TestManifestVerification:
         cp._verify_consolidation_manifest(
             store, base=BASE, manifest=manifest, manifest_ref=manifest_ref
         )
+
+    def test_wrong_project_id_fails_closed(self, store):
+        manifest, manifest_ref, _, _ = make_all(store, revision=1)
+        new_manifest = dataclasses.replace(manifest, project_id="proj_9999")
+        with pytest.raises(
+            StoryIntegrityError,
+            match="content identity does not match the A5 base",
+        ):
+            cp._verify_consolidation_manifest(
+                store, base=BASE, manifest=new_manifest, manifest_ref=manifest_ref
+            )
+
+    def test_wrong_document_id_fails_closed(self, store):
+        manifest, manifest_ref, _, _ = make_all(store, revision=1)
+        new_manifest = dataclasses.replace(manifest, document_id="doc_9999")
+        with pytest.raises(
+            StoryIntegrityError,
+            match="content identity does not match the A5 base",
+        ):
+            cp._verify_consolidation_manifest(
+                store, base=BASE, manifest=new_manifest, manifest_ref=manifest_ref
+            )
+
+    def test_wrong_consolidation_profile_id_fails_closed(self, store):
+        manifest, manifest_ref, _, _ = make_all(store, revision=1)
+        new_semantic = dataclasses.replace(
+            manifest.semantic_identity, consolidation_profile_id="other-profile"
+        )
+        new_manifest = dataclasses.replace(manifest, semantic_identity=new_semantic)
+        with pytest.raises(
+            StoryIntegrityError,
+            match="content identity does not match the A5 base",
+        ):
+            cp._verify_consolidation_manifest(
+                store, base=BASE, manifest=new_manifest, manifest_ref=manifest_ref
+            )
 
     def test_wrong_root_type(self, store):
         manifest, manifest_ref, _, _ = make_all(store, revision=1)
@@ -1020,6 +1193,27 @@ class TestValidationReport:
                 store,
                 artifact_id=a5_validation_artifact_id(BASE),
                 revision=manifest_ref.revision,
+                expected_report=expected,
+            )
+
+    def test_require_wrong_revision_fails_closed(self, store):
+        # manifest revision = 1; the EXACT matching report is persisted only at
+        # revision = 2. The lookup for revision 1 must FAIL CLOSED (no
+        # historical fallback / no scan of revision 2).
+        manifest, manifest_ref = self._manifest(store)
+        assert manifest_ref.revision == 1
+        expected = build_a5_validation_report(manifest, manifest_ref)
+        persist_validation_report(
+            store,
+            expected,
+            artifact_id=a5_validation_artifact_id(BASE),
+            revision=2,
+        )
+        with pytest.raises(StoryIntegrityError, match="missing or invalid"):
+            cp._require_a5_validation_report(
+                store,
+                artifact_id=a5_validation_artifact_id(BASE),
+                revision=1,
                 expected_report=expected,
             )
 

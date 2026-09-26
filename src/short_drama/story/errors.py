@@ -149,6 +149,18 @@ class ConsolidationCurrentMissingError(StoryError):
     """
 
 
+class ConsolidationUpstreamUnstableError(StoryError):
+    """The upstream A4 CURRENT advanced during an A5 run; publication fails closed.
+
+    A5F2 publishes an A5 state against the exact A4 EntityMap + A3 input identity
+    that the A5 run consumed. If the A4 CURRENT pointer (or its A3 input identity)
+    advances between the A5 run start and the publication CAS, the in-memory A5
+    state is stale and must never be published. This is an A5F2 upstream-stability
+    failure, distinct from the A5B missing-CURRENT failure
+    (``ConsolidationCurrentMissingError``) and from A5A domain-model errors.
+    """
+
+
 class ReconciliationPlanningError(StoryError):
     """A4B deterministic reconciliation planning failed.
 

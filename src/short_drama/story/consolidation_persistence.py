@@ -63,6 +63,7 @@ from .consolidation import (
     CanonicalFactSet,
     CanonicalRelationshipSet,
     ConsolidationCandidateIndex,
+    ConsolidationCoverageSummary,
     ConsolidationDecisionSet,
     ConsolidationManifest,
     ConsolidationProfile,
@@ -70,14 +71,18 @@ from .consolidation import (
     PromptAssetIdentity,
     StoryConflictSet,
 )
-from .consolidation_finalization import A5FinalizationResult
+from .consolidation_finalization import A5FinalizationResult, finalize_consolidation
 from .consolidation_planning import ConsolidationInputSnapshot, ConsolidationPlanningResult
 from .consolidation_semantic import (
     EventSemanticPreparation,
+    EventSemanticResolutionResult,
     FactSemanticPreparation,
+    FactSemanticResolutionResult,
     RelationshipSemanticPreparation,
+    RelationshipSemanticResolutionResult,
 )
 from .errors import (
+    ConsolidationCurrentMissingError,
     ConsolidationUpstreamUnstableError,
     StoryIntegrityError,
     StoryPersistenceError,
@@ -811,8 +816,12 @@ def build_a5_semantic_identity(
     """Build the backend-neutral A5 semantic identity from the three domain
     semantic preparations.
 
-    The three preparations must agree on the consolidation profile id and the
-    deterministic plan hash; otherwise the identity is undefined (fail closed).
+    The three preparations must agree on the EXACT consolidation profile (full
+    value equality, not merely the profile id) and the EXACT
+    :class:`ConsolidationPlanningResult` (full value equality, not merely the
+    plan hash); otherwise the identity is undefined (fail closed). This is the
+    frozen A5F2 publication-authority gate: a same-id / same-plan-hash but
+    otherwise-different profile or planning object is a structural failure.
     The prompt / output-schema asset identities are collected in domain order
     (fact, event, relationship). The semantic request hashes are the
     domain-ordered concatenation of the three preparations' request hashes
@@ -822,21 +831,18 @@ def build_a5_semantic_identity(
     fact_profile = fact_preparation.consolidation_profile
     event_profile = event_preparation.consolidation_profile
     rel_profile = relationship_preparation.consolidation_profile
-    if not (
-        fact_profile.profile_id
-        == event_profile.profile_id
-        == rel_profile.profile_id
-    ):
+    if not (fact_profile == event_profile == rel_profile):
         raise StoryIntegrityError(
             "the three domain semantic preparations disagree on the "
-            "consolidation profile id"
+            "consolidation profile"
         )
-    fact_plan = fact_preparation.planning_result.plan_hash
-    event_plan = event_preparation.planning_result.plan_hash
-    rel_plan = relationship_preparation.planning_result.plan_hash
+    fact_plan = fact_preparation.planning_result
+    event_plan = event_preparation.planning_result
+    rel_plan = relationship_preparation.planning_result
     if not (fact_plan == event_plan == rel_plan):
         raise StoryIntegrityError(
-            "the three domain semantic preparations disagree on the plan hash"
+            "the three domain semantic preparations disagree on the "
+            "planning result"
         )
     return A5SemanticIdentity(
         consolidation_profile_id=fact_profile.profile_id,
@@ -881,7 +887,7 @@ def build_a5_semantic_identity(
                 schema_hash=relationship_preparation.output_schema_hash,
             ),
         ),
-        plan_hash=fact_plan,
+        plan_hash=fact_plan.plan_hash,
         semantic_request_hashes=(
             fact_preparation.semantic_request_hashes
             + event_preparation.semantic_request_hashes
@@ -909,6 +915,30 @@ class ConsolidationPublication:
     validation_report_ref: ArtifactRef
     current_pointer_ref: ArtifactRef
     reused: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedConsolidationCurrent:
+    """A fully-verified, current-eligible A5 CURRENT manifest resolved read-only.
+
+    A5F3 (and any downstream A5 consumer) must consume A5 strictly through its
+    CURRENT pointer. This is the return value of
+    :meth:`ConsolidationPersistenceService.require_current_validated`: the exact
+    CURRENT :class:`ConsolidationManifest` (already verified end-to-end: logical
+    target, structural bundle, leaf resolvability, and the exact PASS A5
+    ValidationReport), its artifact ref, the exact PASS validation-report ref,
+    and the CURRENT pointer ref.
+
+    This is a read-only downstream seam: it performs no writes and no CURRENT
+    mutation. It raises :class:`ConsolidationCurrentMissingError` when no
+    current-eligible A5 CURRENT exists (a structural A5 failure, not a cache
+    miss).
+    """
+
+    manifest: ConsolidationManifest
+    manifest_ref: ArtifactRef
+    validation_report_ref: ArtifactRef
+    current_pointer_ref: ArtifactRef
 
 
 class ConsolidationPersistenceService:
@@ -939,34 +969,142 @@ class ConsolidationPersistenceService:
         except PointerNotFoundError:
             return None, None
 
-    @staticmethod
-    def _verify_semantic_identity_binding(
+    def _verify_current_consolidation(
+        self,
         *,
-        consolidation_profile: ConsolidationProfile,
-        semantic_identity: A5SemanticIdentity,
-        planning_result: ConsolidationPlanningResult,
-    ) -> None:
-        """Bind the semantic identity to the publication profile + planning result.
+        base: str,
+        pointer_id: str,
+        current_pointer_ref: ArtifactRef | None,
+        current_manifest_ref: ArtifactRef,
+    ) -> ConsolidationManifest:
+        """Fully verify the exact CURRENT A5 manifest; fail closed on corruption.
 
-        The semantic identity must pin the exact consolidation profile (id +
-        content hash) and the exact deterministic plan hash the run was built
-        from; a mismatch is a structural A5 integrity failure.
+        The shared :func:`_verify_consolidation_manifest` structural verifier is
+        reused so publication revalidation and CURRENT verification enforce
+        byte-identical checks (logical target, base identity, leaf logical
+        ids / types, shared run revision, leaf resolvability). In addition the
+        exact PASS A5 ValidationReport is required and the CURRENT pointer must
+        be stable for the duration of the verification.
         """
-        if semantic_identity.consolidation_profile_id != consolidation_profile.profile_id:
+        if current_manifest_ref.artifact_type != CONSOLIDATION_MANIFEST_ARTIFACT_TYPE:
             raise StoryIntegrityError(
-                "semantic_identity.consolidation_profile_id does not match the "
-                "publication consolidation profile"
+                "A5 CURRENT pointer targets a different artifact type"
             )
-        if semantic_identity.consolidation_profile_hash != consolidation_profile.content_hash():
+        if current_manifest_ref.artifact_id != consolidation_manifest_artifact_id(base):
             raise StoryIntegrityError(
-                "semantic_identity.consolidation_profile_hash does not match the "
-                "publication consolidation profile content hash"
+                "A5 CURRENT pointer targets a different logical A5 manifest"
             )
-        if semantic_identity.plan_hash != planning_result.plan_hash:
-            raise StoryIntegrityError(
-                "semantic_identity.plan_hash does not match the publication "
-                "planning result plan hash"
+        manifest = load_consolidation_manifest(
+            self._store,
+            current_manifest_ref,
+            expected_artifact_id=consolidation_manifest_artifact_id(base),
+        )
+        _verify_consolidation_manifest(
+            self._store,
+            base=base,
+            manifest=manifest,
+            manifest_ref=current_manifest_ref,
+        )
+        expected_report = build_a5_validation_report(manifest, current_manifest_ref)
+        _require_a5_validation_report(
+            self._store,
+            artifact_id=a5_validation_artifact_id(base),
+            revision=current_manifest_ref.revision,
+            expected_report=expected_report,
+        )
+        if self._pointers.resolve_current_pointer_ref(pointer_id) != current_pointer_ref:
+            raise StoryPersistenceError(
+                "A5 CURRENT pointer changed during verification"
             )
+        return manifest
+
+    def require_current_validated(
+        self,
+        *,
+        project_id: str,
+        document_id: str,
+        consolidation_profile_id: str,
+    ) -> ValidatedConsolidationCurrent:
+        """Resolve the exact current-eligible A5 CURRENT manifest, read-only.
+
+        A5F3 (and any downstream A5 consumer) must consume A5 strictly through
+        its CURRENT pointer. This method verifies the exact CURRENT end-to-end
+        (byte-identical to the A5F2 publication verifier) and returns it,
+        together with the exact PASS validation-report ref and the CURRENT
+        pointer ref. It performs no writes and no CURRENT mutation.
+
+        A missing CURRENT is a structural A5 failure and raises
+        :class:`ConsolidationCurrentMissingError` (not a normal cache miss).
+        """
+        base = a5_base_artifact_id(project_id, document_id, consolidation_profile_id)
+        pointer_id = a5_pointer_id(project_id, document_id, consolidation_profile_id)
+        current_pointer_ref, current_manifest_ref = self._current_a5_pointer(pointer_id)
+        if current_manifest_ref is None:
+            raise ConsolidationCurrentMissingError(
+                f"no current-eligible A5 CURRENT manifest for "
+                f"{project_id}/{document_id}/{consolidation_profile_id}; "
+                "A5 requires a valid A5 CURRENT (structural failure, not a "
+                "cache miss)"
+            )
+        manifest = self._verify_current_consolidation(
+            base=base,
+            pointer_id=pointer_id,
+            current_pointer_ref=current_pointer_ref,
+            current_manifest_ref=current_manifest_ref,
+        )
+        assert current_pointer_ref is not None
+        return ValidatedConsolidationCurrent(
+            manifest=manifest,
+            manifest_ref=current_manifest_ref,
+            validation_report_ref=_require_a5_validation_report(
+                self._store,
+                artifact_id=a5_validation_artifact_id(base),
+                revision=current_manifest_ref.revision,
+                expected_report=build_a5_validation_report(
+                    manifest, current_manifest_ref
+                ),
+            ),
+            current_pointer_ref=current_pointer_ref,
+        )
+
+    @staticmethod
+    def _final_coverage_summary(
+        *,
+        planning_result: ConsolidationPlanningResult,
+        fact_resolution: FactSemanticResolutionResult,
+        event_resolution: EventSemanticResolutionResult,
+        relationship_resolution: RelationshipSemanticResolutionResult,
+        finalization_result: A5FinalizationResult,
+    ) -> ConsolidationCoverageSummary:
+        """Build the exact FINAL A5 coverage summary.
+
+        Derived from the planning candidate index (candidate counts) and the
+        A5E finalization result (canonical / conflict counts) -- NOT the A5B
+        Phase-A placeholder (which carries zero final counts). The uncertain
+        decision count is the number of complete fact / event / relationship
+        decisions whose decision is ``uncertain``.
+        """
+        uncertain_decision_count = sum(
+            1
+            for decision in (
+                *fact_resolution.all_fact_decisions,
+                *event_resolution.all_event_decisions,
+                *relationship_resolution.all_relationship_decisions,
+            )
+            if decision.decision == "uncertain"
+        )
+        return ConsolidationCoverageSummary(
+            fact_candidate_count=len(planning_result.index.facts),
+            event_candidate_count=len(planning_result.index.events),
+            relationship_candidate_count=len(planning_result.index.relationships),
+            canonical_fact_count=len(finalization_result.canonical_fact_set.facts),
+            canonical_event_count=len(finalization_result.canonical_event_set.events),
+            canonical_relationship_count=len(
+                finalization_result.canonical_relationship_set.relationships
+            ),
+            uncertain_decision_count=uncertain_decision_count,
+            story_conflict_count=len(finalization_result.story_conflict_set.conflicts),
+        )
 
     def _require_a4_upstream_stable(
         self,
@@ -1008,59 +1146,166 @@ class ConsolidationPersistenceService:
         project_id: str,
         document_id: str,
         consolidation_profile: ConsolidationProfile,
-        semantic_identity: A5SemanticIdentity,
+        planning_result: ConsolidationPlanningResult,
+        fact_resolution: FactSemanticResolutionResult,
+        event_resolution: EventSemanticResolutionResult,
+        relationship_resolution: RelationshipSemanticResolutionResult,
         finalization_result: A5FinalizationResult,
-        decision_set: ConsolidationDecisionSet,
     ) -> ConsolidationPublication:
         """Publish a validated A5 state and compare-and-set the A5 CURRENT.
 
-        Order: (1) bind the semantic identity to the profile + planning result,
-        (2) allocate the shared run revision (skip orphans), (3) persist the six
-        leaves, (4) build + persist the manifest, (5) build + persist the
-        deterministic PASS A5 ValidationReport, (6) re-check upstream A4 CURRENT
-        stability, (7) CAS the A5 CURRENT. A failure at any step leaves the
-        existing A5 CURRENT untouched (any new artifacts remain historical).
+        The A5F2 publication boundary. The backend-neutral A5 semantic identity
+        and the exact :class:`ConsolidationDecisionSet` are assembled from the
+        three domain semantic resolution results (NOT taken from the caller), so
+        a caller cannot smuggle in a mismatched publication authority.
+
+        Frozen order (fail closed at any step; the existing A5 CURRENT is left
+        untouched and any new artifacts remain historical):
+
+          1. in-memory preflight: type checks, project/document binding, exact
+             planning / preparation / profile binding (value equality), and an
+             independent A5E re-finalization (the supplied finalization must
+             exactly match a fresh :func:`finalize_consolidation`);
+          2. build the A5 semantic identity, the decision set, and the exact
+             final coverage summary (all in-memory);
+          3. read the A5 CURRENT leniently; if it exists, fully verify it;
+          4. allocate the shared run revision (skip orphans);
+          5. persist the six leaves (shared run revision);
+          6. persist the manifest;
+          7. reload + verify the persisted manifest;
+          8. build + persist + reload + verify the deterministic PASS A5
+             ValidationReport;
+          9. re-check upstream A4 CURRENT stability;
+          10. CAS the A5 CURRENT (``PointerKind.CURRENT``; no authority ref).
         """
+        # (1) In-memory preflight.
         if not isinstance(consolidation_profile, ConsolidationProfile):
             raise StoryIntegrityError(
                 "consolidation_profile must be a ConsolidationProfile"
             )
-        if not isinstance(semantic_identity, A5SemanticIdentity):
+        if not isinstance(planning_result, ConsolidationPlanningResult):
             raise StoryIntegrityError(
-                "semantic_identity must be an A5SemanticIdentity"
+                "planning_result must be a ConsolidationPlanningResult"
+            )
+        if not isinstance(fact_resolution, FactSemanticResolutionResult):
+            raise StoryIntegrityError(
+                "fact_resolution must be a FactSemanticResolutionResult"
+            )
+        if not isinstance(event_resolution, EventSemanticResolutionResult):
+            raise StoryIntegrityError(
+                "event_resolution must be an EventSemanticResolutionResult"
+            )
+        if not isinstance(relationship_resolution, RelationshipSemanticResolutionResult):
+            raise StoryIntegrityError(
+                "relationship_resolution must be a "
+                "RelationshipSemanticResolutionResult"
             )
         if not isinstance(finalization_result, A5FinalizationResult):
             raise StoryIntegrityError(
                 "finalization_result must be an A5FinalizationResult"
             )
-        if not isinstance(decision_set, ConsolidationDecisionSet):
+
+        snapshot = planning_result.snapshot
+
+        # Project/document binding: the planning must be bound to the requested
+        # project / document (not merely to some A4 CURRENT).
+        if snapshot.source_document.project_id != project_id:
             raise StoryIntegrityError(
-                "decision_set must be a ConsolidationDecisionSet"
+                "planning_result source_document.project_id does not match the "
+                "publication project_id"
+            )
+        if snapshot.source_document.document_id != document_id:
+            raise StoryIntegrityError(
+                "planning_result source_document.document_id does not match the "
+                "publication document_id"
             )
 
-        planning_result = finalization_result.planning_result
-        snapshot = planning_result.snapshot
+        # Exact planning / preparation / profile binding (value equality): every
+        # domain resolution and its preparation, and the finalization, must be
+        # built from the EXACT planning result and consolidation profile the
+        # publication is publishing.
+        for domain, resolution in (
+            ("fact", fact_resolution),
+            ("event", event_resolution),
+            ("relationship", relationship_resolution),
+        ):
+            if resolution.planning_result != planning_result:
+                raise StoryIntegrityError(
+                    f"{domain}_resolution.planning_result does not exactly "
+                    "match the publication planning_result"
+                )
+            if resolution.preparation.planning_result != planning_result:
+                raise StoryIntegrityError(
+                    f"{domain}_resolution.preparation.planning_result does not "
+                    "exactly match the publication planning_result"
+                )
+            if resolution.preparation.consolidation_profile != consolidation_profile:
+                raise StoryIntegrityError(
+                    f"{domain}_resolution.preparation.consolidation_profile does "
+                    "not exactly match the publication consolidation profile"
+                )
+        if finalization_result.planning_result != planning_result:
+            raise StoryIntegrityError(
+                "finalization_result.planning_result does not exactly match the "
+                "publication planning_result"
+            )
+
+        # Independent A5E re-finalization: the supplied finalization must
+        # exactly match a fresh finalize_consolidation run (0 new artifacts on
+        # a mismatch).
+        expected_finalization = finalize_consolidation(
+            planning_result,
+            fact_resolution,
+            event_resolution,
+            relationship_resolution,
+        )
+        if expected_finalization != finalization_result:
+            raise StoryIntegrityError(
+                "the supplied finalization_result does not exactly match the "
+                "independently re-finalized A5E result"
+            )
+
         profile_id = consolidation_profile.profile_id
         base = a5_base_artifact_id(project_id, document_id, profile_id)
         pointer_id = a5_pointer_id(project_id, document_id, profile_id)
-        reconciliation_profile_id = (
-            snapshot.entity_map.semantic_identity.reconciliation_profile_id
-        )
 
-        # (1) Bind the semantic identity to the profile + planning result.
-        self._verify_semantic_identity_binding(
-            consolidation_profile=consolidation_profile,
-            semantic_identity=semantic_identity,
+        # (2) Build the backend-neutral A5 semantic identity, the decision set,
+        # and the exact final coverage summary (all in-memory).
+        semantic_identity = build_a5_semantic_identity(
+            fact_resolution.preparation,
+            event_resolution.preparation,
+            relationship_resolution.preparation,
+        )
+        decision_set = ConsolidationDecisionSet(
+            schema_version=1,
+            fact_decisions=fact_resolution.all_fact_decisions,
+            event_decisions=event_resolution.all_event_decisions,
+            relationship_decisions=relationship_resolution.all_relationship_decisions,
+        )
+        coverage_summary = self._final_coverage_summary(
             planning_result=planning_result,
+            fact_resolution=fact_resolution,
+            event_resolution=event_resolution,
+            relationship_resolution=relationship_resolution,
+            finalization_result=finalization_result,
         )
 
-        # (2) Read the A5 CURRENT leniently and allocate the shared run revision.
+        # (3) Read the A5 CURRENT leniently; if it exists, fully verify it.
         current_pointer_ref, current_manifest_ref = self._current_a5_pointer(pointer_id)
+        if current_manifest_ref is not None:
+            self._verify_current_consolidation(
+                base=base,
+                pointer_id=pointer_id,
+                current_pointer_ref=current_pointer_ref,
+                current_manifest_ref=current_manifest_ref,
+            )
+
+        # (4) Allocate the shared run revision (skip orphans).
         revision = next_a5_revision(
             self._store, base=base, current_manifest_ref=current_manifest_ref
         )
 
-        # (3) Persist the six leaves (shared run revision).
+        # (5) Persist the six leaves (shared run revision).
         index_ref = persist_consolidation_candidate_index(
             self._store,
             planning_result.index,
@@ -1098,7 +1343,7 @@ class ConsolidationPersistenceService:
             revision=revision,
         )
 
-        # (4) Build + persist the manifest.
+        # (6) Build + persist the manifest.
         manifest = ConsolidationManifest(
             schema_version=CONSOLIDATION_MANIFEST_SCHEMA_VERSION,
             project_id=project_id,
@@ -1112,7 +1357,7 @@ class ConsolidationPersistenceService:
             story_conflict_set_ref=conflict_ref,
             semantic_identity=semantic_identity,
             upstream_identity=A5UpstreamIdentity(a3_input=snapshot.a3_input),
-            coverage_summary=planning_result.coverage,
+            coverage_summary=coverage_summary,
         )
         manifest_ref = persist_consolidation_manifest(
             self._store,
@@ -1121,8 +1366,25 @@ class ConsolidationPersistenceService:
             revision=revision,
         )
 
-        # (5) Build + persist the deterministic PASS A5 ValidationReport.
-        report = build_a5_validation_report(manifest, manifest_ref)
+        # (7) Reload + verify the persisted manifest (byte-identical re-check).
+        persisted_manifest = load_consolidation_manifest(
+            self._store,
+            manifest_ref,
+            expected_artifact_id=consolidation_manifest_artifact_id(base),
+        )
+        if persisted_manifest != manifest:
+            raise StoryIntegrityError(
+                "persisted A5 manifest does not match the in-memory manifest"
+            )
+        _verify_consolidation_manifest(
+            self._store,
+            base=base,
+            manifest=persisted_manifest,
+            manifest_ref=manifest_ref,
+        )
+
+        # (8) Build + persist + reload + verify the deterministic PASS report.
+        report = build_a5_validation_report(persisted_manifest, manifest_ref)
         if report.summary.result is not ValidationResult.PASS:
             raise StoryIntegrityError(
                 "A5 ValidationReport is not PASS; manifest cannot become current"
@@ -1140,7 +1402,10 @@ class ConsolidationPersistenceService:
             expected_report=report,
         )
 
-        # (6) Re-check upstream A4 CURRENT stability (before the CAS).
+        # (9) Re-check upstream A4 CURRENT stability (before the CAS).
+        reconciliation_profile_id = (
+            snapshot.entity_map.semantic_identity.reconciliation_profile_id
+        )
         self._require_a4_upstream_stable(
             project_id=project_id,
             document_id=document_id,
@@ -1148,9 +1413,9 @@ class ConsolidationPersistenceService:
             snapshot=snapshot,
         )
 
-        # (7) CAS the A5 CURRENT (CURRENT kind; no authority ref).
+        # (10) CAS the A5 CURRENT (CURRENT kind; no authority ref).
         try:
-            self._pointers.compare_and_set(
+            pointer_ref = self._pointers.compare_and_set(
                 pointer_id=pointer_id,
                 pointer_kind=PointerKind.CURRENT,
                 expected_pointer_ref=current_pointer_ref,
@@ -1171,7 +1436,7 @@ class ConsolidationPersistenceService:
             story_conflict_set_ref=conflict_ref,
             consolidation_manifest_ref=manifest_ref,
             validation_report_ref=report_ref,
-            current_pointer_ref=manifest_ref,
+            current_pointer_ref=pointer_ref,
             reused=False,
         )
 
@@ -1204,6 +1469,7 @@ __all__ = [
     "consolidation_manifest_artifact_id",
     "ConsolidationPersistenceService",
     "ConsolidationPublication",
+    "ValidatedConsolidationCurrent",
     "load_canonical_event_set",
     "load_canonical_fact_set",
     "load_canonical_relationship_set",

@@ -22,10 +22,13 @@ from short_drama.story import (
     IndexedFactCandidate,
     IndexedRelationshipCandidate,
     RelationshipSemanticResolutionResult,
+    RelationshipSemanticDecision,
     build_canonical_relationship_set,
     finalize_consolidation,
+    finalize_consolidation_identity,
 )
 from short_drama.story.extraction import EvidenceRef
+from short_drama.story.consolidation_finalization import _validate_final_composition
 
 
 def _artifact() -> ArtifactRef:
@@ -277,3 +280,135 @@ class TestFinalComposition:
             fr, er, rr = self._resolutions(planning)
             outputs.append(finalize_consolidation(planning, fr, er, rr).to_dict())
         assert outputs[0] == outputs[1]
+
+
+class TestMalformedFinalValidation:
+    """Lock down the private final-composition invariant boundary directly."""
+
+    def _baseline(self):
+        facts = (_fact(1), _fact(2), _fact(3))
+        relationships = (_relationship(1, state="敌对"), _relationship(2, state="友好"))
+        planning = _planning(facts=facts, relationships=relationships)
+        f1, f2, f3 = (fact.global_candidate_ref for fact in facts)
+        planning = replace(
+            planning,
+            fact_pair_plans=(
+                _Pair(*sorted((f1, f2))),
+                _Pair(*sorted((f1, f3))),
+            ),
+        )
+        decisions = (
+            _fact_decision(1, f1, f2, "state_change"),
+            _fact_decision(2, f1, f3, "conflict"),
+        )
+        resolutions = (
+            FactSemanticResolutionResult(planning, None, (), decisions, ()),
+            EventSemanticResolutionResult(planning, None, (), (), ()),
+            RelationshipSemanticResolutionResult(planning, None, (), (), ()),
+        )
+        identity = finalize_consolidation_identity(planning, *resolutions)
+        result = finalize_consolidation(planning, *resolutions)
+        return planning, resolutions[0], identity, result
+
+    def _assert_invalid(self, result, planning, fact_resolution, identity):
+        with pytest.raises(ConsolidationFinalizationError):
+            _validate_final_composition(result, identity, fact_resolution)
+
+    @pytest.mark.parametrize("mutation", ["outside", "wrong_state", "wrong_evidence", "wrong_rank", "duplicate_ref"])
+    def test_malformed_relationship_state_fails_closed(self, mutation):
+        planning, fact_resolution, identity, result = self._baseline()
+        relationship = result.canonical_relationship_set.relationships[0]
+        state = relationship.state_history[0]
+        if mutation == "outside":
+            malformed = replace(state, candidate_relationship_refs=("CH001_C001:cand_rel_999",))
+        elif mutation == "wrong_state":
+            malformed = replace(state, state_zh="错误状态")
+        elif mutation == "wrong_evidence":
+            malformed = replace(state, evidence_refs=(_evidence(999),))
+        elif mutation == "wrong_rank":
+            malformed = replace(state, narrative_order=state.narrative_order + 1)
+        else:
+            malformed = replace(
+                state,
+                candidate_relationship_refs=(
+                    state.candidate_relationship_refs[0],
+                    state.candidate_relationship_refs[0],
+                ),
+            )
+        bad_relationship = replace(relationship, state_history=(malformed, *relationship.state_history[1:]))
+        bad_set = replace(result.canonical_relationship_set, relationships=(bad_relationship,))
+        self._assert_invalid(replace(result, canonical_relationship_set=bad_set), planning, fact_resolution, identity)
+
+    @pytest.mark.parametrize(
+        "mutation",
+        ["unknown_from", "unknown_to", "same_endpoint", "missing_decision", "wrong_decision_kind", "wrong_evidence"],
+    )
+    def test_malformed_state_transition_fails_closed(self, mutation):
+        planning, fact_resolution, identity, result = self._baseline()
+        transition = result.canonical_fact_set.state_transitions[0]
+        if mutation == "unknown_from":
+            malformed = replace(transition, from_fact_id="fact_999999")
+        elif mutation == "unknown_to":
+            malformed = replace(transition, to_fact_id="fact_999999")
+        elif mutation == "same_endpoint":
+            malformed = replace(transition, to_fact_id=transition.from_fact_id)
+        elif mutation == "missing_decision":
+            malformed = replace(transition, source_decision_ref="missing")
+        elif mutation == "wrong_decision_kind":
+            malformed = replace(transition, source_decision_ref="dec_2")
+        else:
+            malformed = replace(transition, evidence_refs=(_evidence(998),))
+        bad_set = replace(result.canonical_fact_set, state_transitions=(malformed,))
+        self._assert_invalid(replace(result, canonical_fact_set=bad_set), planning, fact_resolution, identity)
+
+    @pytest.mark.parametrize(
+        "mutation",
+        ["unknown_fact", "relationship_id", "non_fact_candidate", "missing_decision", "wrong_decision_kind", "wrong_evidence"],
+    )
+    def test_malformed_story_conflict_fails_closed(self, mutation):
+        planning, fact_resolution, identity, result = self._baseline()
+        conflict = result.story_conflict_set.conflicts[0]
+        if mutation == "unknown_fact":
+            malformed = replace(conflict, fact_ids=("fact_999999", conflict.fact_ids[1]))
+        elif mutation == "relationship_id":
+            malformed = replace(conflict, relationship_ids=("rel_000001",))
+        elif mutation == "non_fact_candidate":
+            malformed = replace(conflict, candidate_refs=("CH001_C001:cand_rel_001", conflict.candidate_refs[1]))
+        elif mutation == "missing_decision":
+            malformed = replace(conflict, decision_refs=("missing",))
+        elif mutation == "wrong_decision_kind":
+            malformed = replace(conflict, decision_refs=("dec_1",))
+        else:
+            malformed = replace(conflict, evidence_refs=(_evidence(997),))
+        bad_set = replace(result.story_conflict_set, conflicts=(malformed,))
+        self._assert_invalid(replace(result, story_conflict_set=bad_set), planning, fact_resolution, identity)
+
+    def test_relationship_state_change_emits_only_state_history(self):
+        relationships = (_relationship(1, state="敌对"), _relationship(2, state="友好"))
+        planning = _planning(relationships=relationships)
+        left, right = sorted((_rel_ref(1), _rel_ref(2)))
+        planning = replace(planning, relationship_pair_plans=(_Pair(left, right),))
+        relationship_decision = RelationshipSemanticDecision(
+            "rel_dec_1", left, right, "same_relationship", "manual", "测试",
+            (_evidence(996),), None, None, None,
+        )
+        resolutions = (
+            FactSemanticResolutionResult(planning, None, (), (), ()),
+            EventSemanticResolutionResult(planning, None, (), (), ()),
+            RelationshipSemanticResolutionResult(
+                planning, None, (), (relationship_decision,), ()
+            ),
+        )
+        result = finalize_consolidation(planning, *resolutions)
+        relationship = result.canonical_relationship_set.relationships[0]
+        assert [state.state_zh for state in relationship.state_history] == ["敌对", "友好"]
+        assert result.canonical_fact_set.state_transitions == ()
+        assert result.story_conflict_set.conflicts == ()
+        assert all(
+            transition.transition_kind == "state_change"
+            for transition in result.canonical_fact_set.state_transitions
+        )
+        assert all(
+            conflict.conflict_kind == "fact_conflict" and conflict.relationship_ids == ()
+            for conflict in result.story_conflict_set.conflicts
+        )

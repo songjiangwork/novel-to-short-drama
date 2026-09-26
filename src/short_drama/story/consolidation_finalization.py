@@ -1,4 +1,4 @@
-"""v1.2 A5E1 — deterministic identity components and canonical IDs.
+"""v1.2 A5E deterministic finalization helpers.
 
 This module is the A5E1 slice of Issue #54 (A5E deterministic finalization):
 the deterministic *identity* half of consolidation finalization, driven by the
@@ -50,9 +50,10 @@ v1.2-A5E-deterministic-finalization-refinement-plan.md``):
   (ordered -- NOT treated as symmetric). A mismatch FAILS CLOSED.
 
 A5E1 is deterministic Python-only: **provider calls = 0**, **persistence
-writes = 0**, **CURRENT writes = 0**. It does NOT build CanonicalFact /
-CanonicalEvent / CanonicalRelationship, StateTransition, or StoryConflict
-(those are A5E2 / A5E3), and it does NOT persist anything.
+writes = 0**, **CURRENT writes = 0**.  The A5E2 helpers below consume its
+Fact/Event components to construct CanonicalFact/CanonicalEvent plus only the
+fact-addressed side objects. Relationship finalization and final composition
+remain A5E3, and this module never persists anything.
 """
 
 from __future__ import annotations
@@ -62,10 +63,17 @@ from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from .consolidation import (
+    CanonicalEvent,
+    CanonicalEventSet,
+    CanonicalFact,
+    CanonicalFactSet,
     ConsolidationCandidateRef,
     EVENT_ID_PATTERN,
     FACT_ID_PATTERN,
     RELATIONSHIP_ID_PATTERN,
+    StateTransition,
+    StoryConflict,
+    StoryConflictSet,
 )
 from .consolidation_planning import (
     ConsolidationPlanningResult,
@@ -129,6 +137,54 @@ _DOMAIN_ID_PATTERN: dict[str, re.Pattern[str]] = {
     "event": re.compile(EVENT_ID_PATTERN),
     "relationship": re.compile(RELATIONSHIP_ID_PATTERN),
 }
+
+
+def _evidence_identity(evidence: Any) -> tuple[str, str, str, str | None]:
+    """Return the frozen exact EvidenceRef identity, failing closed on shape."""
+    try:
+        identity = (
+            evidence.paragraph_id,
+            evidence.role,
+            evidence.strength,
+            evidence.excerpt,
+        )
+    except AttributeError as exc:
+        raise ConsolidationFinalizationError(
+            "evidence ref does not expose paragraph_id/role/strength/excerpt"
+        ) from exc
+    if (
+        not isinstance(identity[0], str)
+        or not isinstance(identity[1], str)
+        or not isinstance(identity[2], str)
+        or (identity[3] is not None and not isinstance(identity[3], str))
+    ):
+        raise ConsolidationFinalizationError("evidence ref has an invalid exact identity")
+    return identity
+
+
+def _require_unique_evidence(evidence_refs: Sequence[Any], *, label: str) -> None:
+    """Reject duplicate exact evidence rather than changing a semantic payload."""
+    seen: set[tuple[str, str, str, str | None]] = set()
+    for evidence in evidence_refs:
+        identity = _evidence_identity(evidence)
+        if identity in seen:
+            raise ConsolidationFinalizationError(
+                f"{label} contains duplicate exact EvidenceRef identity {identity!r}"
+            )
+        seen.add(identity)
+
+
+def _stable_evidence_union(members: Sequence[Any]) -> tuple[Any, ...]:
+    """Stable exact EvidenceRef union in already-authoritative member order."""
+    seen: set[tuple[str, str, str, str | None]] = set()
+    evidence_refs: list[Any] = []
+    for member in members:
+        for evidence in member.evidence_refs:
+            identity = _evidence_identity(evidence)
+            if identity not in seen:
+                seen.add(identity)
+                evidence_refs.append(evidence)
+    return tuple(evidence_refs)
 
 
 def _canonical_id(prefix: str, ordinal: int) -> str:
@@ -587,6 +643,10 @@ def finalize_consolidation_identity(
         raise ConsolidationFinalizationError(
             "fact_resolution must be a FactSemanticResolutionResult"
         )
+    if not isinstance(fact_resolution.planning_result, ConsolidationPlanningResult):
+        raise ConsolidationFinalizationError(
+            "fact_resolution.planning_result must be a ConsolidationPlanningResult"
+        )
     if not isinstance(event_resolution, EventSemanticResolutionResult):
         raise ConsolidationFinalizationError(
             "event_resolution must be an EventSemanticResolutionResult"
@@ -634,6 +694,407 @@ def finalize_consolidation_identity(
     )
 
 
+# ---------------------------------------------------------------------------
+# A5E2: Canonical fact/event assembly and fact side objects
+# ---------------------------------------------------------------------------
+
+
+def _candidate_index_by_ref(
+    candidates: Sequence[Any], *, domain: str
+) -> dict[str, Any]:
+    """Build a checked candidate lookup; input tuple order is never authority."""
+    result: dict[str, Any] = {}
+    for candidate in candidates:
+        # ``_validate_endpoint`` cannot be used until the lookup is complete.
+        ref = getattr(candidate, "global_candidate_ref", None)
+        if not isinstance(ref, str):
+            raise ConsolidationFinalizationError(
+                f"{domain}: indexed candidate ref must be a string"
+            )
+        try:
+            parsed = ConsolidationCandidateRef.parse(ref)
+        except ConsolidationModelError as exc:
+            raise ConsolidationFinalizationError(
+                f"{domain}: invalid indexed candidate ref {ref!r}: {exc}"
+            ) from exc
+        if parsed.namespace != domain:
+            raise ConsolidationFinalizationError(
+                f"{domain}: indexed candidate ref {ref!r} has wrong namespace "
+                f"{parsed.namespace!r}"
+            )
+        if ref in result:
+            raise ConsolidationFinalizationError(
+                f"{domain}: duplicate candidate {ref!r} in planning index"
+            )
+        result[ref] = candidate
+    return result
+
+
+def _validate_identity_components(
+    *,
+    planning_result: ConsolidationPlanningResult,
+    identity_plan: ConsolidationIdentityPlan,
+    domain: str,
+) -> tuple[tuple[ConsolidationIdentityComponent, ...], dict[str, Any]]:
+    """Validate A5E1 membership/order/coverage before consuming its IDs.
+
+    This deliberately verifies the supplied plan rather than recomputing
+    identity.  A5E1 remains the sole authority that decides components.
+    """
+    if not isinstance(planning_result, ConsolidationPlanningResult):
+        raise ConsolidationFinalizationError(
+            "planning_result must be a ConsolidationPlanningResult"
+        )
+    if not isinstance(identity_plan, ConsolidationIdentityPlan):
+        raise ConsolidationFinalizationError(
+            "identity_plan must be a ConsolidationIdentityPlan"
+        )
+    if identity_plan.plan_hash != planning_result.plan_hash:
+        raise ConsolidationFinalizationError(
+            "identity plan planning identity does not match planning_result.plan_hash"
+        )
+
+    candidates = getattr(planning_result.index, f"{domain}s")
+    candidate_by_ref = _candidate_index_by_ref(candidates, domain=domain)
+    components = getattr(identity_plan, f"{domain}_components")
+    expected_pattern = _DOMAIN_ID_PATTERN[domain]
+    canonical_id_prefix = {
+        "fact": "fact",
+        "event": "evt",
+        "relationship": "rel",
+    }[domain]
+    covered: set[str] = set()
+    canonical_ids: set[str] = set()
+    previous_component_key: tuple[str, str] | None = None
+
+    for ordinal, component in enumerate(components, start=1):
+        if not isinstance(component, ConsolidationIdentityComponent):
+            raise ConsolidationFinalizationError(
+                f"{domain}: identity components must be ConsolidationIdentityComponent"
+            )
+        if component.domain != domain:
+            raise ConsolidationFinalizationError(
+                f"{domain}: component has wrong domain {component.domain!r}"
+            )
+        if not expected_pattern.fullmatch(component.canonical_id):
+            raise ConsolidationFinalizationError(
+                f"{domain}: component canonical id {component.canonical_id!r} has "
+                "wrong namespace"
+            )
+        expected_canonical_id = _canonical_id(canonical_id_prefix, ordinal)
+        if component.canonical_id != expected_canonical_id:
+            raise ConsolidationFinalizationError(
+                f"{domain}: component canonical id {component.canonical_id!r} does "
+                f"not match authoritative source-order ordinal {ordinal} "
+                f"({expected_canonical_id!r})"
+            )
+        if component.canonical_id in canonical_ids:
+            raise ConsolidationFinalizationError(
+                f"{domain}: duplicate canonical id {component.canonical_id!r}"
+            )
+        canonical_ids.add(component.canonical_id)
+
+        member_key_previous: tuple[str, str] | None = None
+        for ref in component.member_candidate_refs:
+            _validate_endpoint(ref, domain, candidate_by_ref)
+            if ref in covered:
+                raise ConsolidationFinalizationError(
+                    f"{domain}: candidate {ref!r} has duplicate component membership"
+                )
+            member_key = (candidate_by_ref[ref].source_order_key, ref)
+            if member_key_previous is not None and member_key <= member_key_previous:
+                raise ConsolidationFinalizationError(
+                    f"{domain}: component members are not in authoritative source order"
+                )
+            member_key_previous = member_key
+            covered.add(ref)
+
+        first_ref = component.member_candidate_refs[0]
+        first_key = (candidate_by_ref[first_ref].source_order_key, first_ref)
+        if component.first_source_order != first_key[0]:
+            raise ConsolidationFinalizationError(
+                f"{domain}: component.first_source_order does not match earliest member"
+            )
+        if previous_component_key is not None and first_key <= previous_component_key:
+            raise ConsolidationFinalizationError(
+                f"{domain}: components are not in authoritative source order"
+            )
+        previous_component_key = first_key
+
+    if covered != set(candidate_by_ref):
+        missing = sorted(set(candidate_by_ref) - covered)
+        foreign = sorted(covered - set(candidate_by_ref))
+        raise ConsolidationFinalizationError(
+            f"{domain}: identity component coverage is not exact "
+            f"(missing={missing!r}, foreign={foreign!r})"
+        )
+    return components, candidate_by_ref
+
+
+def _fact_assembly_context(
+    planning_result: ConsolidationPlanningResult,
+    identity_plan: ConsolidationIdentityPlan,
+    fact_resolution: FactSemanticResolutionResult,
+) -> tuple[
+    tuple[ConsolidationIdentityComponent, ...],
+    dict[str, Any],
+    dict[str, tuple[str, int]],
+    dict[str, FactSemanticDecision],
+]:
+    """Return checked fact A5E1 mappings and an unambiguous decision lookup."""
+    if not isinstance(fact_resolution, FactSemanticResolutionResult):
+        raise ConsolidationFinalizationError(
+            "fact_resolution must be a FactSemanticResolutionResult"
+        )
+    if fact_resolution.planning_result.plan_hash != planning_result.plan_hash:
+        raise ConsolidationFinalizationError(
+            "fact resolution planning identity does not match planning_result.plan_hash"
+        )
+    components, candidate_by_ref = _validate_identity_components(
+        planning_result=planning_result, identity_plan=identity_plan, domain="fact"
+    )
+    ref_to_fact: dict[str, tuple[str, int]] = {}
+    for ordinal, component in enumerate(components, start=1):
+        for ref in component.member_candidate_refs:
+            if ref in ref_to_fact:
+                raise ConsolidationFinalizationError(
+                    f"fact: candidate {ref!r} maps to multiple canonical facts"
+                )
+            ref_to_fact[ref] = (component.canonical_id, ordinal)
+
+    decisions_by_id: dict[str, FactSemanticDecision] = {}
+    for decision in fact_resolution.all_fact_decisions:
+        if not isinstance(decision, FactSemanticDecision):
+            raise ConsolidationFinalizationError(
+                "fact_resolution.all_fact_decisions must contain FactSemanticDecision"
+            )
+        if decision.decision_id in decisions_by_id:
+            raise ConsolidationFinalizationError(
+                f"fact: duplicate decision_id {decision.decision_id!r} is ambiguous"
+            )
+        _validate_endpoint(decision.left_candidate_ref, "fact", candidate_by_ref)
+        _validate_endpoint(decision.right_candidate_ref, "fact", candidate_by_ref)
+        decisions_by_id[decision.decision_id] = decision
+    return components, candidate_by_ref, ref_to_fact, decisions_by_id
+
+
+def _canonical_fact_records(
+    components: Sequence[ConsolidationIdentityComponent], candidate_by_ref: dict[str, Any]
+) -> tuple[CanonicalFact, ...]:
+    facts: list[CanonicalFact] = []
+    for component in components:
+        members = tuple(candidate_by_ref[ref] for ref in component.member_candidate_refs)
+        representative = members[0]
+        evidence_refs = _stable_evidence_union(members)
+        _require_unique_evidence(evidence_refs, label=f"fact {component.canonical_id}")
+        facts.append(
+            CanonicalFact(
+                fact_id=component.canonical_id,
+                fact_type=representative.fact_type,
+                statement_zh=representative.statement_zh,
+                subject_refs=representative.subject_refs,
+                object_refs=representative.object_refs,
+                candidate_fact_refs=component.member_candidate_refs,
+                evidence_refs=evidence_refs,
+                first_source_order=representative.source_order_key,
+                continuity_relevant=any(
+                    member.fact_type == "continuity_relevant" for member in members
+                ),
+            )
+        )
+    return tuple(facts)
+
+
+def _ordered_fact_endpoints(
+    decision: FactSemanticDecision, ref_to_fact: dict[str, tuple[str, int]]
+) -> tuple[str, int, str, int]:
+    left_id, left_ordinal = ref_to_fact[decision.left_candidate_ref]
+    right_id, right_ordinal = ref_to_fact[decision.right_candidate_ref]
+    if left_id == right_id:
+        raise ConsolidationFinalizationError(
+            f"fact: {decision.decision!r} decision {decision.decision_id!r} endpoints "
+            "resolve to the same canonical fact"
+        )
+    if (left_ordinal, left_id) < (right_ordinal, right_id):
+        return left_id, left_ordinal, right_id, right_ordinal
+    return right_id, right_ordinal, left_id, left_ordinal
+
+
+def _fact_state_transitions(
+    *,
+    facts: Sequence[CanonicalFact],
+    ref_to_fact: dict[str, tuple[str, int]],
+    decisions_by_id: dict[str, FactSemanticDecision],
+) -> tuple[StateTransition, ...]:
+    facts_by_id = {fact.fact_id: fact for fact in facts}
+    pending: list[tuple[int, int, str, str, str, FactSemanticDecision]] = []
+    for decision in decisions_by_id.values():
+        if decision.decision != "state_change":
+            continue
+        from_id, from_ordinal, to_id, to_ordinal = _ordered_fact_endpoints(
+            decision, ref_to_fact
+        )
+        _require_unique_evidence(
+            decision.evidence_refs, label=f"state_change decision {decision.decision_id}"
+        )
+        pending.append(
+            (to_ordinal, from_ordinal, decision.decision_id, from_id, to_id, decision)
+        )
+    pending.sort(key=lambda item: item[:3])
+
+    transitions: list[StateTransition] = []
+    for ordinal, (to_ordinal, _, _, from_id, to_id, decision) in enumerate(
+        pending, start=1
+    ):
+        if from_id not in facts_by_id or to_id not in facts_by_id or from_id == to_id:
+            raise ConsolidationFinalizationError(
+                f"state_change decision {decision.decision_id!r} has invalid fact endpoints"
+            )
+        to_subjects = set(facts_by_id[to_id].subject_refs)
+        subjects = tuple(
+            subject for subject in facts_by_id[from_id].subject_refs if subject in to_subjects
+        )
+        transition = StateTransition(
+            transition_id=_canonical_id("trans", ordinal),
+            from_fact_id=from_id,
+            to_fact_id=to_id,
+            subject_refs=subjects,
+            transition_kind="state_change",
+            source_decision_ref=decision.decision_id,
+            evidence_refs=decision.evidence_refs,
+            narrative_order=to_ordinal,
+        )
+        if (
+            decisions_by_id.get(transition.source_decision_ref) is not decision
+            or transition.transition_kind != "state_change"
+        ):
+            raise ConsolidationFinalizationError("state transition decision cross-reference invalid")
+        transitions.append(transition)
+    return tuple(transitions)
+
+
+def build_canonical_fact_set(
+    planning_result: ConsolidationPlanningResult,
+    identity_plan: ConsolidationIdentityPlan,
+    fact_resolution: FactSemanticResolutionResult,
+) -> CanonicalFactSet:
+    """Build A5E2 CanonicalFactSet and fact-addressed state transitions.
+
+    A5E1 supplies component membership and canonical IDs.  This function does
+    not re-decide identity, call a provider, or persist anything.
+    """
+    components, candidate_by_ref, ref_to_fact, decisions_by_id = _fact_assembly_context(
+        planning_result, identity_plan, fact_resolution
+    )
+    facts = _canonical_fact_records(components, candidate_by_ref)
+    transitions = _fact_state_transitions(
+        facts=facts, ref_to_fact=ref_to_fact, decisions_by_id=decisions_by_id
+    )
+    if {ref for fact in facts for ref in fact.candidate_fact_refs} != set(candidate_by_ref):
+        raise ConsolidationFinalizationError("fact: canonical fact candidate coverage is not exact")
+    if len({fact.fact_id for fact in facts}) != len(facts):
+        raise ConsolidationFinalizationError("fact: canonical fact ids are not unique")
+    return CanonicalFactSet(schema_version=1, facts=facts, state_transitions=transitions)
+
+
+def build_fact_story_conflict_set(
+    planning_result: ConsolidationPlanningResult,
+    identity_plan: ConsolidationIdentityPlan,
+    fact_resolution: FactSemanticResolutionResult,
+) -> StoryConflictSet:
+    """Build the A5E2 fact-only unresolved StoryConflictSet."""
+    components, candidate_by_ref, ref_to_fact, decisions_by_id = _fact_assembly_context(
+        planning_result, identity_plan, fact_resolution
+    )
+    # Constructing facts here also validates the canonical candidate assembly
+    # that conflict endpoints reference, without creating a new intermediate API.
+    facts = _canonical_fact_records(components, candidate_by_ref)
+    facts_by_id = {fact.fact_id: fact for fact in facts}
+    pending: list[tuple[int, int, str, str, str, FactSemanticDecision]] = []
+    for decision in decisions_by_id.values():
+        if decision.decision != "conflict":
+            continue
+        earlier_id, earlier_ordinal, later_id, later_ordinal = _ordered_fact_endpoints(
+            decision, ref_to_fact
+        )
+        _require_unique_evidence(
+            decision.evidence_refs, label=f"conflict decision {decision.decision_id}"
+        )
+        pending.append(
+            (later_ordinal, earlier_ordinal, decision.decision_id, earlier_id, later_id, decision)
+        )
+    pending.sort(key=lambda item: item[:3])
+
+    conflicts: list[StoryConflict] = []
+    for ordinal, (_, _, _, earlier_id, later_id, decision) in enumerate(pending, start=1):
+        if earlier_id not in facts_by_id or later_id not in facts_by_id:
+            raise ConsolidationFinalizationError("fact conflict has an unknown canonical fact")
+        conflict = StoryConflict(
+            conflict_id=_canonical_id("conf", ordinal),
+            conflict_kind="fact_conflict",
+            fact_ids=(earlier_id, later_id),
+            relationship_ids=(),
+            candidate_refs=(decision.left_candidate_ref, decision.right_candidate_ref),
+            decision_refs=(decision.decision_id,),
+            evidence_refs=decision.evidence_refs,
+            status="unresolved",
+        )
+        resolved = decisions_by_id.get(conflict.decision_refs[0])
+        if (
+            resolved is not decision
+            or resolved.decision != "conflict"
+            or conflict.relationship_ids != ()
+            or conflict.status != "unresolved"
+        ):
+            raise ConsolidationFinalizationError("fact conflict decision cross-reference invalid")
+        for ref in conflict.candidate_refs:
+            _validate_endpoint(ref, "fact", candidate_by_ref)
+        conflicts.append(conflict)
+    return StoryConflictSet(schema_version=1, conflicts=tuple(conflicts))
+
+
+def build_canonical_event_set(
+    planning_result: ConsolidationPlanningResult,
+    identity_plan: ConsolidationIdentityPlan,
+) -> CanonicalEventSet:
+    """Build A5E2 CanonicalEventSet from A5E1 components, with no side objects."""
+    components, candidate_by_ref = _validate_identity_components(
+        planning_result=planning_result, identity_plan=identity_plan, domain="event"
+    )
+    events: list[CanonicalEvent] = []
+    for ordinal, component in enumerate(components, start=1):
+        members = tuple(candidate_by_ref[ref] for ref in component.member_candidate_refs)
+        representative = members[0]
+        known_modes = {
+            member.temporal_mode
+            for member in members
+            if member.temporal_mode != "unknown"
+        }
+        temporal_mode = next(iter(known_modes)) if len(known_modes) == 1 else "unknown"
+        evidence_refs = _stable_evidence_union(members)
+        _require_unique_evidence(evidence_refs, label=f"event {component.canonical_id}")
+        events.append(
+            CanonicalEvent(
+                event_id=component.canonical_id,
+                narrative_order=ordinal,
+                summary_zh=representative.summary_zh,
+                participants=representative.participants,
+                locations=representative.locations,
+                temporal_mode=temporal_mode,
+                candidate_event_refs=component.member_candidate_refs,
+                evidence_refs=evidence_refs,
+                first_source_order=representative.source_order_key,
+            )
+        )
+    if len({event.event_id for event in events}) != len(events):
+        raise ConsolidationFinalizationError("event: canonical event ids are not unique")
+    if tuple(event.narrative_order for event in events) != tuple(range(1, len(events) + 1)):
+        raise ConsolidationFinalizationError("event: narrative_order is not contiguous")
+    if {ref for event in events for ref in event.candidate_event_refs} != set(candidate_by_ref):
+        raise ConsolidationFinalizationError("event: canonical event candidate coverage is not exact")
+    return CanonicalEventSet(schema_version=1, events=tuple(events))
+
+
 __all__ = [
     "ConsolidationFinalizationError",
     "ConsolidationIdentityComponent",
@@ -641,5 +1102,8 @@ __all__ = [
     "build_event_identity_components",
     "build_fact_identity_components",
     "build_relationship_identity_components",
+    "build_canonical_event_set",
+    "build_canonical_fact_set",
+    "build_fact_story_conflict_set",
     "finalize_consolidation_identity",
 ]

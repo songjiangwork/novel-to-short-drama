@@ -13,6 +13,7 @@ from .prompting.builder import build_prompt
 from .qc.state import record_qc_result
 from .story import (
     StoryError,
+    consolidate_evidence_project,
     extract_chunks_project,
     ingest_source_project,
     plan_chunks_project,
@@ -44,6 +45,16 @@ DEFAULT_RECONCILE_PROFILES = {
     "llm_profile": REPO_ROOT / "profiles" / "entity_reconciliation_llm_v1.yaml",
 }
 
+# A5G2 consolidate-evidence: the reconciliation profile is an A4 CURRENT
+# namespace selector, while the remaining tracked paths are A5 inputs. The
+# local runtime config remains untracked (only its example is committed).
+DEFAULT_CONSOLIDATE_PROFILES = {
+    "reconciliation_profile_id": "entity-reconciliation-v2",
+    "consolidation_profile": REPO_ROOT / "profiles" / "consolidation_v1.yaml",
+    "runtime_config": REPO_ROOT / "profiles" / "llm_local.yaml",
+    "llm_profile": REPO_ROOT / "profiles" / "consolidation_llm_v1.yaml",
+}
+
 def main():
     p=argparse.ArgumentParser(prog="short-drama"); s=p.add_subparsers(dest="cmd",required=True)
     a=s.add_parser("validate"); a.add_argument("path"); a.add_argument("--kind",choices=["project","character","location","shot","qc"])
@@ -60,6 +71,7 @@ def main():
     a=s.add_parser("plan-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--profile",required=True)
     a=s.add_parser("extract-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_EXTRACT_PROFILES["extraction_profile"]); a.add_argument("--runtime-config",default=DEFAULT_EXTRACT_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_EXTRACT_PROFILES["llm_profile"])
     a=s.add_parser("reconcile-entities"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_RECONCILE_PROFILES["extraction_profile"]); a.add_argument("--reconciliation-profile",default=DEFAULT_RECONCILE_PROFILES["reconciliation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_RECONCILE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_RECONCILE_PROFILES["llm_profile"])
+    a=s.add_parser("consolidate-evidence"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--reconciliation-profile-id",default=DEFAULT_CONSOLIDATE_PROFILES["reconciliation_profile_id"]); a.add_argument("--consolidation-profile",default=DEFAULT_CONSOLIDATE_PROFILES["consolidation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_CONSOLIDATE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_CONSOLIDATE_PROFILES["llm_profile"])
     x=p.parse_args()
     if x.cmd=="validate":
         e=validate_shot(x.path) if x.kind=="shot" else validate_file(x.path,x.kind); out({"valid":not e,"errors":e}); return 0 if not e else 2
@@ -114,6 +126,21 @@ def main():
                 chunk_profile_path=x.chunk_profile,
                 extraction_profile_path=x.extraction_profile,
                 reconciliation_profile_path=x.reconciliation_profile,
+                semantic_profile_path=x.llm_profile,
+                llm_client=llm_client,
+            )
+        except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
+        except LLMError as exc: out({"valid":False,"error":str(exc)}); return 2
+        out(summary.to_dict()); return 0
+    if x.cmd=="consolidate-evidence":
+        try:
+            runtime_config=load_runtime_config(x.runtime_config)
+            llm_client=OpenAICompatibleLLMClient(runtime_config)
+            summary=consolidate_evidence_project(
+                x.project,
+                runs_root=x.runs_root,
+                reconciliation_profile_id=x.reconciliation_profile_id,
+                consolidation_profile_path=x.consolidation_profile,
                 semantic_profile_path=x.llm_profile,
                 llm_client=llm_client,
             )

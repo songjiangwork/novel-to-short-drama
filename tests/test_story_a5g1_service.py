@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from short_drama.foundation import PointerIntegrityError
 from short_drama.llm import LLMError
 from short_drama.story import (
     ConsolidationCurrentMissingError,
@@ -59,6 +60,46 @@ def _run(tree, semantic_profile, llm):
         document_id=DOCUMENT,
         reconciliation_profile_id=RECON_PROFILE_ID,
         consolidation_profile=tree.consolidation_profile,
+        semantic_profile=semantic_profile,
+        llm_client=llm,
+    )
+
+
+def _semantic_pair_inputs(tmp_path):
+    """Build a valid A4 CURRENT whose fact stream needs one LLM decision."""
+    candidates = _default_candidates()
+    first, second = candidates["facts"][0], candidates["facts"][0]
+    candidates["facts"] = (
+        replace(first, statement_zh="Alice knows the key"),
+        replace(
+            second,
+            candidate_id="cand_fact_002",
+            statement_zh="Alice lost the key",
+        ),
+    )
+    tree = _build_run_tree(tmp_path, **candidates)
+    from short_drama.story import build_consolidation_planning, load_fact_semantic_profile
+
+    profile = _consolidation_profile()
+    semantic_profile = load_fact_semantic_profile()
+    planning = build_consolidation_planning(
+        tree.store,
+        tree.pointers,
+        project_id=A5B_PROJECT,
+        document_id=A5B_DOCUMENT,
+        reconciliation_profile_id=tree.recon_profile.profile_id,
+        consolidation_profile=profile,
+    )
+    assert len(planning.fact_pair_plans) == 1
+    return tree, profile, semantic_profile, planning
+
+
+def _run_semantic_pair(tree, profile, semantic_profile, llm):
+    return EvidenceConsolidationService(tree.store, tree.pointers).consolidate_evidence(
+        project_id=A5B_PROJECT,
+        document_id=A5B_DOCUMENT,
+        reconciliation_profile_id=tree.recon_profile.profile_id,
+        consolidation_profile=profile,
         semantic_profile=semantic_profile,
         llm_client=llm,
     )
@@ -120,43 +161,32 @@ def test_all_three_preparations_exist_before_reuse_lookup(tmp_path, monkeypatch)
     assert observed == [(0, 0, 0)]
 
 
-def test_semantic_identity_miss_runs_fresh_composition(tmp_path):
-    tree, semantic_profile, llm = _inputs(tmp_path)
-    first = _run(tree, semantic_profile, llm)
+def test_semantic_invalidation_of_existing_current_executes_provider(tmp_path):
+    tree, profile, semantic_profile, planning = _semantic_pair_inputs(tmp_path)
+    first_client = FakeLLMClient(_valid_responses(planning))
+    first = _run_semantic_pair(tree, profile, semantic_profile, first_client)
     changed = replace(
         semantic_profile,
         temperature=0.9 if semantic_profile.temperature != 0.9 else 0.8,
     )
+    second_client = FakeLLMClient(_valid_responses(planning))
 
-    second = _run(tree, changed, llm)
+    second = _run_semantic_pair(tree, profile, changed, second_client)
 
     assert second.reused is False
-    assert second.consolidation_manifest_ref.revision == first.consolidation_manifest_ref.revision + 1
+    assert second.semantic_generation_call_count > 0
+    assert second_client.call_count == second.semantic_generation_call_count
+    assert second.consolidation_manifest_ref.revision > first.consolidation_manifest_ref.revision
+    assert (
+        tree.pointers.resolve_current(second.current_pointer_ref.artifact_id).target_ref
+        == second.consolidation_manifest_ref
+    )
 
 
 def test_semantic_miss_executes_existing_provider_resolution(tmp_path):
-    candidates = _default_candidates()
-    first, second = candidates["facts"][0], candidates["facts"][0]
-    candidates["facts"] = (
-        replace(first, statement_zh="Alice knows the key"),
-        replace(second, candidate_id="cand_fact_002", statement_zh="Alice lost the key"),
-    )
-    tree = _build_run_tree(tmp_path, **candidates)
-    from short_drama.story import build_consolidation_planning, load_fact_semantic_profile
-
-    profile = _consolidation_profile()
-    semantic_profile = load_fact_semantic_profile()
-    planning = build_consolidation_planning(
-        tree.store, tree.pointers, project_id=A5B_PROJECT, document_id=A5B_DOCUMENT,
-        reconciliation_profile_id=tree.recon_profile.profile_id, consolidation_profile=profile,
-    )
+    tree, profile, semantic_profile, planning = _semantic_pair_inputs(tmp_path)
     client = FakeLLMClient(_valid_responses(planning))
-    result = EvidenceConsolidationService(tree.store, tree.pointers).consolidate_evidence(
-        project_id=A5B_PROJECT, document_id=A5B_DOCUMENT,
-        reconciliation_profile_id=tree.recon_profile.profile_id,
-        consolidation_profile=profile, semantic_profile=semantic_profile,
-        llm_client=client,
-    )
+    result = _run_semantic_pair(tree, profile, semantic_profile, client)
 
     assert result.reused is False
     assert client.call_count == result.semantic_generation_call_count == 1
@@ -164,18 +194,35 @@ def test_semantic_miss_executes_existing_provider_resolution(tmp_path):
 
 
 def test_corrupt_current_propagates_before_provider(tmp_path):
-    tree, semantic_profile, llm = _inputs(tmp_path)
-    result = _run(tree, semantic_profile, llm)
+    tree, profile, semantic_profile, planning = _semantic_pair_inputs(tmp_path)
+    first = _run_semantic_pair(
+        tree, profile, semantic_profile, FakeLLMClient(_valid_responses(planning))
+    )
+    revision_before = _highest_revision(
+        tree.store,
+        CONSOLIDATION_MANIFEST_ARTIFACT_TYPE,
+        first.consolidation_manifest_ref.artifact_id,
+    )
+    head_path = tree.pointers._head_path(first.current_pointer_ref.artifact_id)
+    head_before = head_path.read_bytes()
     _store_path(
         tree.store,
         CONSOLIDATION_MANIFEST_ARTIFACT_TYPE,
-        result.consolidation_manifest_ref.artifact_id,
-        result.consolidation_manifest_ref.revision,
+        first.consolidation_manifest_ref.artifact_id,
+        first.consolidation_manifest_ref.revision,
     ).write_text("{broken", encoding="utf-8")
+    provider = ExplodingLLM()
 
-    with pytest.raises(Exception):
-        _run(tree, semantic_profile, llm)
-    assert llm.calls == 0
+    with pytest.raises(PointerIntegrityError):
+        _run_semantic_pair(tree, profile, semantic_profile, provider)
+    assert provider.calls == 0
+    assert not _store_path(
+        tree.store,
+        CONSOLIDATION_MANIFEST_ARTIFACT_TYPE,
+        first.consolidation_manifest_ref.artifact_id,
+        revision_before + 1,
+    ).exists()
+    assert head_path.read_bytes() == head_before
 
 
 def test_missing_a4_current_fails_before_provider(tmp_path):

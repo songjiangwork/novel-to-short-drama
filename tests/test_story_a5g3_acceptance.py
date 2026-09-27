@@ -44,7 +44,16 @@ def _audit(**changes):
 def test_candidate_accounting_and_unresolved_preservation_pass():
     result = _audit()
     assert result["candidate_accounting"]["fact"] == {"accounted": 1, "total": 1, "missing": 0, "extra": 0}
-    assert result["unresolved"]["dangling_unresolved_ids"] == 0
+    assert result["unresolved"] == {
+        "indexed_unresolved_occurrences": 1,
+        "indexed_unique_unresolved_ids": 1,
+        "canonical_unique_unresolved_ids_used": 1,
+        "dangling_indexed_unresolved_ids": 0,
+    }
+    assert result["bound_references"] == {
+        "dangling_indexed_bound_refs": 0,
+        "dangling_canonical_bound_refs": 0,
+    }
 
 
 @pytest.mark.parametrize("domain, field, bad_ref", [("facts", "candidate_fact_refs", "fact:extra"), ("events", "candidate_event_refs", "event:extra")])
@@ -65,7 +74,7 @@ def test_missing_candidate_accounting_fails():
 def test_dangling_bound_ref_transition_and_conflict_refs_fail():
     index, facts, events, relationships, conflicts = _bundle()
     facts["facts"][0]["subject_refs"] = ["char_missing"]
-    with pytest.raises(acceptance.AcceptanceError, match="dangling bound"):
+    with pytest.raises(acceptance.AcceptanceError, match="dangling canonical bound"):
         _audit(bundle=(index, facts, events, relationships, conflicts))
     index, facts, events, relationships, conflicts = _bundle()
     facts["state_transitions"][0]["to_fact_id"] = "fact_999"
@@ -74,6 +83,33 @@ def test_dangling_bound_ref_transition_and_conflict_refs_fail():
     index, facts, events, relationships, conflicts = _bundle()
     conflicts["conflicts"][0]["relationship_ids"] = ["relationship_999"]
     with pytest.raises(acceptance.AcceptanceError, match="graph consistency"):
+        _audit(bundle=(index, facts, events, relationships, conflicts))
+
+
+@pytest.mark.parametrize(
+    "domain, field",
+    [
+        ("facts", "subject_refs"),
+        ("events", "participants"),
+        ("relationships", "source_entity_ref"),
+    ],
+)
+def test_illegal_indexed_unresolved_ref_fails_even_when_not_canonical(domain, field):
+    index, facts, events, relationships, conflicts = _bundle()
+    item = {
+        "facts": index["facts"][0],
+        "events": index["events"][0],
+        "relationships": index["relationships"][0],
+    }[domain]
+    item[field] = "unres_missing" if domain == "relationships" else ["unres_missing"]
+    with pytest.raises(acceptance.AcceptanceError, match="indexed"):
+        _audit(bundle=(index, facts, events, relationships, conflicts))
+
+
+def test_illegal_indexed_canonical_ref_fails_even_when_not_canonical():
+    index, facts, events, relationships, conflicts = _bundle()
+    index["facts"][0]["subject_refs"] = ["char_missing"]
+    with pytest.raises(acceptance.AcceptanceError, match="dangling indexed bound"):
         _audit(bundle=(index, facts, events, relationships, conflicts))
 
 
@@ -172,6 +208,26 @@ def test_counting_client_counts_exhausted_attempts_and_reraises_same_exception()
         "provider_attempts_observed": 3,
         "attempts": 3,
     }
+
+
+def test_active_failure_observer_tracks_transport_and_temp_clients_not_fresh_client():
+    fresh = acceptance.CountingLLMClient(SimpleNamespace())
+    fresh.semantic_generation_calls, fresh.provider_attempts = 7, 21
+    transport = acceptance.CountingLLMClient(SimpleNamespace())
+    transport.semantic_generation_calls, transport.provider_attempts = 1, 3
+    temp = acceptance.CountingLLMClient(SimpleNamespace())
+    temp.semantic_generation_calls, temp.provider_attempts = 2, 6
+    observer = {}
+    error = LLMRetryExhaustedError(attempts=3, message="unreachable")
+    acceptance.set_active_failure_client(observer, fresh)
+    acceptance.set_active_failure_client(observer, transport)
+    transport_payload = acceptance.live_failure_payload(error, observer["client"])
+    assert transport_payload["semantic_generation_calls_observed"] == 1
+    assert transport_payload["provider_attempts_observed"] == 3
+    acceptance.set_active_failure_client(observer, temp)
+    temp_payload = acceptance.live_failure_payload(error, observer["client"])
+    assert temp_payload["semantic_generation_calls_observed"] == 2
+    assert temp_payload["provider_attempts_observed"] == 6
 
 
 def test_semantic_failure_payload_uses_frozen_block_prefix_diagnostics():

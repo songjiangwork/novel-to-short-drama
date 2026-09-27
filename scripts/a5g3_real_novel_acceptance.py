@@ -129,11 +129,20 @@ def audit_persisted_bundle(*, index: dict[str, Any], facts: dict[str, Any], even
         if missing or extra or len(actual_lists[domain]) != len(actual[domain]):
             failures.append(f"{domain} candidate accounting missing={len(missing)} extra={len(extra)}")
     indexed_bound, canonical_bound = _bound_refs(index, facts, events, relationships)
+    supported_prefixes = ("char_", "loc_", "unres_")
+    indexed_supported = {x for x in indexed_bound if x.startswith(supported_prefixes)}
+    canonical_supported = {x for x in canonical_bound if x.startswith(supported_prefixes)}
     indexed_unresolved = {x for x in indexed_bound if x.startswith("unres_")}
     canonical_unresolved = {x for x in canonical_bound if x.startswith("unres_")}
-    dangling = {x for x in canonical_bound if x.startswith(("char_", "loc_", "unres_")) and x not in allowed_entity_ids}
-    if dangling:
-        failures.append(f"dangling bound refs={sorted(dangling)}")
+    dangling_indexed = indexed_supported - allowed_entity_ids
+    dangling_indexed_unresolved = indexed_unresolved - unresolved_ids
+    dangling_canonical = canonical_supported - allowed_entity_ids
+    if dangling_indexed:
+        failures.append(f"dangling indexed bound refs={sorted(dangling_indexed)}")
+    if dangling_indexed_unresolved:
+        failures.append("indexed unresolved ids are not in exact A4 UnresolvedEntitySet")
+    if dangling_canonical:
+        failures.append(f"dangling canonical bound refs={sorted(dangling_canonical)}")
     if not canonical_unresolved <= unresolved_ids:
         failures.append("canonical unresolved ids are not in exact A4 UnresolvedEntitySet")
     canonical_ids = {
@@ -160,7 +169,7 @@ def audit_persisted_bundle(*, index: dict[str, Any], facts: dict[str, Any], even
         failures.append(f"duplicate exact EvidenceRefs within tuples={duplicate_evidence}")
     if failures:
         raise AcceptanceError("; ".join(failures))
-    return {"candidate_accounting": accounting, "unresolved": {"indexed_occurrences": sum(x.startswith("unres_") for x in indexed_bound), "indexed_unique_ids": len(indexed_unresolved), "canonical_unique_ids_used": len(canonical_unresolved), "dangling_unresolved_ids": 0}, "dangling_bound_refs": 0, "graph": {"duplicate_canonical_ids": 0, "dangling_fact_refs": 0, "dangling_relationship_refs": 0, "contradictions": 0}, "evidence": {"tuples_audited": len(tuples), "duplicate_exact_within_tuples": 0}}
+    return {"candidate_accounting": accounting, "unresolved": {"indexed_unresolved_occurrences": sum(x.startswith("unres_") for x in indexed_bound), "indexed_unique_unresolved_ids": len(indexed_unresolved), "canonical_unique_unresolved_ids_used": len(canonical_unresolved), "dangling_indexed_unresolved_ids": 0}, "bound_references": {"dangling_indexed_bound_refs": 0, "dangling_canonical_bound_refs": 0}, "graph": {"duplicate_canonical_ids": 0, "dangling_fact_refs": 0, "dangling_relationship_refs": 0, "contradictions": 0}, "evidence": {"tuples_audited": len(tuples), "duplicate_exact_within_tuples": 0}}
 
 
 def publication_refs(result: Any) -> dict[str, dict[str, Any]]:
@@ -215,6 +224,15 @@ def live_failure_payload(exc: Exception, client: CountingLLMClient | None) -> di
     return payload
 
 
+def set_active_failure_client(
+    observer: dict[str, CountingLLMClient] | None,
+    client: CountingLLMClient,
+) -> None:
+    """Keep failure reporting attached to the client for the next production call."""
+    if observer is not None:
+        observer["client"] = client
+
+
 def _persisted_audit(store: Any, entity_map: Any, result: Any, profile_id: str) -> dict[str, Any]:
     base = a5_base_artifact_id(EXPECTED_PROJECT_ID, DOCUMENT_ID, profile_id)
     index = load_consolidation_candidate_index(store, result.consolidation_candidate_index_ref, expected_artifact_id=consolidation_candidate_index_artifact_id(base)).to_dict()
@@ -253,8 +271,7 @@ def run_acceptance(
         raise AcceptanceError(f"A5 CURRENT already exists; not fresh: {_ref(existing.manifest_ref)}")
     runtime = load_runtime_config(args.runtime_config)
     client = CountingLLMClient(OpenAICompatibleLLMClient(runtime))
-    if failure_observer is not None:
-        failure_observer["client"] = client
+    set_active_failure_client(failure_observer, client)
     started = time.monotonic()
     fresh = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=client)
     fresh_elapsed = time.monotonic() - started
@@ -273,6 +290,7 @@ def run_acceptance(
     changed_runtime = dataclasses.replace(runtime, transport_id="a5g3-unreachable", base_url="http://127.0.0.1:9/v1", request_model="a5g3-unreachable", provider_family="acceptance", timeout_seconds=1)
     transport_client = CountingLLMClient(OpenAICompatibleLLMClient(changed_runtime))
     before_transport = snapshot_a5_files(args.runs_root, project_id)
+    set_active_failure_client(failure_observer, transport_client)
     transport = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=transport_client)
     after_transport = snapshot_a5_files(args.runs_root, project_id)
     check_reuse_gate(fresh, transport, semantic_delta=transport_client.semantic_generation_calls, attempt_delta=transport_client.provider_attempts, before=before_transport, after=after_transport)
@@ -288,6 +306,7 @@ def run_acceptance(
         temp_profile.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
         changed_semantic = load_semantic_profile(temp_profile)
         temp_client = CountingLLMClient(OpenAICompatibleLLMClient(runtime))
+        set_active_failure_client(failure_observer, temp_client)
         invalidated = consolidate_evidence_project(project_file, runs_root=temp_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=temp_profile, llm_client=temp_client)
         temp_store, temp_pointers = _stores(temp_root, project_id)
         temp_current = ConsolidationPersistenceService(temp_store, temp_pointers).require_current_validated(project_id=project_id, document_id=DOCUMENT_ID, consolidation_profile_id=profile.profile_id)

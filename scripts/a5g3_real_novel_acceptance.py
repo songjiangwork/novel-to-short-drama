@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from short_drama.foundation import ValidationResult, load_validation_report
-from short_drama.llm import LLMClient, OpenAICompatibleLLMClient, load_runtime_config, load_semantic_profile
+from short_drama.llm import LLMClient, LLMRetryExhaustedError, OpenAICompatibleLLMClient, load_runtime_config, load_semantic_profile
 from short_drama.paths import REPO_ROOT
-from short_drama.story import ConsolidationCurrentMissingError, consolidate_evidence_project
+from short_drama.story import ConsolidationCurrentMissingError, ConsolidationSemanticGenerationError, consolidate_evidence_project
 from short_drama.story.consolidation_persistence import (
     ConsolidationPersistenceService, a5_base_artifact_id, canonical_event_set_artifact_id,
     canonical_fact_set_artifact_id, canonical_relationship_set_artifact_id,
@@ -53,7 +53,11 @@ class CountingLLMClient(LLMClient):
 
     def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
         self.semantic_generation_calls += 1
-        result = self._inner.generate_structured(rendered_prompt, output_schema, semantic_profile)
+        try:
+            result = self._inner.generate_structured(rendered_prompt, output_schema, semantic_profile)
+        except LLMRetryExhaustedError as exc:
+            self.provider_attempts += exc.attempts
+            raise
         self.provider_attempts += result.attempts
         return result
 
@@ -132,13 +136,23 @@ def audit_persisted_bundle(*, index: dict[str, Any], facts: dict[str, Any], even
         failures.append(f"dangling bound refs={sorted(dangling)}")
     if not canonical_unresolved <= unresolved_ids:
         failures.append("canonical unresolved ids are not in exact A4 UnresolvedEntitySet")
-    fact_ids = [x["fact_id"] for x in facts["facts"]]
-    relationship_ids = [x["relationship_id"] for x in relationships["relationships"]]
-    duplicate_ids = len(fact_ids) != len(set(fact_ids)) or len(relationship_ids) != len(set(relationship_ids))
+    canonical_ids = {
+        "fact_id": [x["fact_id"] for x in facts["facts"]],
+        "transition_id": [x["transition_id"] for x in facts["state_transitions"]],
+        "event_id": [x["event_id"] for x in events["events"]],
+        "relationship_id": [x["relationship_id"] for x in relationships["relationships"]],
+        "conflict_id": [x["conflict_id"] for x in conflicts["conflicts"]],
+    }
+    duplicate_namespaces = [
+        namespace for namespace, ids in canonical_ids.items()
+        if len(ids) != len(set(ids))
+    ]
+    fact_ids = canonical_ids["fact_id"]
+    relationship_ids = canonical_ids["relationship_id"]
     dangling_facts = {ref for item in facts["state_transitions"] for ref in (item["from_fact_id"], item["to_fact_id"])} - set(fact_ids)
     dangling_conflict_facts = {ref for item in conflicts["conflicts"] for ref in item["fact_ids"]} - set(fact_ids)
     dangling_relationships = {ref for item in conflicts["conflicts"] for ref in item["relationship_ids"]} - set(relationship_ids)
-    if duplicate_ids or dangling_facts or dangling_conflict_facts or dangling_relationships:
+    if duplicate_namespaces or dangling_facts or dangling_conflict_facts or dangling_relationships:
         failures.append("canonical graph consistency failure")
     tuples = [x["evidence_refs"] for x in facts["facts"]] + [x["evidence_refs"] for x in facts["state_transitions"]] + [x["evidence_refs"] for x in events["events"]] + [x["evidence_refs"] for x in conflicts["conflicts"]] + [s["evidence_refs"] for x in relationships["relationships"] for s in x["state_history"]]
     duplicate_evidence = sum(len(t) != len({_evidence_key(x) for x in t}) for t in tuples)
@@ -168,6 +182,39 @@ def check_invalidation_gate(*, old_hash: str, new_hash: str, result: Any, semant
         raise AcceptanceError("semantic identity invalidation gate failed")
 
 
+def _semantic_domain(block_id: str) -> str:
+    if block_id.startswith("a5fblk_"):
+        return "fact"
+    if block_id.startswith("a5eblk_"):
+        return "event"
+    if block_id.startswith("a5rblk_"):
+        return "relationship"
+    return "unknown"
+
+
+def live_failure_payload(exc: Exception, client: CountingLLMClient | None) -> dict[str, Any]:
+    """Machine-readable diagnostics from existing exceptions only."""
+    payload: dict[str, Any] = {
+        "valid": False,
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
+    if client is not None:
+        payload["semantic_generation_calls_observed"] = client.semantic_generation_calls
+        payload["provider_attempts_observed"] = client.provider_attempts
+    if isinstance(exc, LLMRetryExhaustedError):
+        payload["attempts"] = exc.attempts
+    if isinstance(exc, ConsolidationSemanticGenerationError):
+        payload.update({
+            "domain": _semantic_domain(exc.block_id),
+            "block_id": exc.block_id,
+            "rounds_attempted": exc.rounds_attempted,
+            "pair_count": len(exc.expected_pairs),
+            "last_failure_details": exc.last_failure_details,
+        })
+    return payload
+
+
 def _persisted_audit(store: Any, entity_map: Any, result: Any, profile_id: str) -> dict[str, Any]:
     base = a5_base_artifact_id(EXPECTED_PROJECT_ID, DOCUMENT_ID, profile_id)
     index = load_consolidation_candidate_index(store, result.consolidation_candidate_index_ref, expected_artifact_id=consolidation_candidate_index_artifact_id(base)).to_dict()
@@ -182,7 +229,11 @@ def _persisted_audit(store: Any, entity_map: Any, result: Any, profile_id: str) 
     return audit_persisted_bundle(index=index, facts=facts, events=events, relationships=relationships, conflicts=conflicts, allowed_entity_ids=allowed, unresolved_ids={x.unresolved_id for x in unresolved.entities})
 
 
-def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
+def run_acceptance(
+    args: argparse.Namespace,
+    *,
+    failure_observer: dict[str, CountingLLMClient] | None = None,
+) -> dict[str, Any]:
     project_file, project = _load_project(args.project)
     project_id = project["project_id"]
     if project_id != EXPECTED_PROJECT_ID:
@@ -202,6 +253,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         raise AcceptanceError(f"A5 CURRENT already exists; not fresh: {_ref(existing.manifest_ref)}")
     runtime = load_runtime_config(args.runtime_config)
     client = CountingLLMClient(OpenAICompatibleLLMClient(runtime))
+    if failure_observer is not None:
+        failure_observer["client"] = client
     started = time.monotonic()
     fresh = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=client)
     fresh_elapsed = time.monotonic() - started
@@ -258,10 +311,11 @@ def main() -> int:
     parser.add_argument("--reconciliation-profile-id", default=RECONCILIATION_PROFILE_ID)
     parser.add_argument("--consolidation-profile", default=str(CONSOLIDATION_PROFILE)); parser.add_argument("--runtime-config", default=str(RUNTIME_CONFIG)); parser.add_argument("--llm-profile", default=str(SEMANTIC_PROFILE))
     args = parser.parse_args()
+    failure_observer: dict[str, CountingLLMClient] = {}
     try:
-        print(json.dumps(run_acceptance(args), ensure_ascii=False, indent=2))
+        print(json.dumps(run_acceptance(args, failure_observer=failure_observer), ensure_ascii=False, indent=2))
     except Exception as exc:  # live failures are reported, never repaired here
-        print(json.dumps({"valid": False, "error_type": type(exc).__name__, "error": str(exc)}, ensure_ascii=False, indent=2))
+        print(json.dumps(live_failure_payload(exc, failure_observer.get("client")), ensure_ascii=False, indent=2))
         print("A5G3 REAL-NOVEL ACCEPTANCE FAIL")
         return 2
     print("A5G3 REAL-NOVEL ACCEPTANCE PASS")

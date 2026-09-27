@@ -898,13 +898,13 @@ def build_a5_semantic_identity(
 
 @dataclass(frozen=True, slots=True)
 class ConsolidationPublication:
-    """Outcome of an A5F2 validated publication.
+    """Outcome of an A5 validated publication or exact-current reuse.
 
-    Carries the exact published A5 artifact refs (the six leaves, the manifest,
-    the PASS validation report), the immutable current_pointer artifact ref
+    Carries the exact A5 artifact refs (the six leaves, the manifest, the PASS
+    validation report), the immutable current_pointer artifact ref
     (``current_pointer_ref``), and the pointer target ref (which is the
-    ``consolidation_manifest_ref``). A5F2 never reuses (``reused`` is always
-    ``False``); current-only exact reuse is A5F3.
+    ``consolidation_manifest_ref``). A5F2 publication returns ``reused=False``;
+    A5F3 exact-current reuse returns the existing refs with ``reused=True``.
     """
 
     consolidation_candidate_index_ref: ArtifactRef
@@ -944,13 +944,14 @@ class ValidatedConsolidationCurrent:
 
 
 class ConsolidationPersistenceService:
-    """The A5F2 publication-boundary service.
+    """The A5F2/A5F3 consolidation publication and reuse service.
 
     Mirrors :meth:`ReconciliationPersistenceService.publish_validated` (A4D):
     it persists the A5 run (six leaves + manifest + deterministic PASS report)
     at one shared run revision, re-checks upstream A4 CURRENT stability, and
     publishes the A5 CURRENT via a compare-and-set (``PointerKind.CURRENT``).
-    It performs NO provider calls and never reuses (A5F3 adds reuse).
+    A5F3 adds a read-only, current-only exact-reuse seam.  Neither path makes
+    provider calls.
     """
 
     def __init__(self, store: FileArtifactStore, pointers: FilePointerStore) -> None:
@@ -1148,6 +1149,129 @@ class ConsolidationPersistenceService:
                 "upstream A4 CURRENT A3 input advanced during the A5 run; "
                 "refusing to publish a stale A5 state"
             )
+
+    # -- pre-provider current-only reuse ----------------------------------
+
+    def try_reuse_current(
+        self,
+        *,
+        project_id: str,
+        document_id: str,
+        consolidation_profile: ConsolidationProfile,
+        planning_result: ConsolidationPlanningResult,
+        fact_preparation: FactSemanticPreparation,
+        event_preparation: EventSemanticPreparation,
+        relationship_preparation: RelationshipSemanticPreparation,
+    ) -> ConsolidationPublication | None:
+        """Return the exact verified A5 CURRENT on a pre-provider cache hit.
+
+        This intentionally examines *only* the A5 CURRENT pointer.  A missing
+        pointer, or a fully valid CURRENT whose upstream or backend-neutral
+        semantic identity differs, is a normal read-only miss.  An existing
+        CURRENT is always fully verified before it can be compared: corruption
+        is therefore a fail-closed error rather than a cache miss.
+        """
+        if not isinstance(consolidation_profile, ConsolidationProfile):
+            raise StoryIntegrityError(
+                "consolidation_profile must be a ConsolidationProfile"
+            )
+        if not isinstance(planning_result, ConsolidationPlanningResult):
+            raise StoryIntegrityError(
+                "planning_result must be a ConsolidationPlanningResult"
+            )
+        for domain, preparation, expected_type in (
+            ("fact", fact_preparation, FactSemanticPreparation),
+            ("event", event_preparation, EventSemanticPreparation),
+            ("relationship", relationship_preparation, RelationshipSemanticPreparation),
+        ):
+            if not isinstance(preparation, expected_type):
+                raise StoryIntegrityError(
+                    f"{domain}_preparation must be a {expected_type.__name__}"
+                )
+            if preparation.planning_result != planning_result:
+                raise StoryIntegrityError(
+                    f"{domain}_preparation.planning_result does not exactly "
+                    "match the reuse planning_result"
+                )
+            if preparation.consolidation_profile != consolidation_profile:
+                raise StoryIntegrityError(
+                    f"{domain}_preparation.consolidation_profile does not "
+                    "exactly match the reuse consolidation_profile"
+                )
+
+        snapshot = planning_result.snapshot
+        if snapshot.source_document.project_id != project_id:
+            raise StoryIntegrityError(
+                "planning_result source_document.project_id does not match the "
+                "reuse project_id"
+            )
+        if snapshot.source_document.document_id != document_id:
+            raise StoryIntegrityError(
+                "planning_result source_document.document_id does not match the "
+                "reuse document_id"
+            )
+
+        # The one frozen identity builder is deliberately used here too.  It
+        # preserves fact -> event -> relationship request-hash ordering and
+        # contains no RuntimeConfig/provider routing fields.
+        semantic_identity = build_a5_semantic_identity(
+            fact_preparation,
+            event_preparation,
+            relationship_preparation,
+        )
+        profile_id = consolidation_profile.profile_id
+        base = a5_base_artifact_id(project_id, document_id, profile_id)
+        pointer_id = a5_pointer_id(project_id, document_id, profile_id)
+        current_pointer_ref, current_manifest_ref = self._current_a5_pointer(pointer_id)
+        if current_manifest_ref is None:
+            return None
+
+        manifest = self._verify_current_consolidation(
+            base=base,
+            pointer_id=pointer_id,
+            current_pointer_ref=current_pointer_ref,
+            current_manifest_ref=current_manifest_ref,
+        )
+        if (
+            manifest.entity_map_ref != snapshot.entity_map_ref
+            or manifest.upstream_identity.a3_input != snapshot.a3_input
+            or manifest.semantic_identity != semantic_identity
+        ):
+            return None
+
+        # The identity matched a CURRENT which could have become stale between
+        # A5B planning and this read-only hit, so retain A5F2's exact A4
+        # stability authority before returning it.
+        self._require_a4_upstream_stable(
+            project_id=project_id,
+            document_id=document_id,
+            reconciliation_profile_id=(
+                snapshot.entity_map.semantic_identity.reconciliation_profile_id
+            ),
+            snapshot=snapshot,
+        )
+        assert current_pointer_ref is not None
+        if self._pointers.resolve_current_pointer_ref(pointer_id) != current_pointer_ref:
+            raise StoryPersistenceError(
+                "A5 CURRENT pointer changed during reuse eligibility check"
+            )
+        return ConsolidationPublication(
+            consolidation_candidate_index_ref=manifest.consolidation_candidate_index_ref,
+            consolidation_decision_set_ref=manifest.consolidation_decision_set_ref,
+            canonical_fact_set_ref=manifest.canonical_fact_set_ref,
+            canonical_event_set_ref=manifest.canonical_event_set_ref,
+            canonical_relationship_set_ref=manifest.canonical_relationship_set_ref,
+            story_conflict_set_ref=manifest.story_conflict_set_ref,
+            consolidation_manifest_ref=current_manifest_ref,
+            validation_report_ref=_require_a5_validation_report(
+                self._store,
+                artifact_id=a5_validation_artifact_id(base),
+                revision=current_manifest_ref.revision,
+                expected_report=build_a5_validation_report(manifest, current_manifest_ref),
+            ),
+            current_pointer_ref=current_pointer_ref,
+            reused=True,
+        )
 
     # -- publication --------------------------------------------------------
 

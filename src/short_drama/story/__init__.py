@@ -402,6 +402,12 @@ from .consolidation_persistence import (
     persist_consolidation_manifest,
     persist_story_conflict_set,
 )
+from .consolidation_service import (
+    DEFAULT_CONSOLIDATION_PROMPT_BASE_DIR,
+    EvidenceConsolidationService,
+    EvidenceConsolidationStageResult,
+    consolidate_evidence_project,
+)
 from .extraction_batch import (
     ChunkExtractionBatchService,
     ChunkExtractionBatchSummary,
@@ -799,6 +805,10 @@ __all__ = [
     "ConsolidationPersistenceService",
     "ConsolidationPublication",
     "ValidatedConsolidationCurrent",
+    "DEFAULT_CONSOLIDATION_PROMPT_BASE_DIR",
+    "EvidenceConsolidationService",
+    "EvidenceConsolidationStageResult",
+    "consolidate_evidence_project",
     "story_conflict_set_artifact_id",
     "load_canonical_event_set",
     "load_canonical_fact_set",

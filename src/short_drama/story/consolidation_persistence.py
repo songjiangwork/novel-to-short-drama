@@ -898,13 +898,13 @@ def build_a5_semantic_identity(
 
 @dataclass(frozen=True, slots=True)
 class ConsolidationPublication:
-    """Outcome of an A5F2 validated publication.
+    """Outcome of an A5 validated publication or exact-current reuse.
 
-    Carries the exact published A5 artifact refs (the six leaves, the manifest,
-    the PASS validation report), the immutable current_pointer artifact ref
+    Carries the exact A5 artifact refs (the six leaves, the manifest, the PASS
+    validation report), the immutable current_pointer artifact ref
     (``current_pointer_ref``), and the pointer target ref (which is the
-    ``consolidation_manifest_ref``). A5F2 never reuses (``reused`` is always
-    ``False``); current-only exact reuse is A5F3.
+    ``consolidation_manifest_ref``). A5F2 publication returns ``reused=False``;
+    A5F3 exact-current reuse returns the existing refs with ``reused=True``.
     """
 
     consolidation_candidate_index_ref: ArtifactRef
@@ -1251,6 +1251,10 @@ class ConsolidationPersistenceService:
             snapshot=snapshot,
         )
         assert current_pointer_ref is not None
+        if self._pointers.resolve_current_pointer_ref(pointer_id) != current_pointer_ref:
+            raise StoryPersistenceError(
+                "A5 CURRENT pointer changed during reuse eligibility check"
+            )
         return ConsolidationPublication(
             consolidation_candidate_index_ref=manifest.consolidation_candidate_index_ref,
             consolidation_decision_set_ref=manifest.consolidation_decision_set_ref,

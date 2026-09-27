@@ -17,6 +17,7 @@ from short_drama.story import (
     ConsolidationPersistenceService,
     ConsolidationUpstreamUnstableError,
     StoryIntegrityError,
+    StoryPersistenceError,
     build_a5_semantic_identity,
 )
 from short_drama.story.consolidation_persistence import (
@@ -33,6 +34,7 @@ from test_story_a5f2_current_publication import (  # noqa: E402
     _HASH2,
     _build_tree_with_a4,
     _current_a5_target,
+    _highest_revision,
     _make_preparations,
     _planning,
     _publish_a4,
@@ -215,6 +217,41 @@ def test_hit_rechecks_a4_current_stability(tmp_path):
     with pytest.raises(ConsolidationUpstreamUnstableError):
         _reuse(service, tree, planning, preparations)
     assert _current_a5_target(tree) == published.consolidation_manifest_ref
+
+
+def test_a5_current_advance_during_reuse_eligibility_fails_closed(
+    tmp_path, monkeypatch
+):
+    tree, planning, published, preparations, service = _published_current(tmp_path)
+    original_upstream_check = service._require_a4_upstream_stable
+    winning_publications = []
+
+    def advance_a5_current_after_upstream_check(**kwargs):
+        original_upstream_check(**kwargs)
+        winning_publications.append(_publish_a5(tree, planning))
+
+    monkeypatch.setattr(
+        service, "_require_a4_upstream_stable", advance_a5_current_after_upstream_check
+    )
+
+    with pytest.raises(
+        StoryPersistenceError, match="A5 CURRENT pointer changed during reuse eligibility check"
+    ):
+        _reuse(service, tree, planning, preparations)
+
+    winner = winning_publications[0]
+    assert winner.consolidation_manifest_ref.revision == 2
+    assert _current_a5_target(tree) == winner.consolidation_manifest_ref
+    assert (
+        tree.pointers.resolve_current_pointer_ref(winner.current_pointer_ref.artifact_id)
+        == winner.current_pointer_ref
+    )
+    assert _highest_revision(
+        tree.store,
+        CONSOLIDATION_MANIFEST_ARTIFACT_TYPE,
+        winner.consolidation_manifest_ref.artifact_id,
+    ) == winner.consolidation_manifest_ref.revision
+    assert published.consolidation_manifest_ref != winner.consolidation_manifest_ref
 
 
 def test_corrupt_current_fails_closed_not_as_a_miss(tmp_path):

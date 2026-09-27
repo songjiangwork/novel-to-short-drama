@@ -112,6 +112,8 @@ class RecordingSleeper:
 class ConcurrentEchoTransport:
     """Thread-safe transport double that proves request state stays local."""
 
+    supports_concurrent_calls = True
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._barrier = threading.Barrier(2)
@@ -124,6 +126,15 @@ class ConcurrentEchoTransport:
         self._barrier.wait(timeout=5)
         marker = payload["messages"][-1]["content"]
         return ok_response(json.dumps({"a": marker}), response_id=f"resp-{marker}")
+
+
+class ConcurrentSleeper:
+    """Explicitly safe no-op sleeper for concurrent fake-transport tests."""
+
+    supports_concurrent_calls = True
+
+    def __call__(self, _delay: float) -> None:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +225,22 @@ def request_for(
     )
 
 
+def test_openai_compatible_client_concurrency_capability_tracks_dependencies():
+    runtime = make_client(FakeTransport()).runtime_config
+
+    assert OpenAICompatibleLLMClient(runtime).supports_concurrent_calls is True
+    assert make_client(FakeTransport()).supports_concurrent_calls is False
+    assert make_client(
+        ConcurrentEchoTransport(), sleeper=ConcurrentSleeper()
+    ).supports_concurrent_calls is True
+    # A safe transport alone is insufficient when a custom sleeper might be
+    # called by concurrent technical retries.
+    assert make_client(ConcurrentEchoTransport()).supports_concurrent_calls is False
+
+
 def test_openai_compatible_client_concurrent_calls_keep_request_state_local():
     transport = ConcurrentEchoTransport()
-    client = make_client(transport)
+    client = make_client(transport, sleeper=ConcurrentSleeper())
     rendered = (make_rendered(text="alpha"), make_rendered(text="beta"))
 
     with ThreadPoolExecutor(max_workers=2) as executor:

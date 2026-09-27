@@ -160,6 +160,9 @@ def _execute_prepared_blocks(
         return tuple(execute_one_block(block, request) for block, request in ordered)
 
     results: dict[int, _BlockResultT] = {}
+    # Sequence index reconstructs canonical input order. Failure selection is
+    # instead frozen to the block's actual ordinal (benchmark subsets need not
+    # preserve ordinal-as-index).
     failures: dict[int, Exception] = {}
     next_index = 0
     futures: dict[Future[_BlockResultT], int] = {}
@@ -167,6 +170,12 @@ def _execute_prepared_blocks(
     def submit(index: int, executor: ThreadPoolExecutor) -> None:
         block, request = ordered[index]
         futures[executor.submit(execute_one_block, block, request)] = index
+
+    def record_failure(index: int, exc: Exception) -> None:
+        block_ordinal = ordered[index][0].block_ordinal
+        if isinstance(block_ordinal, bool) or not isinstance(block_ordinal, int):
+            raise StoryIntegrityError("prepared semantic block_ordinal must be an integer")
+        failures[block_ordinal] = exc
 
     with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
         while next_index < len(ordered) and len(futures) < max_concurrency:
@@ -180,7 +189,7 @@ def _execute_prepared_blocks(
                 try:
                     results[index] = future.result()
                 except Exception as exc:  # original provider/domain exception
-                    failures[index] = exc
+                    record_failure(index, exc)
 
             if failures:
                 # Never submit after an observed failure.  Work not yet begun
@@ -196,7 +205,7 @@ def _execute_prepared_blocks(
                     try:
                         results[index] = future.result()
                     except Exception as exc:  # original provider/domain exception
-                        failures[index] = exc
+                        record_failure(index, exc)
                 raise failures[min(failures)]
 
             while next_index < len(ordered) and len(futures) < max_concurrency:

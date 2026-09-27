@@ -31,6 +31,7 @@ real provider is called and nothing is persisted.
 from __future__ import annotations
 
 import dataclasses
+import time
 from pathlib import Path
 
 import pytest
@@ -309,6 +310,29 @@ class FakeLLMClient(LLMClient):
         )
 
 
+class ConcurrentPayloadLLMClient(LLMClient):
+    """Read-only request-hash keyed fake for out-of-order A5D execution."""
+
+    supports_concurrent_calls = True
+
+    def __init__(self, payloads, delays):
+        self._payloads = payloads
+        self._delays = delays
+
+    def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
+        request = build_structured_request(
+            rendered_prompt=rendered_prompt,
+            output_schema=output_schema,
+            semantic_profile=semantic_profile,
+        )
+        time.sleep(self._delays[request.request_hash])
+        return StructuredGenerationResult(
+            parsed_json=self._payloads[request.request_hash],
+            provenance=_make_provenance(request),
+            attempts=1,
+        )
+
+
 def _ev_payload_for_block(block, decision="same_event", reason="LLM 判断", selectors=None):
     """Build a schema-valid event payload dict covering a block's pairs in order."""
     if selectors is None:
@@ -380,6 +404,104 @@ def _resolve_ev(planning, client):
 def _resolve_rel(planning, client):
     return resolve_relationship_semantic_ambiguity(
         planning, _PROFILE, _REL_SEM_PROFILE, client, prompts=_PROMPTS
+    )
+
+
+def _many_event_tree(tmp_path):
+    return _build_multi_chunk_tree(
+        tmp_path,
+        ChunkSpec(
+            "CH001", ("CH001_P0001",),
+            chars=(_char("cand_char_001", "Alice"),),
+            locs=(_loc("cand_loc_001", "Wonderland"),),
+            events=tuple(
+                _mk_event(
+                    f"cand_evt_{index:03d}", participants=("cand_char_001",),
+                    locations=("cand_loc_001",), summary=f"event {index}",
+                )
+                for index in range(1, 7)
+            ),
+        ),
+    )
+
+
+def _many_relationship_tree(tmp_path):
+    return _build_multi_chunk_tree(
+        tmp_path,
+        ChunkSpec(
+            "CH001", ("CH001_P0001",),
+            chars=(
+                _char("cand_char_001", "Alice"),
+                _char("cand_char_002", "Bob"),
+            ),
+            rels=tuple(
+                _mk_rel(
+                    f"cand_rel_{index:03d}", source="cand_char_001",
+                    target="cand_char_002", rtype=f"relation {index}",
+                )
+                for index in range(1, 7)
+            ),
+        ),
+    )
+
+
+def _concurrent_payloads(preparation, payload_for_block):
+    payloads = {
+        request.request_hash: payload_for_block(block)
+        for block, request in zip(preparation.blocks, preparation.structured_requests)
+    }
+    delays = {
+        request.request_hash: 0.02 * (len(preparation.blocks) - block.block_ordinal)
+        for block, request in zip(preparation.blocks, preparation.structured_requests)
+    }
+    return payloads, delays
+
+
+def test_event_serial_and_concurrent_resolvers_are_canonically_equivalent(tmp_path):
+    planning = _ev_planning(_many_event_tree(tmp_path))
+    preparation = _ev_prep(planning)
+    assert len(preparation.blocks) > 1
+    payloads, delays = _concurrent_payloads(preparation, _ev_payload_for_block)
+
+    serial = resolve_event_semantic_ambiguity(
+        planning, _PROFILE, _EV_SEM_PROFILE, FakeLLMClient(list(payloads.values())),
+        prompts=_PROMPTS, max_concurrency=1,
+    )
+    concurrent = resolve_event_semantic_ambiguity(
+        planning, _PROFILE, _EV_SEM_PROFILE,
+        ConcurrentPayloadLLMClient(payloads, delays),
+        prompts=_PROMPTS, max_concurrency=2,
+    )
+
+    assert concurrent.semantic_decisions == serial.semantic_decisions
+    assert concurrent.all_event_decisions == serial.all_event_decisions
+    assert concurrent.block_results == serial.block_results
+    assert tuple(result.block_id for result in concurrent.block_results) == tuple(
+        block.block_id for block in preparation.blocks
+    )
+
+
+def test_relationship_serial_and_concurrent_resolvers_are_canonically_equivalent(tmp_path):
+    planning = _rel_planning(_many_relationship_tree(tmp_path))
+    preparation = _rel_prep(planning)
+    assert len(preparation.blocks) > 1
+    payloads, delays = _concurrent_payloads(preparation, _rel_payload_for_block)
+
+    serial = resolve_relationship_semantic_ambiguity(
+        planning, _PROFILE, _REL_SEM_PROFILE, FakeLLMClient(list(payloads.values())),
+        prompts=_PROMPTS, max_concurrency=1,
+    )
+    concurrent = resolve_relationship_semantic_ambiguity(
+        planning, _PROFILE, _REL_SEM_PROFILE,
+        ConcurrentPayloadLLMClient(payloads, delays),
+        prompts=_PROMPTS, max_concurrency=2,
+    )
+
+    assert concurrent.semantic_decisions == serial.semantic_decisions
+    assert concurrent.all_relationship_decisions == serial.all_relationship_decisions
+    assert concurrent.block_results == serial.block_results
+    assert tuple(result.block_id for result in concurrent.block_results) == tuple(
+        block.block_id for block in preparation.blocks
     )
 
 

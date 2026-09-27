@@ -132,6 +132,29 @@ def test_failure_stops_new_scheduling_and_propagates_lowest_original_exception()
     assert set(started) == {0, 1}
 
 
+def test_failure_winner_uses_real_block_ordinal_not_input_sequence_index():
+    blocks = (_Block(50), _Block(7))
+    ordinal_50 = RuntimeError("ordinal 50 fails first")
+    ordinal_7 = ValueError("ordinal 7 fails later but wins")
+    ordinal_7_started = threading.Event()
+
+    def execute(block, _request):
+        if block.block_ordinal == 50:
+            assert ordinal_7_started.wait(timeout=1)
+            raise ordinal_50
+        ordinal_7_started.set()
+        time.sleep(0.03)
+        raise ordinal_7
+
+    with pytest.raises(ValueError) as caught:
+        _execute_prepared_blocks(
+            blocks, (object(), object()), execute,
+            llm_client=_ConcurrentClient(), max_concurrency=2,
+        )
+
+    assert caught.value is ordinal_7
+
+
 def test_fact_resolution_is_identical_after_out_of_order_concurrent_completion(tmp_path):
     """The real fact callback remains canonical despite runtime completion order."""
     from test_story_a5c_fact_preparation import _planning, _tree

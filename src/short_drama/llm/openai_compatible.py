@@ -55,6 +55,8 @@ class LLMTransport(Protocol):
     adapter.
     """
 
+    supports_concurrent_calls: bool
+
     def post(
         self,
         *,
@@ -68,6 +70,8 @@ class LLMTransport(Protocol):
 
 class UrllibTransport:
     """v1 transport built on Python stdlib ``urllib.request`` (no new deps)."""
+
+    supports_concurrent_calls = True
 
     def post(
         self,
@@ -302,10 +306,6 @@ class OpenAICompatibleLLMClient(LLMClient):
     """
 
     supported_structured_output_modes = frozenset({"none", "json_object", "json_schema"})
-    # RuntimeConfig is immutable and every request/body/provenance object is
-    # request-local. UrllibTransport owns no request state, so this adapter can
-    # safely share one instance across synchronous A5 worker threads.
-    supports_concurrent_calls = True
 
     def __init__(
         self,
@@ -329,6 +329,19 @@ class OpenAICompatibleLLMClient(LLMClient):
     @property
     def runtime_config(self) -> RuntimeConfig:
         return self._runtime
+
+    @property
+    def supports_concurrent_calls(self) -> bool:
+        """Whether this instance's transport and retry sleeper are safe to share."""
+        transport_safe = bool(
+            getattr(self._transport, "supports_concurrent_calls", False)
+        )
+        # A technical retry can invoke the sleeper from concurrent workers. The
+        # built-in function is stateless; injected callables must opt in.
+        sleeper_safe = self._sleeper is real_sleeper or bool(
+            getattr(self._sleeper, "supports_concurrent_calls", False)
+        )
+        return transport_safe and sleeper_safe
 
     def generate_structured(
         self,

@@ -4,6 +4,7 @@ import json
 import socket as _socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -108,6 +109,23 @@ class RecordingSleeper:
         self.delays.append(delay)
 
 
+class ConcurrentEchoTransport:
+    """Thread-safe transport double that proves request state stays local."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._barrier = threading.Barrier(2)
+        self.calls: list[dict] = []
+
+    def post(self, *, url, headers, body, timeout_seconds):
+        payload = json.loads(body)
+        with self._lock:
+            self.calls.append(payload)
+        self._barrier.wait(timeout=5)
+        marker = payload["messages"][-1]["content"]
+        return ok_response(json.dumps({"a": marker}), response_id=f"resp-{marker}")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -193,6 +211,32 @@ def request_for(
         rendered_prompt=rendered or make_rendered(),
         output_schema=schema or make_schema(),
         semantic_profile=profile or make_profile(),
+    )
+
+
+def test_openai_compatible_client_concurrent_calls_keep_request_state_local():
+    transport = ConcurrentEchoTransport()
+    client = make_client(transport)
+    rendered = (make_rendered(text="alpha"), make_rendered(text="beta"))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.submit(client.generate_structured, item, make_schema(), make_profile())
+            for item in rendered
+        )
+        results = tuple(future.result() for future in results)
+
+    requests = tuple(request_for(rendered=item) for item in rendered)
+    assert client.supports_concurrent_calls is True
+    assert {call["messages"][-1]["content"] for call in transport.calls} == {
+        "Echo the value: alpha", "Echo the value: beta"
+    }
+    assert tuple(result.provenance.request_hash for result in results) == tuple(
+        request.request_hash for request in requests
+    )
+    assert tuple(result.attempts for result in results) == (1, 1)
+    assert tuple(result.parsed_json["a"] for result in results) == (
+        "Echo the value: alpha", "Echo the value: beta"
     )
 
 

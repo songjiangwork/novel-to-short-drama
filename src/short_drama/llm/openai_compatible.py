@@ -302,6 +302,10 @@ class OpenAICompatibleLLMClient(LLMClient):
     """
 
     supported_structured_output_modes = frozenset({"none", "json_object", "json_schema"})
+    # RuntimeConfig is immutable and every request/body/provenance object is
+    # request-local. UrllibTransport owns no request state, so this adapter can
+    # safely share one instance across synchronous A5 worker threads.
+    supports_concurrent_calls = True
 
     def __init__(
         self,

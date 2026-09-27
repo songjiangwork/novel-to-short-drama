@@ -54,7 +54,7 @@ def _inputs(tmp_path):
     return tree, load_fact_semantic_profile(), ExplodingLLM()
 
 
-def _run(tree, semantic_profile, llm):
+def _run(tree, semantic_profile, llm, *, max_concurrency=1):
     return EvidenceConsolidationService(tree.store, tree.pointers).consolidate_evidence(
         project_id=PROJECT,
         document_id=DOCUMENT,
@@ -62,6 +62,7 @@ def _run(tree, semantic_profile, llm):
         consolidation_profile=tree.consolidation_profile,
         semantic_profile=semantic_profile,
         llm_client=llm,
+        max_concurrency=max_concurrency,
     )
 
 
@@ -122,7 +123,7 @@ def test_exact_reuse_is_pre_provider_and_returns_same_refs(tmp_path):
     fresh = _run(tree, semantic_profile, llm)
     reuse_llm = ExplodingLLM()
 
-    reused = _run(tree, semantic_profile, reuse_llm)
+    reused = _run(tree, semantic_profile, reuse_llm, max_concurrency=8)
 
     assert reused.reused is True
     assert reused.semantic_generation_call_count == 0

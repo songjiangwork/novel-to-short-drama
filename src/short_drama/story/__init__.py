@@ -347,6 +347,7 @@ from .consolidation_semantic import (
     load_relationship_output_schema,
     load_relationship_semantic_profile,
     resolve_fact_semantic_ambiguity,
+    validate_a5_max_concurrency,
 )
 from .consolidation_finalization import (
     A5FinalizationResult,
@@ -727,6 +728,7 @@ __all__ = [
     "RelationshipSemanticPreparation",
     "compute_fact_llm_decision_id",
     "resolve_fact_semantic_ambiguity",
+    "validate_a5_max_concurrency",
     "build_event_endpoint_packet",
     "build_event_pair_context",
     "build_event_packing_audit",

@@ -102,6 +102,7 @@ def test_consolidate_evidence_defaults_are_repo_root_safe_and_need_no_a3_a4_flag
     assert captured["reconciliation_profile_id"] == "entity-reconciliation-v2"
     assert captured["consolidation_profile_path"] == REPO_ROOT / "profiles" / "consolidation_v1.yaml"
     assert captured["semantic_profile_path"] == REPO_ROOT / "profiles" / "consolidation_llm_v1.yaml"
+    assert captured["max_concurrency"] == 1
     assert captured["runtime_path"] == REPO_ROOT / "profiles" / "llm_local.yaml"
     assert json.loads(capsys.readouterr().out) == FULL_STAGE_RESULT_DICT
     assert cli.DEFAULT_CONSOLIDATE_PROFILES == {
@@ -143,6 +144,7 @@ def test_consolidate_evidence_composes_exact_runtime_and_a5_inputs(monkeypatch, 
         "consolidation_profile_path": "consolidation.yaml",
         "semantic_profile_path": "semantic.yaml",
         "llm_client": "CLIENT_OBJ",
+        "max_concurrency": 1,
     }
     assert "runtime.yaml" not in {
         captured["consolidation_profile_path"],
@@ -150,6 +152,25 @@ def test_consolidate_evidence_composes_exact_runtime_and_a5_inputs(monkeypatch, 
         captured["reconciliation_profile_id"],
     }
     assert json.loads(capsys.readouterr().out) == FULL_STAGE_RESULT_DICT
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", "1.5"])
+def test_consolidate_evidence_rejects_invalid_max_concurrency(monkeypatch, value):
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(
+            monkeypatch, "consolidate-evidence", "project.yaml",
+            "--max-concurrency", value,
+        )
+    assert exc.value.code == 2
+
+
+def test_consolidate_evidence_passes_explicit_max_concurrency(monkeypatch):
+    captured, _order = _patch_success_boundaries(monkeypatch)
+    assert _run_cli(
+        monkeypatch, "consolidate-evidence", "project.yaml",
+        "--max-concurrency", "4",
+    ) == 0
+    assert captured["max_concurrency"] == 4
 
 
 def test_consolidate_evidence_reuse_result_is_printed_unchanged(monkeypatch, capsys):

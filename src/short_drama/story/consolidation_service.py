@@ -45,6 +45,7 @@ from .consolidation_semantic import (
     resolve_event_semantic_ambiguity,
     resolve_fact_semantic_ambiguity,
     resolve_relationship_semantic_ambiguity,
+    validate_a5_max_concurrency,
 )
 
 
@@ -175,8 +176,10 @@ class EvidenceConsolidationService:
         consolidation_profile: ConsolidationProfile,
         semantic_profile: SemanticLLMProfile,
         llm_client: LLMClient,
+        max_concurrency: int = 1,
     ) -> EvidenceConsolidationStageResult:
         """Execute A5G1 planning, pre-provider reuse, or fresh consolidation."""
+        max_concurrency = validate_a5_max_concurrency(max_concurrency)
         planning = build_consolidation_planning(
             self._store,
             self._pointers,
@@ -221,13 +224,16 @@ class EvidenceConsolidationService:
 
         # The existing domain authorities execute sequentially in frozen order.
         fact_resolution = resolve_fact_semantic_ambiguity(
-            planning, consolidation_profile, semantic_profile, llm_client, prompts=self._prompts
+            planning, consolidation_profile, semantic_profile, llm_client,
+            prompts=self._prompts, max_concurrency=max_concurrency,
         )
         event_resolution = resolve_event_semantic_ambiguity(
-            planning, consolidation_profile, semantic_profile, llm_client, prompts=self._prompts
+            planning, consolidation_profile, semantic_profile, llm_client,
+            prompts=self._prompts, max_concurrency=max_concurrency,
         )
         relationship_resolution = resolve_relationship_semantic_ambiguity(
-            planning, consolidation_profile, semantic_profile, llm_client, prompts=self._prompts
+            planning, consolidation_profile, semantic_profile, llm_client,
+            prompts=self._prompts, max_concurrency=max_concurrency,
         )
         finalization = finalize_consolidation(
             planning, fact_resolution, event_resolution, relationship_resolution
@@ -375,6 +381,7 @@ def consolidate_evidence_project(
     consolidation_profile_path: str | Path,
     semantic_profile_path: str | Path,
     llm_client: LLMClient,
+    max_concurrency: int = 1,
 ) -> EvidenceConsolidationStageResult:
     """Provider-neutral project composition; runtime/client wiring is A5G2."""
     from short_drama.llm import load_semantic_profile
@@ -393,6 +400,7 @@ def consolidate_evidence_project(
         consolidation_profile=consolidation_profile,
         semantic_profile=semantic_profile,
         llm_client=llm_client,
+        max_concurrency=max_concurrency,
     )
 
 

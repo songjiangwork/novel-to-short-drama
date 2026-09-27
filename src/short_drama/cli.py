@@ -25,6 +25,16 @@ from .workflows.retry import build_gated_retry
 
 def out(x): print(json.dumps(x, ensure_ascii=False, indent=2))
 
+
+def _positive_int(value: str, flag: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{flag} must be an integer >= 1") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"{flag} must be an integer >= 1")
+    return parsed
+
 # A3E-B extract-chunks: repo-root-safe tracked defaults for the extraction / runtime /
 # semantic-LLM profiles. The chunk profile is always explicit (--chunk-profile required).
 DEFAULT_EXTRACT_PROFILES = {
@@ -71,7 +81,7 @@ def main():
     a=s.add_parser("plan-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--profile",required=True)
     a=s.add_parser("extract-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_EXTRACT_PROFILES["extraction_profile"]); a.add_argument("--runtime-config",default=DEFAULT_EXTRACT_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_EXTRACT_PROFILES["llm_profile"])
     a=s.add_parser("reconcile-entities"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_RECONCILE_PROFILES["extraction_profile"]); a.add_argument("--reconciliation-profile",default=DEFAULT_RECONCILE_PROFILES["reconciliation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_RECONCILE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_RECONCILE_PROFILES["llm_profile"])
-    a=s.add_parser("consolidate-evidence"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--reconciliation-profile-id",default=DEFAULT_CONSOLIDATE_PROFILES["reconciliation_profile_id"]); a.add_argument("--consolidation-profile",default=DEFAULT_CONSOLIDATE_PROFILES["consolidation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_CONSOLIDATE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_CONSOLIDATE_PROFILES["llm_profile"])
+    a=s.add_parser("consolidate-evidence"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--reconciliation-profile-id",default=DEFAULT_CONSOLIDATE_PROFILES["reconciliation_profile_id"]); a.add_argument("--consolidation-profile",default=DEFAULT_CONSOLIDATE_PROFILES["consolidation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_CONSOLIDATE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_CONSOLIDATE_PROFILES["llm_profile"]); a.add_argument("--max-concurrency",type=lambda value: _positive_int(value, "--max-concurrency"),default=1)
     x=p.parse_args()
     if x.cmd=="validate":
         e=validate_shot(x.path) if x.kind=="shot" else validate_file(x.path,x.kind); out({"valid":not e,"errors":e}); return 0 if not e else 2
@@ -143,6 +153,7 @@ def main():
                 consolidation_profile_path=x.consolidation_profile,
                 semantic_profile_path=x.llm_profile,
                 llm_client=llm_client,
+                max_concurrency=x.max_concurrency,
             )
         except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
         except LLMError as exc: out({"valid":False,"error":str(exc)}); return 2

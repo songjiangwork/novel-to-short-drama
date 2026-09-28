@@ -54,6 +54,11 @@ class CountingLLMClient(LLMClient):
         self.semantic_generation_calls = 0
         self.provider_attempts = 0
 
+    @property
+    def supports_concurrent_calls(self) -> bool:
+        """Expose only the wrapped client's explicit concurrency capability."""
+        return bool(getattr(self._inner, "supports_concurrent_calls", False))
+
     def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
         with self._lock:
             self.semantic_generation_calls += 1

@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 from short_drama.llm import LLMRetryExhaustedError
-from short_drama.story import ConsolidationSemanticGenerationError
+from short_drama.story import ConsolidationSemanticError, ConsolidationSemanticGenerationError
+from short_drama.story.consolidation_semantic import _execute_prepared_blocks
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -190,13 +191,39 @@ def test_counting_client_counts_successful_result_attempts():
 
 
 def test_counting_client_accounting_is_safe_for_bounded_concurrent_calls():
-    inner = SimpleNamespace(generate_structured=lambda *args: SimpleNamespace(attempts=2))
+    inner = SimpleNamespace(
+        supports_concurrent_calls=True,
+        generate_structured=lambda *args: SimpleNamespace(attempts=2),
+    )
     client = acceptance.CountingLLMClient(inner)
     with ThreadPoolExecutor(max_workers=acceptance.A5_MAX_CONCURRENCY) as executor:
         list(executor.map(lambda _index: client.generate_structured(None, None, None), range(24)))
     assert acceptance.A5_MAX_CONCURRENCY == 4
     assert client.semantic_generation_calls == 24
     assert client.provider_attempts == 48
+
+
+def test_counting_client_concurrency_capability_is_conservatively_forwarded():
+    capable = acceptance.CountingLLMClient(SimpleNamespace(supports_concurrent_calls=True))
+    missing = acceptance.CountingLLMClient(SimpleNamespace())
+    serial = acceptance.CountingLLMClient(SimpleNamespace(supports_concurrent_calls=False))
+    assert capable.supports_concurrent_calls is True
+    assert missing.supports_concurrent_calls is False
+    assert serial.supports_concurrent_calls is False
+
+
+def test_counting_client_passes_existing_bounded_executor_capability_gate():
+    capable = acceptance.CountingLLMClient(SimpleNamespace(supports_concurrent_calls=True))
+    assert _execute_prepared_blocks(
+        ("block",), ("request",), lambda block, request: (block, request),
+        llm_client=capable, max_concurrency=2,
+    ) == (("block", "request"),)
+    serial = acceptance.CountingLLMClient(SimpleNamespace())
+    with pytest.raises(ConsolidationSemanticError, match="supports concurrent calls"):
+        _execute_prepared_blocks(
+            ("block",), ("request",), lambda block, request: (block, request),
+            llm_client=serial, max_concurrency=2,
+        )
 
 
 def test_counting_client_counts_exhausted_attempts_and_reraises_same_exception():

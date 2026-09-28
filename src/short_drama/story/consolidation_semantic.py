@@ -3525,27 +3525,6 @@ def _attempt_event_semantic_block(
     )
 
 
-def _execute_event_semantic_block(
-    planning_result: ConsolidationPlanningResult,
-    consolidation_profile: ConsolidationProfile,
-    semantic_profile: SemanticLLMProfile,
-    llm_client: LLMClient,
-    block: EventSemanticBlock,
-    request: StructuredGenerationRequest,
-) -> EventSemanticBlockResult:
-    """Execute one complete Event block through the frozen two-stage policy."""
-    return _execute_two_stage_semantic_blocks(
-        (block,),
-        (request,),
-        lambda current_block, current_request, semantic_round: _attempt_event_semantic_block(
-            planning_result, semantic_profile, llm_client, current_block, current_request,
-            semantic_round=semantic_round,
-        ),
-        llm_client=llm_client,
-        max_concurrency=1,
-    )[0]
-
-
 def _attempt_relationship_semantic_block(
     planning_result: ConsolidationPlanningResult,
     semantic_profile: SemanticLLMProfile,

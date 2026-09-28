@@ -39,9 +39,12 @@ def test_benchmark_uses_fake_client_and_leaves_existing_run_tree_unchanged(tmp_p
         for index in range(3)
     )
     preparation = SimpleNamespace(blocks=blocks, structured_requests=requests)
-    fake_client = object()
-    fake_result = lambda: SimpleNamespace(
-        semantic_rounds=1, generation_provenance=SimpleNamespace(usage=None)
+    class FakeClient:
+        supports_concurrent_calls = True
+
+    fake_client = FakeClient()
+    fake_result = lambda semantic_round: SimpleNamespace(
+        semantic_rounds=semantic_round, generation_provenance=SimpleNamespace(usage=None)
     )
     monkeypatch.setattr(benchmark, "_load_project", lambda _path: (Path("p"), {"project_id": project_id}))
     monkeypatch.setattr(benchmark, "FileArtifactStore", lambda root: object())
@@ -53,14 +56,30 @@ def test_benchmark_uses_fake_client_and_leaves_existing_run_tree_unchanged(tmp_p
     monkeypatch.setattr(benchmark, "build_event_semantic_preparation", lambda *args, **kwargs: preparation)
     monkeypatch.setattr(benchmark, "load_runtime_config", lambda _path: object())
     monkeypatch.setattr(benchmark, "OpenAICompatibleLLMClient", lambda _config: fake_client)
-    monkeypatch.setattr(benchmark, "_execute_event_semantic_block", lambda *args: fake_result())
+    coordinator_calls = []
+    attempt_rounds = []
 
-    def fake_executor(blocks, requests, execute, *, llm_client, max_concurrency):
+    def fake_attempt(planning_result, semantic_profile, client, block, request, *, semantic_round):
+        assert planning_result is not None
+        assert semantic_profile is not None
+        assert client is fake_client
+        assert semantic_round == 1
+        attempt_rounds.append((block.block_id, semantic_round))
+        return fake_result(semantic_round)
+
+    real_two_stage = benchmark._execute_two_stage_semantic_blocks
+
+    def recording_two_stage(blocks, requests, execute_one_round, *, llm_client, max_concurrency):
         assert llm_client is fake_client
         assert max_concurrency == 2
-        return tuple(execute(block, request) for block, request in zip(blocks, requests))
+        coordinator_calls.append((blocks, requests))
+        return real_two_stage(
+            blocks, requests, execute_one_round,
+            llm_client=llm_client, max_concurrency=max_concurrency,
+        )
 
-    monkeypatch.setattr(benchmark, "_execute_prepared_blocks", fake_executor)
+    monkeypatch.setattr(benchmark, "_attempt_event_semantic_block", fake_attempt)
+    monkeypatch.setattr(benchmark, "_execute_two_stage_semantic_blocks", recording_two_stage)
     monkeypatch.setattr(
         sys, "argv", ["a5_concurrency_benchmark.py", "project.yaml", "--runs-root", str(tmp_path), "--max-concurrency", "2"]
     )
@@ -69,4 +88,15 @@ def test_benchmark_uses_fake_client_and_leaves_existing_run_tree_unchanged(tmp_p
     report = json.loads(capsys.readouterr().out)
     assert report["read_only_verified"] is True
     assert report["requests_completed"] == 3
+    assert len(coordinator_calls) == 1
+    selected_blocks, selected_requests = coordinator_calls[0]
+    # The benchmark selects its largest prompts first, but the complete
+    # selected set must enter one shared two-stage coordinator invocation.
+    assert tuple(block.block_id for block in selected_blocks) == (
+        "event-2", "event-1", "event-0"
+    )
+    assert selected_requests == tuple(reversed(requests))
+    assert sorted(attempt_rounds) == [
+        ("event-0", 1), ("event-1", 1), ("event-2", 1)
+    ]
     assert artifact.read_text(encoding="utf-8") == '{"immutable":true}'

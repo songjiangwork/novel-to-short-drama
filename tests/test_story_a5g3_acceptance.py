@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,6 +187,16 @@ def test_counting_client_counts_successful_result_attempts():
     assert result.attempts == 2
     assert client.semantic_generation_calls == 1
     assert client.provider_attempts == 2
+
+
+def test_counting_client_accounting_is_safe_for_bounded_concurrent_calls():
+    inner = SimpleNamespace(generate_structured=lambda *args: SimpleNamespace(attempts=2))
+    client = acceptance.CountingLLMClient(inner)
+    with ThreadPoolExecutor(max_workers=acceptance.A5_MAX_CONCURRENCY) as executor:
+        list(executor.map(lambda _index: client.generate_structured(None, None, None), range(24)))
+    assert acceptance.A5_MAX_CONCURRENCY == 4
+    assert client.semantic_generation_calls == 24
+    assert client.provider_attempts == 48
 
 
 def test_counting_client_counts_exhausted_attempts_and_reraises_same_exception():

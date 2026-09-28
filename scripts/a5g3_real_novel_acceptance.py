@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ RUNTIME_CONFIG = REPO_ROOT / "profiles" / "llm_local.yaml"
 SEMANTIC_PROFILE = REPO_ROOT / "profiles" / "consolidation_llm_v1.yaml"
 RECONCILIATION_PROFILE_ID = "entity-reconciliation-v2"
 EXPECTED_PROJECT_ID = "a3e-real-novel"
+A5_MAX_CONCURRENCY = 4
 
 
 class AcceptanceError(RuntimeError):
@@ -48,17 +50,21 @@ class CountingLLMClient(LLMClient):
 
     def __init__(self, inner: LLMClient) -> None:
         self._inner = inner
+        self._lock = threading.Lock()
         self.semantic_generation_calls = 0
         self.provider_attempts = 0
 
     def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
-        self.semantic_generation_calls += 1
+        with self._lock:
+            self.semantic_generation_calls += 1
         try:
             result = self._inner.generate_structured(rendered_prompt, output_schema, semantic_profile)
         except LLMRetryExhaustedError as exc:
-            self.provider_attempts += exc.attempts
+            with self._lock:
+                self.provider_attempts += exc.attempts
             raise
-        self.provider_attempts += result.attempts
+        with self._lock:
+            self.provider_attempts += result.attempts
         return result
 
 
@@ -273,7 +279,7 @@ def run_acceptance(
     client = CountingLLMClient(OpenAICompatibleLLMClient(runtime))
     set_active_failure_client(failure_observer, client)
     started = time.monotonic()
-    fresh = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=client)
+    fresh = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=client, max_concurrency=A5_MAX_CONCURRENCY)
     fresh_elapsed = time.monotonic() - started
     if fresh.reused or fresh.semantic_generation_call_count < 1 or client.semantic_generation_calls != fresh.semantic_generation_call_count or fresh.entity_map_ref != a4.entity_map_ref or fresh.candidate_extraction_refs != a4.entity_map.a3_input.candidate_extraction_refs:
         raise AcceptanceError("fresh production result failed identity/provider gates")
@@ -283,7 +289,7 @@ def run_acceptance(
     audit = _persisted_audit(store, a4.entity_map, fresh, profile.profile_id)
     before = snapshot_a5_files(args.runs_root, project_id)
     sem_before, attempts_before, started = client.semantic_generation_calls, client.provider_attempts, time.monotonic()
-    rerun = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=client)
+    rerun = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=client, max_concurrency=A5_MAX_CONCURRENCY)
     rerun_elapsed = time.monotonic() - started
     after = snapshot_a5_files(args.runs_root, project_id)
     check_reuse_gate(fresh, rerun, semantic_delta=client.semantic_generation_calls-sem_before, attempt_delta=client.provider_attempts-attempts_before, before=before, after=after)
@@ -291,7 +297,7 @@ def run_acceptance(
     transport_client = CountingLLMClient(OpenAICompatibleLLMClient(changed_runtime))
     before_transport = snapshot_a5_files(args.runs_root, project_id)
     set_active_failure_client(failure_observer, transport_client)
-    transport = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=transport_client)
+    transport = consolidate_evidence_project(project_file, runs_root=args.runs_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=args.llm_profile, llm_client=transport_client, max_concurrency=A5_MAX_CONCURRENCY)
     after_transport = snapshot_a5_files(args.runs_root, project_id)
     check_reuse_gate(fresh, transport, semantic_delta=transport_client.semantic_generation_calls, attempt_delta=transport_client.provider_attempts, before=before_transport, after=after_transport)
     original_current = a5.require_current_validated(project_id=project_id, document_id=DOCUMENT_ID, consolidation_profile_id=profile.profile_id)
@@ -307,16 +313,16 @@ def run_acceptance(
         changed_semantic = load_semantic_profile(temp_profile)
         temp_client = CountingLLMClient(OpenAICompatibleLLMClient(runtime))
         set_active_failure_client(failure_observer, temp_client)
-        invalidated = consolidate_evidence_project(project_file, runs_root=temp_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=temp_profile, llm_client=temp_client)
+        invalidated = consolidate_evidence_project(project_file, runs_root=temp_root, reconciliation_profile_id=args.reconciliation_profile_id, consolidation_profile_path=args.consolidation_profile, semantic_profile_path=temp_profile, llm_client=temp_client, max_concurrency=A5_MAX_CONCURRENCY)
         temp_store, temp_pointers = _stores(temp_root, project_id)
         temp_current = ConsolidationPersistenceService(temp_store, temp_pointers).require_current_validated(project_id=project_id, document_id=DOCUMENT_ID, consolidation_profile_id=profile.profile_id)
         check_invalidation_gate(old_hash=semantic.semantic_profile_hash, new_hash=changed_semantic.semantic_profile_hash, result=invalidated, semantic_calls=temp_client.semantic_generation_calls, provider_attempts=temp_client.provider_attempts, old_manifest=_ref(fresh.consolidation_manifest_ref), temp_current=temp_current)
-        invalidation = {"temp_runs_root": str(temp_root), "changed_field": "max_output_tokens", "old_semantic_profile_hash": semantic.semantic_profile_hash, "new_semantic_profile_hash": changed_semantic.semantic_profile_hash, "reused": invalidated.reused, "semantic_generation_calls": temp_client.semantic_generation_calls, "provider_attempts": temp_client.provider_attempts, "old_manifest_ref": _ref(fresh.consolidation_manifest_ref), "new_manifest_ref": _ref(invalidated.consolidation_manifest_ref)}
+        invalidation = {"temp_runs_root": str(temp_root), "changed_field": "max_output_tokens", "max_concurrency": A5_MAX_CONCURRENCY, "old_semantic_profile_hash": semantic.semantic_profile_hash, "new_semantic_profile_hash": changed_semantic.semantic_profile_hash, "reused": invalidated.reused, "semantic_generation_calls": temp_client.semantic_generation_calls, "provider_attempts": temp_client.provider_attempts, "old_manifest_ref": _ref(fresh.consolidation_manifest_ref), "new_manifest_ref": _ref(invalidated.consolidation_manifest_ref)}
     unchanged = a5.require_current_validated(project_id=project_id, document_id=DOCUMENT_ID, consolidation_profile_id=profile.profile_id)
     if unchanged.manifest_ref != original_current.manifest_ref or unchanged.current_pointer_ref != original_current.current_pointer_ref:
         raise AcceptanceError("temporary invalidation polluted original A5 CURRENT")
     summary = fresh.to_dict()
-    return {"upstream": upstream, "preflight": {"a5_current_before_fresh": None, "historical_a5_file_count": len(preexisting_a5_files)}, "fresh": {"timing_seconds": fresh_elapsed, "semantic_generation_calls": client.semantic_generation_calls, "provider_attempts": client.provider_attempts, "result": summary, "artifact_refs": publication_refs(fresh), "validation_pass": True}, "persisted_audit": audit, "exact_rerun": {"reused": rerun.reused, "semantic_generation_call_count": rerun.semantic_generation_call_count, "provider_call_delta": 0, "no_writes": True, "timing_seconds": rerun_elapsed}, "transport_only_reuse": {"changed_runtime_fields": ["transport_id", "base_url", "request_model", "provider_family", "timeout_seconds"], "reused": transport.reused, "semantic_generation_calls": transport_client.semantic_generation_calls, "provider_attempts": transport_client.provider_attempts, "same_refs": publication_refs(fresh) == publication_refs(transport), "no_writes": True}, "semantic_invalidation": dict(invalidation, original_current_unchanged=True)}
+    return {"upstream": upstream, "preflight": {"a5_current_before_fresh": None, "historical_a5_file_count": len(preexisting_a5_files)}, "fresh": {"timing_seconds": fresh_elapsed, "max_concurrency": A5_MAX_CONCURRENCY, "semantic_generation_calls": client.semantic_generation_calls, "provider_attempts": client.provider_attempts, "result": summary, "artifact_refs": publication_refs(fresh), "validation_pass": True}, "persisted_audit": audit, "exact_rerun": {"reused": rerun.reused, "max_concurrency": A5_MAX_CONCURRENCY, "semantic_generation_call_count": rerun.semantic_generation_call_count, "provider_call_delta": 0, "no_writes": True, "timing_seconds": rerun_elapsed}, "transport_only_reuse": {"changed_runtime_fields": ["transport_id", "base_url", "request_model", "provider_family", "timeout_seconds"], "max_concurrency": A5_MAX_CONCURRENCY, "reused": transport.reused, "semantic_generation_calls": transport_client.semantic_generation_calls, "provider_attempts": transport_client.provider_attempts, "same_refs": publication_refs(fresh) == publication_refs(transport), "no_writes": True}, "semantic_invalidation": dict(invalidation, original_current_unchanged=True)}
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:

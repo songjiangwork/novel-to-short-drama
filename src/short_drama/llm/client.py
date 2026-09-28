@@ -25,6 +25,10 @@ class LLMClient(ABC):
     """
 
     supported_structured_output_modes: ClassVar[frozenset[str]] = frozenset({"none"})
+    # Adapters must opt in explicitly before one instance is shared by the A5
+    # bounded executor.  The conservative default keeps future adapters from
+    # accidentally acquiring a thread-safety contract merely by subclassing.
+    supports_concurrent_calls: ClassVar[bool] = False
 
     @abstractmethod
     def generate_structured(

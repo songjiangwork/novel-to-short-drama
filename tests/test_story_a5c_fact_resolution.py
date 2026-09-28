@@ -126,6 +126,7 @@ class FakeLLMClient(LLMClient):
         self.responses = list(responses)
         self.call_count = 0
         self.request_hashes: list[str] = []
+        self.request_identities: list[tuple[object, ...]] = []
         self.provider_family = provider_family
         self.request_model = request_model
 
@@ -137,6 +138,15 @@ class FakeLLMClient(LLMClient):
             semantic_profile=semantic_profile,
         )
         self.request_hashes.append(request.request_hash)
+        self.request_identities.append((
+            request.request_hash,
+            request.rendered_prompt.rendered_prompt_hash,
+            request.output_schema.schema_id,
+            request.output_schema.schema_version,
+            request.output_schema.schema_hash,
+            request.semantic_profile.profile_id,
+            request.semantic_profile.semantic_profile_hash,
+        ))
         if not self.responses:
             raise AssertionError("unexpected extra generate_structured call")
         response = self.responses.pop(0)
@@ -329,6 +339,7 @@ def test_round1_typed_invalid_round2_valid(tmp_path):
     assert result.block_results[0].semantic_rounds == 2
     # Same request both rounds (semantic retry does not mutate the request).
     assert client.request_hashes[0] == client.request_hashes[1]
+    assert client.request_identities[0] == client.request_identities[1]
 
 
 def test_round1_invalid_selector_round2_valid(tmp_path):

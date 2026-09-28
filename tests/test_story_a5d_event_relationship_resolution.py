@@ -1074,7 +1074,7 @@ class TestEventDecisionId:
 
 class TestEventBlockAtomicity:
     def test_block_failure_stops_processing(self, tmp_path):
-        """If a block fails after both rounds, no later blocks are processed."""
+        """A terminal retry follows a complete first phase, then stops Phase 2."""
         from short_drama.story.extraction import EventCandidate
 
         # Create enough events to force 2+ blocks.
@@ -1106,17 +1106,21 @@ class TestEventBlockAtomicity:
         prep = _ev_prep(planning)
         assert len(prep.blocks) > 1
 
-        # First block: both rounds invalid. Later blocks: would be valid but
-        # never reached.
+        # Frozen deferred retry policy: every block gets exactly one Phase-1
+        # attempt before the barrier.  Only the first block is retryable;
+        # its terminal Phase-2 failure prevents any later Phase-2 retry.
         responses = [
-            {"decisions": []},  # block 0 round 1: invalid
-            {"decisions": []},  # block 0 round 2: invalid
+            {"decisions": []},  # block 0 Phase 1: invalid
+            *(
+                _ev_payload_for_block(block, decision="same_event")
+                for block in prep.blocks[1:]
+            ),
+            {"decisions": []},  # block 0 Phase 2: invalid
         ]
         client = FakeLLMClient(responses)
         with pytest.raises(ConsolidationSemanticGenerationError):
             _resolve_ev(planning, client)
-        # Only 2 calls (both for block 0), not more.
-        assert client.call_count == 2
+        assert client.call_count == len(prep.blocks) + 1
 
     def test_no_partial_decisions_retained(self, tmp_path):
         """On block failure, no partial decisions from that block are accepted."""
@@ -1589,3 +1593,45 @@ class TestRelationshipBlockAtomicity:
         with pytest.raises(ConsolidationSemanticGenerationError):
             _resolve_rel(planning, client)
         assert client.call_count == 2
+
+    def test_multi_block_retry_follows_complete_first_phase(self, tmp_path):
+        """Relationship resolution uses the shared deferred retry policy too."""
+        specs = [
+            ChunkSpec(
+                "CH001",
+                tuple(f"CH001_P{i:04d}" for i in range(1, 9)),
+                chars=(
+                    _char("cand_char_001", "Alice"),
+                    _char("cand_char_002", "Bob"),
+                ),
+                rels=tuple(
+                    _mk_rel(
+                        f"cand_rel_{index:03d}",
+                        source="cand_char_001",
+                        target="cand_char_002",
+                        rtype=f"relation-{index}",
+                        para=f"CH001_P{index:04d}",
+                    )
+                    for index in range(1, 9)
+                ),
+            ),
+        ]
+        planning = _rel_planning(_build_multi_chunk_tree(tmp_path, *specs))
+        prep = _rel_prep(planning)
+        assert len(prep.blocks) > 1
+
+        client = FakeLLMClient([
+            {"decisions": []},  # block 0, Phase 1 semantic-invalid
+            *(_rel_payload_for_block(block) for block in prep.blocks[1:]),
+            _rel_payload_for_block(prep.blocks[0]),  # block 0, serial Phase 2
+        ])
+        result = _resolve_rel(planning, client)
+
+        assert client.call_count == len(prep.blocks) + 1
+        assert result.block_results[0].semantic_rounds == 2
+        assert all(
+            block_result.semantic_rounds == 1
+            for block_result in result.block_results[1:]
+        )
+        # Retry request material is the exact original block-0 request.
+        assert client.request_hashes[0] == client.request_hashes[-1]

@@ -27,8 +27,8 @@ from short_drama.story.consolidation import load_consolidation_profile
 from short_drama.story.consolidation_planning import build_consolidation_planning
 from short_drama.story.consolidation_semantic import (
     EVENT_SEMANTIC_PACKING_V1,
-    _execute_event_semantic_block,
-    _execute_prepared_blocks,
+    _attempt_event_semantic_block,
+    _execute_two_stage_semantic_blocks,
     build_event_semantic_preparation,
     validate_a5_max_concurrency,
 )
@@ -104,15 +104,16 @@ def main() -> int:
     latencies: dict[str, float] = {}
     failures: list[str] = []
 
-    def execute(block, request):
+    def execute_one_round(block, request, semantic_round):
         nonlocal in_flight, max_observed_in_flight
         started = time.monotonic()
         with lock:
             in_flight += 1
             max_observed_in_flight = max(max_observed_in_flight, in_flight)
         try:
-            return _execute_event_semantic_block(
-                planning, profile, semantic_profile, client, block, request
+            return _attempt_event_semantic_block(
+                planning, semantic_profile, client, block, request,
+                semantic_round=semantic_round,
             )
         except Exception as exc:
             with lock:
@@ -126,14 +127,17 @@ def main() -> int:
     started = time.monotonic()
     results = ()
     try:
-        results = _execute_prepared_blocks(
+        results = _execute_two_stage_semantic_blocks(
             tuple(block for block, _request in selected),
             tuple(request for _block, request in selected),
-            execute, llm_client=client, max_concurrency=max_concurrency,
+            execute_one_round, llm_client=client, max_concurrency=max_concurrency,
         )
-    except Exception:
+    except Exception as exc:
         # Report after the read-only fingerprint assertion, then preserve the
         # provider/domain failure for shell automation.
+        with lock:
+            if not failures:
+                failures.append(f"{type(exc).__name__}: {exc}")
         failed = True
     else:
         failed = False

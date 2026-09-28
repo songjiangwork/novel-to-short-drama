@@ -115,6 +115,16 @@ from .extraction import EvidenceRef
 _BlockResultT = TypeVar("_BlockResultT")
 
 
+@dataclass(frozen=True, slots=True)
+class _RetryableSemanticInvalid:
+    """Internal first-round semantic-invalid outcome; never persisted."""
+
+    block_id: str
+    request_hash: str
+    last_failure_details: str
+    expected_pairs: tuple[tuple[str, str], ...]
+
+
 def validate_a5_max_concurrency(max_concurrency: int) -> int:
     """Validate A5 execution-only concurrency without affecting identity."""
     if (
@@ -138,9 +148,10 @@ def _execute_prepared_blocks(
 ) -> tuple[_BlockResultT, ...]:
     """Run prepared A5 blocks in a bounded, canonical-order execution policy.
 
-    The callback owns the domain's complete block-atomic semantic retry and
-    validation loop.  This helper only schedules it: serially for one worker,
-    or in a rolling bounded window for an explicitly capable client.
+    The callback owns one domain block attempt and its fail-closed validation.
+    This helper only schedules that attempt: serially for one worker, or in a
+    rolling bounded window for an explicitly capable client. Deferred semantic
+    retry scheduling is owned by :func:`_execute_two_stage_semantic_blocks`.
     """
     max_concurrency = validate_a5_max_concurrency(max_concurrency)
     if len(blocks) != len(requests):
@@ -217,6 +228,59 @@ def _execute_prepared_blocks(
     # Index is preparation order (and frozen contiguous block ordinal); never
     # permit completion order to become semantic ordering.
     return tuple(results[index] for index in range(len(ordered)))
+
+
+def _execute_two_stage_semantic_blocks(
+    blocks: Sequence[Any],
+    requests: Sequence[StructuredGenerationRequest],
+    execute_one_round: Callable[[Any, StructuredGenerationRequest, int], Any],
+    *,
+    llm_client: LLMClient,
+    max_concurrency: int,
+) -> tuple[Any, ...]:
+    """Run frozen A5 deferred semantic retry scheduling for one domain.
+
+    Phase 1 uses the existing bounded executor for exactly one attempt per
+    block.  Its normal return is the domain barrier: all started futures have
+    settled and the executor context has exited.  Only retryable semantic
+    invalid outcomes cross that barrier; technical and provenance failures
+    remain exceptions in the existing fail-closed executor path.  Phase 2 is
+    deliberately serial in original block-ordinal order.
+    """
+    first_round = _execute_prepared_blocks(
+        blocks,
+        requests,
+        lambda block, request: execute_one_round(block, request, 1),
+        llm_client=llm_client,
+        max_concurrency=max_concurrency,
+    )
+
+    results: dict[int, Any] = {}
+    retries: list[int] = []
+    for index, outcome in enumerate(first_round):
+        if isinstance(outcome, _RetryableSemanticInvalid):
+            retries.append(index)
+        else:
+            results[index] = outcome
+
+    # The first-round executor has returned, so every started provider call is
+    # settled.  Preserve original block ordinal rather than completion order.
+    retries.sort(key=lambda index: blocks[index].block_ordinal)
+    for index in retries:
+        outcome = execute_one_round(blocks[index], requests[index], 2)
+        if isinstance(outcome, _RetryableSemanticInvalid):
+            raise ConsolidationSemanticGenerationError(
+                block_id=outcome.block_id,
+                request_hash=outcome.request_hash,
+                rounds_attempted=2,
+                last_failure_details=outcome.last_failure_details,
+                expected_pairs=outcome.expected_pairs,
+            )
+        results[index] = outcome
+
+    if len(results) != len(blocks):
+        raise ConsolidationSemanticError("two-stage executor lost a prepared block result")
+    return tuple(results[index] for index in range(len(blocks)))
 
 # ---------------------------------------------------------------------------
 # Frozen A5C fact semantic identity (A5C-A BLOCK 2 / BLOCK 4)
@@ -2642,69 +2706,60 @@ def _validate_fact_decision_coverage(
 # ---------------------------------------------------------------------------
 
 
-def _execute_fact_semantic_block(
+def _attempt_fact_semantic_block(
     planning_result: ConsolidationPlanningResult,
-    consolidation_profile: ConsolidationProfile,
     semantic_profile: SemanticLLMProfile,
     llm_client: LLMClient,
     block: FactSemanticBlock,
     request: StructuredGenerationRequest,
-) -> FactSemanticBlockResult:
-    """Execute one complete fact block, including its frozen semantic rounds."""
+    *,
+    semantic_round: int,
+) -> FactSemanticBlockResult | _RetryableSemanticInvalid:
+    """Execute exactly one Fact semantic round without changing the request."""
     rendered_prompt = request.rendered_prompt
     output_schema = request.output_schema
     endpoint_evidence = _block_endpoint_evidence(planning_result, block.pair_refs)
-    block_decisions: list[FactSemanticDecision] = []
-    block_provenance: LLMInvocationProvenance | None = None
-    rounds_attempted = 0
-    last_failure = ""
-
-    for round_number in range(1, consolidation_profile.max_generation_rounds + 1):
-        rounds_attempted = round_number
-        result = llm_client.generate_structured(rendered_prompt, output_schema, semantic_profile)
-        _verify_fact_provenance(result.provenance, request, semantic_profile)
-        try:
-            payload = FactSelectorDecisionPayload.from_dict(result.parsed_json)
-        except ConsolidationModelError:
-            last_failure = "typed payload load failed"
-            continue
-        is_valid, failure_detail, resolved_evidence = _validate_fact_selector_block_payload(
-            payload, block.pair_refs, endpoint_evidence
-        )
-        if not is_valid:
-            last_failure = failure_detail
-            continue
-        for item, resolved in zip(payload.decisions, resolved_evidence):
-            block_decisions.append(
-                _convert_to_fact_decision(
-                    left_ref=item.left_candidate_ref,
-                    right_ref=item.right_candidate_ref,
-                    decision=item.decision,
-                    reason_zh=item.reason_zh,
-                    evidence_refs=resolved,
-                    request_hash=request.request_hash,
-                    prompt_id=rendered_prompt.prompt_id,
-                    prompt_version=rendered_prompt.prompt_version,
-                    provenance=result.provenance,
-                )
-            )
-        block_provenance = result.provenance
-        break
-
-    if not block_decisions:
-        raise ConsolidationSemanticGenerationError(
+    result = llm_client.generate_structured(rendered_prompt, output_schema, semantic_profile)
+    _verify_fact_provenance(result.provenance, request, semantic_profile)
+    try:
+        payload = FactSelectorDecisionPayload.from_dict(result.parsed_json)
+    except ConsolidationModelError:
+        return _RetryableSemanticInvalid(
             block_id=block.block_id,
             request_hash=request.request_hash,
-            rounds_attempted=rounds_attempted,
-            last_failure_details=last_failure,
+            last_failure_details="typed payload load failed",
             expected_pairs=tuple(block.pair_refs),
         )
+    is_valid, failure_detail, resolved_evidence = _validate_fact_selector_block_payload(
+        payload, block.pair_refs, endpoint_evidence
+    )
+    if not is_valid:
+        return _RetryableSemanticInvalid(
+            block_id=block.block_id,
+            request_hash=request.request_hash,
+            last_failure_details=failure_detail,
+            expected_pairs=tuple(block.pair_refs),
+        )
+    block_decisions = [
+        _convert_to_fact_decision(
+            left_ref=item.left_candidate_ref,
+            right_ref=item.right_candidate_ref,
+            decision=item.decision,
+            reason_zh=item.reason_zh,
+            evidence_refs=resolved,
+            request_hash=request.request_hash,
+            prompt_id=rendered_prompt.prompt_id,
+            prompt_version=rendered_prompt.prompt_version,
+            provenance=result.provenance,
+        )
+        for item, resolved in zip(payload.decisions, resolved_evidence)
+    ]
     return FactSemanticBlockResult(
         block_id=block.block_id,
         request_hash=request.request_hash,
-        semantic_rounds=rounds_attempted,
+        semantic_rounds=semantic_round,
         decisions=tuple(block_decisions),
-        generation_provenance=block_provenance,  # type: ignore[arg-type]
+        generation_provenance=result.provenance,
     )
 
 
@@ -2725,10 +2780,11 @@ def resolve_fact_semantic_ambiguity(
     The deterministic, zero-provider request construction is delegated to
     :func:`build_fact_semantic_preparation` with the FROZEN production policy
     :data:`FACT_SEMANTIC_PACKING_V1` (12 pairs / 24 candidates, identical block
-    ids / request hashes to the audited P2). This function only drives the
-    provider per block (sequentially, in exact preparation order) and merges the
-    results. A5C-B does NOT persist, does NOT write CURRENT, and does NOT build
-    CanonicalFactSet / StateTransition / StoryConflict.
+    ids / request hashes to the audited P2). This function drives one bounded
+    concurrent first round for every prepared block, waits at the domain
+    barrier, then runs only semantic-invalid blocks serially in original
+    ordinal order. A5C-B does NOT persist, does NOT write CURRENT, and does
+    NOT build CanonicalFactSet / StateTransition / StoryConflict.
 
     Per block (block atomicity):
       * ``llm_client.generate_structured(...)`` (A-I3 owns the provider call and
@@ -2741,9 +2797,11 @@ def resolve_fact_semantic_ambiguity(
       * ``FactSemanticDecision(method="llm")`` construction.
 
     Semantic rounds are bounded to :data:`A5C_FACT_MAX_GENERATION_ROUNDS` (2).
-    An ``LLMError`` raised by the provider after A-I3 technical retry is
-    PROPAGATED (not turned into a semantic retry). Provenance mismatch fails
-    closed with no retry. Two semantic-invalid rounds raise
+    A semantic-invalid first round is deferred until the domain barrier; the
+    exact prepared request is retried serially. An ``LLMError`` raised by the
+    provider after A-I3 technical retry is PROPAGATED (not turned into a
+    semantic retry). Provenance mismatch fails closed with no retry. Two
+    semantic-invalid rounds raise
     :class:`ConsolidationSemanticGenerationError` (the whole block is invalid; no
     partial decisions are retained). ``decision == uncertain`` is a valid
     successful semantic result and is NOT retried.
@@ -2777,13 +2835,13 @@ def resolve_fact_semantic_ambiguity(
             block_results=(),
         )
 
-    # 2. Each callback retains the original per-block semantic pipeline; only
-    # scheduling changes. The returned tuple is frozen preparation order.
-    all_block_results = _execute_prepared_blocks(
+    # 2. The shared two-stage policy retains original preparation ordering.
+    all_block_results = _execute_two_stage_semantic_blocks(
         blocks,
         preparation.structured_requests,
-        lambda block, request: _execute_fact_semantic_block(
-            planning_result, consolidation_profile, semantic_profile, llm_client, block, request
+        lambda block, request, semantic_round: _attempt_fact_semantic_block(
+            planning_result, semantic_profile, llm_client, block, request,
+            semantic_round=semantic_round,
         ),
         llm_client=llm_client,
         max_concurrency=max_concurrency,
@@ -3414,113 +3472,109 @@ def _validate_relationship_decision_coverage(
 # ---------------------------------------------------------------------------
 
 
-def _execute_event_semantic_block(
+def _attempt_event_semantic_block(
     planning_result: ConsolidationPlanningResult,
-    consolidation_profile: ConsolidationProfile,
     semantic_profile: SemanticLLMProfile,
     llm_client: LLMClient,
     block: EventSemanticBlock,
     request: StructuredGenerationRequest,
-) -> EventSemanticBlockResult:
-    """Execute one event block; scheduling is deliberately outside this unit."""
+    *,
+    semantic_round: int,
+) -> EventSemanticBlockResult | _RetryableSemanticInvalid:
+    """Execute exactly one Event semantic round without changing the request."""
     from .consolidation import EventSelectorDecisionPayload
 
     rendered_prompt = request.rendered_prompt
     endpoint_evidence = _event_block_endpoint_evidence(planning_result, block.pair_refs)
-    decisions: list[EventSemanticDecision] = []
-    provenance: LLMInvocationProvenance | None = None
-    rounds_attempted = 0
-    last_failure = ""
-    for round_number in range(1, consolidation_profile.max_generation_rounds + 1):
-        rounds_attempted = round_number
-        result = llm_client.generate_structured(rendered_prompt, request.output_schema, semantic_profile)
-        _verify_semantic_provenance(result.provenance, request, semantic_profile)
-        try:
-            payload = EventSelectorDecisionPayload.from_dict(result.parsed_json)
-        except ConsolidationModelError:
-            last_failure = "typed payload load failed"
-            continue
-        valid, last_failure, evidence = _validate_selector_block_payload(
-            list(payload.decisions), block.pair_refs, endpoint_evidence, "event"
-        )
-        if not valid:
-            continue
-        decisions = [
-            _convert_to_event_decision(
-                left_ref=item.left_candidate_ref, right_ref=item.right_candidate_ref,
-                decision=item.decision, reason_zh=item.reason_zh, evidence_refs=resolved,
-                request_hash=request.request_hash, prompt_id=rendered_prompt.prompt_id,
-                prompt_version=rendered_prompt.prompt_version, provenance=result.provenance,
-            )
-            for item, resolved in zip(payload.decisions, evidence)
-        ]
-        provenance = result.provenance
-        break
-    if not decisions:
-        raise ConsolidationSemanticGenerationError(
-            block_id=block.block_id, request_hash=request.request_hash,
-            rounds_attempted=rounds_attempted, last_failure_details=last_failure,
+    result = llm_client.generate_structured(rendered_prompt, request.output_schema, semantic_profile)
+    _verify_semantic_provenance(result.provenance, request, semantic_profile)
+    try:
+        payload = EventSelectorDecisionPayload.from_dict(result.parsed_json)
+    except ConsolidationModelError:
+        return _RetryableSemanticInvalid(
+            block_id=block.block_id,
+            request_hash=request.request_hash,
+            last_failure_details="typed payload load failed",
             expected_pairs=tuple(block.pair_refs),
         )
+    valid, failure_detail, evidence = _validate_selector_block_payload(
+        list(payload.decisions), block.pair_refs, endpoint_evidence, "event"
+    )
+    if not valid:
+        return _RetryableSemanticInvalid(
+            block_id=block.block_id,
+            request_hash=request.request_hash,
+            last_failure_details=failure_detail,
+            expected_pairs=tuple(block.pair_refs),
+        )
+    decisions = [
+        _convert_to_event_decision(
+            left_ref=item.left_candidate_ref, right_ref=item.right_candidate_ref,
+            decision=item.decision, reason_zh=item.reason_zh, evidence_refs=resolved,
+            request_hash=request.request_hash, prompt_id=rendered_prompt.prompt_id,
+            prompt_version=rendered_prompt.prompt_version, provenance=result.provenance,
+        )
+        for item, resolved in zip(payload.decisions, evidence)
+    ]
     return EventSemanticBlockResult(
-        block_id=block.block_id, request_hash=request.request_hash,
-        semantic_rounds=rounds_attempted, decisions=tuple(decisions),
-        generation_provenance=provenance,  # type: ignore[arg-type]
+        block_id=block.block_id,
+        request_hash=request.request_hash,
+        semantic_rounds=semantic_round,
+        decisions=tuple(decisions),
+        generation_provenance=result.provenance,
     )
 
 
-def _execute_relationship_semantic_block(
+def _attempt_relationship_semantic_block(
     planning_result: ConsolidationPlanningResult,
-    consolidation_profile: ConsolidationProfile,
     semantic_profile: SemanticLLMProfile,
     llm_client: LLMClient,
     block: RelationshipSemanticBlock,
     request: StructuredGenerationRequest,
-) -> RelationshipSemanticBlockResult:
-    """Execute one relationship block; scheduling is outside this unit."""
+    *,
+    semantic_round: int,
+) -> RelationshipSemanticBlockResult | _RetryableSemanticInvalid:
+    """Execute exactly one Relationship semantic round without changing it."""
     from .consolidation import RelationshipSelectorDecisionPayload
 
     rendered_prompt = request.rendered_prompt
     endpoint_evidence = _relationship_block_endpoint_evidence(planning_result, block.pair_refs)
-    decisions: list[RelationshipSemanticDecision] = []
-    provenance: LLMInvocationProvenance | None = None
-    rounds_attempted = 0
-    last_failure = ""
-    for round_number in range(1, consolidation_profile.max_generation_rounds + 1):
-        rounds_attempted = round_number
-        result = llm_client.generate_structured(rendered_prompt, request.output_schema, semantic_profile)
-        _verify_semantic_provenance(result.provenance, request, semantic_profile)
-        try:
-            payload = RelationshipSelectorDecisionPayload.from_dict(result.parsed_json)
-        except ConsolidationModelError:
-            last_failure = "typed payload load failed"
-            continue
-        valid, last_failure, evidence = _validate_selector_block_payload(
-            list(payload.decisions), block.pair_refs, endpoint_evidence, "relationship"
-        )
-        if not valid:
-            continue
-        decisions = [
-            _convert_to_relationship_decision(
-                left_ref=item.left_candidate_ref, right_ref=item.right_candidate_ref,
-                decision=item.decision, reason_zh=item.reason_zh, evidence_refs=resolved,
-                request_hash=request.request_hash, prompt_id=rendered_prompt.prompt_id,
-                prompt_version=rendered_prompt.prompt_version, provenance=result.provenance,
-            )
-            for item, resolved in zip(payload.decisions, evidence)
-        ]
-        provenance = result.provenance
-        break
-    if not decisions:
-        raise ConsolidationSemanticGenerationError(
-            block_id=block.block_id, request_hash=request.request_hash,
-            rounds_attempted=rounds_attempted, last_failure_details=last_failure,
+    result = llm_client.generate_structured(rendered_prompt, request.output_schema, semantic_profile)
+    _verify_semantic_provenance(result.provenance, request, semantic_profile)
+    try:
+        payload = RelationshipSelectorDecisionPayload.from_dict(result.parsed_json)
+    except ConsolidationModelError:
+        return _RetryableSemanticInvalid(
+            block_id=block.block_id,
+            request_hash=request.request_hash,
+            last_failure_details="typed payload load failed",
             expected_pairs=tuple(block.pair_refs),
         )
+    valid, failure_detail, evidence = _validate_selector_block_payload(
+        list(payload.decisions), block.pair_refs, endpoint_evidence, "relationship"
+    )
+    if not valid:
+        return _RetryableSemanticInvalid(
+            block_id=block.block_id,
+            request_hash=request.request_hash,
+            last_failure_details=failure_detail,
+            expected_pairs=tuple(block.pair_refs),
+        )
+    decisions = [
+        _convert_to_relationship_decision(
+            left_ref=item.left_candidate_ref, right_ref=item.right_candidate_ref,
+            decision=item.decision, reason_zh=item.reason_zh, evidence_refs=resolved,
+            request_hash=request.request_hash, prompt_id=rendered_prompt.prompt_id,
+            prompt_version=rendered_prompt.prompt_version, provenance=result.provenance,
+        )
+        for item, resolved in zip(payload.decisions, evidence)
+    ]
     return RelationshipSemanticBlockResult(
-        block_id=block.block_id, request_hash=request.request_hash,
-        semantic_rounds=rounds_attempted, decisions=tuple(decisions),
-        generation_provenance=provenance,  # type: ignore[arg-type]
+        block_id=block.block_id,
+        request_hash=request.request_hash,
+        semantic_rounds=semantic_round,
+        decisions=tuple(decisions),
+        generation_provenance=result.provenance,
     )
 
 
@@ -3546,9 +3600,11 @@ def resolve_event_semantic_ambiguity(
       * canonical selector order + exact endpoint EvidenceRef resolution;
       * ``EventSemanticDecision(method="llm")`` construction.
 
-    Semantic rounds are bounded to ``max_generation_rounds`` (2). An ``LLMError``
-    raised by the provider is PROPAGATED (not a semantic retry). Provenance
-    mismatch fails closed with no retry. Two semantic-invalid rounds raise
+    Semantic rounds are bounded to ``max_generation_rounds`` (2). Semantic-
+    invalid first rounds are retried only after the domain first-pass barrier,
+    serially in original block order with the exact prepared request. An
+    ``LLMError`` raised by the provider is PROPAGATED (not a semantic retry).
+    Provenance mismatch fails closed with no retry. Two semantic-invalid rounds raise
     ``ConsolidationSemanticGenerationError``. ``uncertain`` is a valid
     successful semantic result and is NOT retried.
     """
@@ -3579,10 +3635,11 @@ def resolve_event_semantic_ambiguity(
             block_results=(),
         )
 
-    all_block_results = _execute_prepared_blocks(
+    all_block_results = _execute_two_stage_semantic_blocks(
         blocks, preparation.structured_requests,
-        lambda block, request: _execute_event_semantic_block(
-            planning_result, consolidation_profile, semantic_profile, llm_client, block, request
+        lambda block, request, semantic_round: _attempt_event_semantic_block(
+            planning_result, semantic_profile, llm_client, block, request,
+            semantic_round=semantic_round,
         ),
         llm_client=llm_client, max_concurrency=max_concurrency,
     )
@@ -3616,7 +3673,8 @@ def resolve_relationship_semantic_ambiguity(
 
     Consumes the A5B ``ConsolidationPlanningResult`` and resolves every
     ``needs_semantic_decision`` relationship pair via bounded LLM semantic
-    generation. Same block-atomicity and provenance rules as the event path.
+    generation. Same deferred retry, block-atomicity, and provenance rules as
+    the event path.
     """
     from .consolidation import RelationshipSelectorDecisionPayload
 
@@ -3645,10 +3703,11 @@ def resolve_relationship_semantic_ambiguity(
             block_results=(),
         )
 
-    all_block_results = _execute_prepared_blocks(
+    all_block_results = _execute_two_stage_semantic_blocks(
         blocks, preparation.structured_requests,
-        lambda block, request: _execute_relationship_semantic_block(
-            planning_result, consolidation_profile, semantic_profile, llm_client, block, request
+        lambda block, request, semantic_round: _attempt_relationship_semantic_block(
+            planning_result, semantic_profile, llm_client, block, request,
+            semantic_round=semantic_round,
         ),
         llm_client=llm_client, max_concurrency=max_concurrency,
     )

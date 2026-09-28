@@ -8,15 +8,19 @@ from dataclasses import dataclass
 
 import pytest
 
-from short_drama.llm import LLMClient, StructuredGenerationResult, build_structured_request
+from short_drama.llm import LLMClient, LLMError, StructuredGenerationResult, build_structured_request
 from short_drama.story import (
+    ConsolidationProvenanceError,
     ConsolidationSemanticError,
+    ConsolidationSemanticGenerationError,
     FACT_SEMANTIC_PACKING_V1,
     build_fact_semantic_preparation,
     resolve_fact_semantic_ambiguity,
 )
 from short_drama.story.consolidation_semantic import (
+    _RetryableSemanticInvalid,
     _execute_prepared_blocks,
+    _execute_two_stage_semantic_blocks,
     validate_a5_max_concurrency,
 )
 
@@ -153,6 +157,190 @@ def test_failure_winner_uses_real_block_ordinal_not_input_sequence_index():
         )
 
     assert caught.value is ordinal_7
+
+
+def _retryable(block: _Block) -> _RetryableSemanticInvalid:
+    return _RetryableSemanticInvalid(
+        block_id=f"block-{block.block_ordinal}",
+        request_hash=f"request-{block.block_ordinal}",
+        last_failure_details="semantic-invalid",
+        expected_pairs=((f"left-{block.block_ordinal}", f"right-{block.block_ordinal}"),),
+    )
+
+
+def test_two_stage_all_first_round_valid_is_bounded_and_has_no_phase_two_calls():
+    blocks = _blocks(8)
+    lock = threading.Lock()
+    in_flight = 0
+    maximum = 0
+    calls: list[tuple[int, int]] = []
+
+    def execute(block, _request, semantic_round):
+        nonlocal in_flight, maximum
+        assert semantic_round == 1
+        with lock:
+            calls.append((block.block_ordinal, semantic_round))
+            in_flight += 1
+            maximum = max(maximum, in_flight)
+        time.sleep(0.002)
+        with lock:
+            in_flight -= 1
+        return (block.block_ordinal, semantic_round)
+
+    result = _execute_two_stage_semantic_blocks(
+        blocks, tuple(object() for _ in blocks), execute,
+        llm_client=_ConcurrentClient(), max_concurrency=3,
+    )
+
+    assert maximum <= 3
+    assert sorted(calls) == [(index, 1) for index in range(8)]
+    assert result == tuple((index, 1) for index in range(8))
+
+
+def test_two_stage_waits_for_all_first_round_calls_to_settle_before_retry():
+    blocks = _blocks(3)
+    phase_one_finished: set[int] = set()
+    lock = threading.Lock()
+    slow_block_started = threading.Event()
+    release_slow_block = threading.Event()
+    retry_observed_after: list[set[int]] = []
+
+    def execute(block, _request, semantic_round):
+        if semantic_round == 1:
+            if block.block_ordinal == 1:
+                slow_block_started.set()
+                assert release_slow_block.wait(timeout=1)
+            with lock:
+                phase_one_finished.add(block.block_ordinal)
+            return _retryable(block) if block.block_ordinal == 0 else block.block_ordinal
+        with lock:
+            retry_observed_after.append(set(phase_one_finished))
+        return block.block_ordinal
+
+    runner_errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _execute_two_stage_semantic_blocks(
+                blocks, tuple(object() for _ in blocks), execute,
+                llm_client=_ConcurrentClient(), max_concurrency=3,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion below
+            runner_errors.append(exc)
+
+    runner = threading.Thread(target=run)
+    runner.start()
+    assert slow_block_started.wait(timeout=1)
+    # A retry cannot have begun while a started Phase-1 call is still blocked.
+    assert retry_observed_after == []
+    release_slow_block.set()
+    runner.join(timeout=1)
+    assert not runner.is_alive()
+    assert runner_errors == []
+    assert retry_observed_after == [{0, 1, 2}]
+
+
+def test_two_stage_retry_success_restores_preparation_order_and_round_count():
+    blocks = (_Block(30), _Block(10), _Block(20))
+    requests = tuple(object() for _ in blocks)
+    calls: list[tuple[int, int, int]] = []
+
+    def execute(block, request, semantic_round):
+        calls.append((block.block_ordinal, semantic_round, id(request)))
+        if semantic_round == 1 and block.block_ordinal == 10:
+            return _retryable(block)
+        return (block.block_ordinal, semantic_round, id(request))
+
+    result = _execute_two_stage_semantic_blocks(
+        blocks, requests, execute, llm_client=_ConcurrentClient(), max_concurrency=3,
+    )
+
+    assert [item[:2] for item in calls] == [(30, 1), (10, 1), (20, 1), (10, 2)]
+    assert result == (
+        (30, 1, id(requests[0])),
+        (10, 2, id(requests[1])),
+        (20, 1, id(requests[2])),
+    )
+
+
+def test_two_stage_terminal_retry_raises_existing_semantic_generation_error():
+    block = _Block(4)
+
+    with pytest.raises(ConsolidationSemanticGenerationError) as caught:
+        _execute_two_stage_semantic_blocks(
+            (block,), (object(),),
+            lambda current, _request, _round: _retryable(current),
+            llm_client=_SerialOnlyClient(), max_concurrency=1,
+        )
+
+    assert caught.value.block_id == "block-4"
+    assert caught.value.rounds_attempted == 2
+
+
+def test_two_stage_multiple_retries_are_serial_and_ascending_block_ordinal():
+    blocks = (_Block(9), _Block(2), _Block(5))
+    retry_calls: list[int] = []
+    retry_in_flight = 0
+    maximum_retry_in_flight = 0
+
+    def execute(block, _request, semantic_round):
+        nonlocal retry_in_flight, maximum_retry_in_flight
+        if semantic_round == 1:
+            return _retryable(block)
+        retry_in_flight += 1
+        maximum_retry_in_flight = max(maximum_retry_in_flight, retry_in_flight)
+        retry_calls.append(block.block_ordinal)
+        retry_in_flight -= 1
+        return (block.block_ordinal, semantic_round)
+
+    result = _execute_two_stage_semantic_blocks(
+        blocks, tuple(object() for _ in blocks), execute,
+        llm_client=_ConcurrentClient(), max_concurrency=3,
+    )
+
+    assert retry_calls == [2, 5, 9]
+    assert maximum_retry_in_flight == 1
+    assert result == ((9, 2), (2, 2), (5, 2))
+
+
+def test_two_stage_lowest_retry_terminal_failure_stops_higher_retry_calls():
+    blocks = (_Block(8), _Block(3), _Block(5))
+    retry_calls: list[int] = []
+
+    def execute(block, _request, semantic_round):
+        if semantic_round == 1:
+            return _retryable(block)
+        retry_calls.append(block.block_ordinal)
+        return _retryable(block) if block.block_ordinal == 3 else block.block_ordinal
+
+    with pytest.raises(ConsolidationSemanticGenerationError) as caught:
+        _execute_two_stage_semantic_blocks(
+            blocks, tuple(object() for _ in blocks), execute,
+            llm_client=_ConcurrentClient(), max_concurrency=3,
+        )
+
+    assert caught.value.block_id == "block-3"
+    assert retry_calls == [3]
+
+
+@pytest.mark.parametrize("error", [LLMError("technical"), ConsolidationProvenanceError("bad provenance")])
+def test_two_stage_fatal_first_round_errors_do_not_become_deferred_retries(error):
+    calls: list[tuple[int, int]] = []
+
+    def execute(block, _request, semantic_round):
+        calls.append((block.block_ordinal, semantic_round))
+        if block.block_ordinal == 0:
+            raise error
+        return _retryable(block)
+
+    with pytest.raises(type(error)) as caught:
+        _execute_two_stage_semantic_blocks(
+            _blocks(2), (object(), object()), execute,
+            llm_client=_SerialOnlyClient(), max_concurrency=1,
+        )
+
+    assert caught.value is error
+    assert calls == [(0, 1)]
 
 
 def test_fact_resolution_is_identical_after_out_of_order_concurrent_completion(tmp_path):

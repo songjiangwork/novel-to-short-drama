@@ -14,6 +14,7 @@ pointer, and no Foundation approval artifacts. It provides reusable primitives:
 """
 
 from .client import LLMClient
+from .execution import GenerationExecutionOptions
 from .config import (
     RUNTIME_CONFIG_SCHEMA_VERSION,
     RuntimeConfig,
@@ -78,6 +79,7 @@ __all__ = [
     "CHAT_COMPLETIONS_PATH",
     "DEFAULT_MAX_ATTEMPTS",
     "FINGERPRINT_SCHEMA_VERSION",
+    "GenerationExecutionOptions",
     "LLM_REQUEST_SCHEMA_VERSION",
     "LLMConfigError",
     "LLMClient",

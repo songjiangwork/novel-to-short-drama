@@ -2,9 +2,10 @@
 
 Covers A5C-B implemented in ``short_drama.story.consolidation_semantic``:
 
-  * :func:`resolve_fact_semantic_ambiguity` drives the FROZEN production
-    policy (:data:`FACT_SEMANTIC_PACKING_V1` = 12 / 24, identical block ids /
-    request hashes to audited P2) via :func:`build_fact_semantic_preparation`
+  * :func:`resolve_fact_semantic_ambiguity` drives the explicit production
+    policy (:data:`FACT_SEMANTIC_PACKING_V2` = 6 / 12) via
+    :func:`build_fact_semantic_preparation`; the historical frozen
+    :data:`FACT_SEMANTIC_PACKING_V1` = 12 / 24 remains reproducible;
     and then executes each prepared block against an (in-memory) ``LLMClient``;
   * per-block pipeline: provider call -> provenance verification -> typed
     ``FactSelectorDecisionPayload`` load -> exact pair coverage/order -> pair-
@@ -40,6 +41,7 @@ from short_drama.llm import (
 from short_drama.story import (
     DEFAULT_PROMPT_BASE_DIR,
     FACT_SEMANTIC_PACKING_V1,
+    FACT_SEMANTIC_PACKING_V2,
     ConsolidationProvenanceError,
     ConsolidationSemanticError,
     ConsolidationSemanticGenerationError,
@@ -193,7 +195,7 @@ def _payload_for_block(block, decision="same_fact", reason="LLM 判断", selecto
 def _prep(planning):
     return build_fact_semantic_preparation(
         planning, _PROFILE, _SEM_PROFILE, prompts=_PROMPTS,
-        packing_policy=FACT_SEMANTIC_PACKING_V1,
+        packing_policy=FACT_SEMANTIC_PACKING_V2,
     )
 
 
@@ -209,17 +211,20 @@ def _resolve(planning, client):
 
 
 # ---------------------------------------------------------------------------
-# Frozen production policy (12 / 24) is unchanged and audited-P2-identical
+# Explicit production v2 plus historical frozen v1
 # ---------------------------------------------------------------------------
 
 
-def test_frozen_production_policy_is_12_24():
+def test_fact_packing_policy_versions_are_separately_inspectable():
     assert FACT_SEMANTIC_PACKING_V1.name == "fact-semantic-packing-v1"
     assert FACT_SEMANTIC_PACKING_V1.max_pairs_per_block == 12
     assert FACT_SEMANTIC_PACKING_V1.max_candidates_per_block == 24
+    assert FACT_SEMANTIC_PACKING_V2.name == "fact-semantic-packing-v2"
+    assert FACT_SEMANTIC_PACKING_V2.max_pairs_per_block == 6
+    assert FACT_SEMANTIC_PACKING_V2.max_candidates_per_block == 12
 
 
-def test_frozen_policy_matches_audited_p2_identity(tmp_path):
+def test_historical_v1_policy_matches_audited_p2_identity(tmp_path):
     """The production policy name does NOT enter the packing identity.
 
     ``FACT_SEMANTIC_PACKING_V1`` (12 / 24) must produce byte-identical block
@@ -229,15 +234,56 @@ def test_frozen_policy_matches_audited_p2_identity(tmp_path):
     from short_drama.story import A5C_PACKING_CANDIDATES
 
     p2 = A5C_PACKING_CANDIDATES[1]
-    prep_prod = build_fact_semantic_preparation(
+    prep_v1 = build_fact_semantic_preparation(
         planning, _PROFILE, _SEM_PROFILE, prompts=_PROMPTS,
         packing_policy=FACT_SEMANTIC_PACKING_V1,
     )
     prep_p2 = build_fact_semantic_preparation(
         planning, _PROFILE, _SEM_PROFILE, prompts=_PROMPTS, packing_policy=p2
     )
-    assert [b.block_id for b in prep_prod.blocks] == [b.block_id for b in prep_p2.blocks]
-    assert prep_prod.semantic_request_hashes == prep_p2.semantic_request_hashes
+    assert [b.block_id for b in prep_v1.blocks] == [b.block_id for b in prep_p2.blocks]
+    assert prep_v1.semantic_request_hashes == prep_p2.semantic_request_hashes
+
+
+def test_v2_packing_coverage_limits_determinism_and_identity_refinement(tmp_path):
+    """V2 is complete/deterministic, while its behavioral limits refine identity."""
+    planning = _planning(_tree(tmp_path, specs=_single_facts_specs(30)))
+    prep_v2 = _prep(planning)
+    prep_v2_again = _prep(planning)
+    prep_v1 = build_fact_semantic_preparation(
+        planning, _PROFILE, _SEM_PROFILE, prompts=_PROMPTS,
+        packing_policy=FACT_SEMANTIC_PACKING_V1,
+    )
+
+    expected_pairs = [
+        (pair.left_ref, pair.right_ref)
+        for pair in planning.fact_pair_plans
+        if pair.state == "needs_semantic_decision"
+    ]
+    actual_pairs = [pair for block in prep_v2.blocks for pair in block.pair_refs]
+    assert actual_pairs == expected_pairs
+    assert len(actual_pairs) == len(set(actual_pairs))
+    assert all(block.pair_count <= 6 for block in prep_v2.blocks)
+    assert all(len(block.candidate_refs) <= 12 for block in prep_v2.blocks)
+
+    assert [block.pair_refs for block in prep_v2.blocks] == [
+        block.pair_refs for block in prep_v2_again.blocks
+    ]
+    assert [block.block_id for block in prep_v2.blocks] == [
+        block.block_id for block in prep_v2_again.blocks
+    ]
+    assert [request.rendered_prompt for request in prep_v2.structured_requests] == [
+        request.rendered_prompt for request in prep_v2_again.structured_requests
+    ]
+    assert prep_v2.semantic_request_hashes == prep_v2_again.semantic_request_hashes
+
+    assert [block.pair_refs for block in prep_v1.blocks] != [
+        block.pair_refs for block in prep_v2.blocks
+    ]
+    assert [block.block_id for block in prep_v1.blocks] != [
+        block.block_id for block in prep_v2.blocks
+    ]
+    assert prep_v1.semantic_request_hashes != prep_v2.semantic_request_hashes
 
 
 def _single_facts_specs(n_facts: int):
@@ -273,8 +319,8 @@ def test_single_block_valid(tmp_path):
     assert result.block_results[0].semantic_rounds == 1
     assert result.semantic_decisions
     assert all(d.method == "llm" for d in result.semantic_decisions)
-    # The preparation carried the frozen policy.
-    assert result.preparation.packing_policy is FACT_SEMANTIC_PACKING_V1
+    # The resolver's actual production preparation carries v2.
+    assert result.preparation.packing_policy is FACT_SEMANTIC_PACKING_V2
 
 
 def test_multiple_blocks_valid(tmp_path):

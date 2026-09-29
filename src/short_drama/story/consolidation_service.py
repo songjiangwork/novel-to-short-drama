@@ -37,7 +37,7 @@ from .consolidation_persistence import (
 from .consolidation_planning import ConsolidationPlanningResult, build_consolidation_planning
 from .consolidation_semantic import (
     EVENT_SEMANTIC_PACKING_V1,
-    FACT_SEMANTIC_PACKING_V1,
+    FACT_SEMANTIC_PACKING_V2,
     RELATIONSHIP_SEMANTIC_PACKING_V1,
     build_event_semantic_preparation,
     build_fact_semantic_preparation,
@@ -192,7 +192,7 @@ class EvidenceConsolidationService:
         # precede the only reuse authority and every provider call.
         fact_preparation = build_fact_semantic_preparation(
             planning, consolidation_profile, semantic_profile,
-            prompts=self._prompts, packing_policy=FACT_SEMANTIC_PACKING_V1,
+            prompts=self._prompts, packing_policy=FACT_SEMANTIC_PACKING_V2,
         )
         event_preparation = build_event_semantic_preparation(
             planning, consolidation_profile, semantic_profile,

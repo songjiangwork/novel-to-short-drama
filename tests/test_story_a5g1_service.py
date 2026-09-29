@@ -11,6 +11,7 @@ from short_drama.llm import LLMError
 from short_drama.story import (
     ConsolidationCurrentMissingError,
     EvidenceConsolidationService,
+    FACT_SEMANTIC_PACKING_V2,
 )
 from short_drama.story import consolidation_service as service_module
 from short_drama.story.consolidation_persistence import (
@@ -145,9 +146,12 @@ def test_all_three_preparations_exist_before_reuse_lookup(tmp_path, monkeypatch)
 
     def check_preparations(self, **kwargs):
         observed.append(
-            tuple(len(kwargs[name].structured_requests) for name in (
-                "fact_preparation", "event_preparation", "relationship_preparation"
-            ))
+            (
+                tuple(len(kwargs[name].structured_requests) for name in (
+                    "fact_preparation", "event_preparation", "relationship_preparation"
+                )),
+                kwargs["fact_preparation"].packing_policy,
+            )
         )
         return original(self, **kwargs)
 
@@ -159,7 +163,7 @@ def test_all_three_preparations_exist_before_reuse_lookup(tmp_path, monkeypatch)
 
     _run(tree, semantic_profile, llm)
 
-    assert observed == [(0, 0, 0)]
+    assert observed == [((0, 0, 0), FACT_SEMANTIC_PACKING_V2)]
 
 
 def test_semantic_invalidation_of_existing_current_executes_provider(tmp_path):

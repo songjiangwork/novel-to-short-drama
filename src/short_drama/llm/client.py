@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
+from .execution import GenerationExecutionOptions
 from .models import (
     OutputSchema,
     RenderedPrompt,
@@ -36,11 +37,16 @@ class LLMClient(ABC):
         rendered_prompt: RenderedPrompt,
         output_schema: OutputSchema,
         semantic_profile: SemanticLLMProfile,
+        *,
+        execution_options: GenerationExecutionOptions | None = None,
     ) -> StructuredGenerationResult:
         """Generate and locally validate a structured result.
 
         Always performs strict local JSON + JSON Schema validation as the
         authoritative trust boundary, regardless of any provider-side
         structured-output constraint.
+
+        A non-default ``execution_options`` value must be supported and
+        applied by a concrete adapter; it must never be silently ignored.
         """
         raise NotImplementedError

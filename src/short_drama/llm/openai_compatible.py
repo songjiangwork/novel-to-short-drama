@@ -14,6 +14,7 @@ from short_drama.artifacts import CanonicalSerializationError, strict_json_loads
 
 from .client import LLMClient
 from .config import RuntimeConfig, resolve_auth_header
+from .execution import GenerationExecutionOptions
 from .errors import (
     LLMConfigError,
     LLMHTTPError,
@@ -348,6 +349,8 @@ class OpenAICompatibleLLMClient(LLMClient):
         rendered_prompt: RenderedPrompt,
         output_schema: OutputSchema,
         semantic_profile: SemanticLLMProfile,
+        *,
+        execution_options: GenerationExecutionOptions | None = None,
     ) -> StructuredGenerationResult:
         request = build_structured_request(
             rendered_prompt=rendered_prompt,
@@ -358,7 +361,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         return run_with_retry(
             max_attempts=self._max_attempts,
             sleeper=self._sleeper,
-            attempt=lambda number: self._attempt(request, number),
+            attempt=lambda number: self._attempt(request, number, execution_options),
         )
 
     def build_request_body(
@@ -366,6 +369,8 @@ class OpenAICompatibleLLMClient(LLMClient):
         rendered_prompt: RenderedPrompt,
         output_schema: OutputSchema,
         semantic_profile: SemanticLLMProfile,
+        *,
+        execution_options: GenerationExecutionOptions | None = None,
     ) -> dict[str, Any]:
         """Build (but do not send) the provider request body for inspection.
 
@@ -381,7 +386,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             semantic_profile=semantic_profile,
         )
         self._require_structured_output_capability(semantic_profile)
-        _url, _headers, body_bytes = self._map_request(request)
+        _url, _headers, body_bytes = self._map_request(request, execution_options)
         return json.loads(body_bytes)
 
     def _require_structured_output_capability(
@@ -395,9 +400,12 @@ class OpenAICompatibleLLMClient(LLMClient):
             )
 
     def _attempt(
-        self, request: StructuredGenerationRequest, attempt_number: int
+        self,
+        request: StructuredGenerationRequest,
+        attempt_number: int,
+        execution_options: GenerationExecutionOptions | None,
     ) -> StructuredGenerationResult:
-        url, headers, body = self._map_request(request)
+        url, headers, body = self._map_request(request, execution_options)
         response = self._transport.post(
             url=url,
             headers=headers,
@@ -418,8 +426,16 @@ class OpenAICompatibleLLMClient(LLMClient):
         )
 
     def _map_request(
-        self, request: StructuredGenerationRequest
+        self,
+        request: StructuredGenerationRequest,
+        execution_options: GenerationExecutionOptions | None = None,
     ) -> tuple[str, dict[str, str], bytes]:
+        if execution_options is not None and not isinstance(
+            execution_options, GenerationExecutionOptions
+        ):
+            raise LLMConfigError(
+                "execution_options must be a GenerationExecutionOptions or None"
+            )
         profile = request.semantic_profile
         # The requested routing model is declared runtime/routing metadata carried
         # by the RuntimeConfig (not independently verified as the actual serving
@@ -435,6 +451,12 @@ class OpenAICompatibleLLMClient(LLMClient):
         # carries a concrete value (disabled -> "none", enabled -> the effort)
         # and the server startup default never silently decides behavior.
         body["reasoning_effort"] = profile.reasoning.request_effort
+        if (
+            execution_options is not None
+            and execution_options.prompt_context_reuse == "disabled"
+        ):
+            # This provider field is deliberately contained in the adapter.
+            body["cache_prompt"] = False
         mode = profile.structured_output_mode
         if mode == "json_schema":
             body["response_format"] = {

@@ -37,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from short_drama.llm import (
+    GenerationExecutionOptions,
     LLMClient,
     LLMInvocationProvenance,
     PromptRegistry,
@@ -280,11 +281,15 @@ class FakeLLMClient(LLMClient):
         self.responses = list(responses)
         self.call_count = 0
         self.request_hashes: list[str] = []
+        self.execution_options: list[GenerationExecutionOptions | None] = []
         self.provider_family = provider_family
         self.request_model = request_model
 
-    def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
+    def generate_structured(
+        self, rendered_prompt, output_schema, semantic_profile, *, execution_options=None
+    ):
         self.call_count += 1
+        self.execution_options.append(execution_options)
         request = build_structured_request(
             rendered_prompt=rendered_prompt,
             output_schema=output_schema,
@@ -696,6 +701,10 @@ class TestEventSemanticRetry:
         result = _resolve_ev(planning, client)
         assert client.call_count == 2
         assert result.block_results[0].semantic_rounds == 2
+        assert client.execution_options == [
+            None,
+            GenerationExecutionOptions(prompt_context_reuse="disabled"),
+        ]
 
     def test_selector_invalid_round1_valid_round2(self, tmp_path):
         tree = _ev_tree(tmp_path)
@@ -1635,3 +1644,8 @@ class TestRelationshipBlockAtomicity:
         )
         # Retry request material is the exact original block-0 request.
         assert client.request_hashes[0] == client.request_hashes[-1]
+        assert client.execution_options[0] is None
+        assert all(option is None for option in client.execution_options[1:-1])
+        assert client.execution_options[-1] == GenerationExecutionOptions(
+            prompt_context_reuse="disabled"
+        )

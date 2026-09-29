@@ -30,6 +30,7 @@ import dataclasses
 import pytest
 
 from short_drama.llm import (
+    GenerationExecutionOptions,
     LLMClient,
     LLMInvocationProvenance,
     PromptRegistry,
@@ -127,11 +128,15 @@ class FakeLLMClient(LLMClient):
         self.call_count = 0
         self.request_hashes: list[str] = []
         self.request_identities: list[tuple[object, ...]] = []
+        self.execution_options: list[GenerationExecutionOptions | None] = []
         self.provider_family = provider_family
         self.request_model = request_model
 
-    def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
+    def generate_structured(
+        self, rendered_prompt, output_schema, semantic_profile, *, execution_options=None
+    ):
         self.call_count += 1
+        self.execution_options.append(execution_options)
         request = build_structured_request(
             rendered_prompt=rendered_prompt,
             output_schema=output_schema,
@@ -340,6 +345,10 @@ def test_round1_typed_invalid_round2_valid(tmp_path):
     # Same request both rounds (semantic retry does not mutate the request).
     assert client.request_hashes[0] == client.request_hashes[1]
     assert client.request_identities[0] == client.request_identities[1]
+    assert client.execution_options == [
+        None,
+        GenerationExecutionOptions(prompt_context_reuse="disabled"),
+    ]
 
 
 def test_round1_invalid_selector_round2_valid(tmp_path):

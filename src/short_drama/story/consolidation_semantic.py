@@ -64,6 +64,7 @@ from typing import Any, Callable, Mapping, TypeVar
 from short_drama.artifacts.canonical import canonical_json_bytes, content_hash
 from short_drama.io import load_json
 from short_drama.llm import (
+    GenerationExecutionOptions,
     LLMClient,
     LLMInvocationProvenance,
     PromptRegistry,
@@ -2719,7 +2720,15 @@ def _attempt_fact_semantic_block(
     rendered_prompt = request.rendered_prompt
     output_schema = request.output_schema
     endpoint_evidence = _block_endpoint_evidence(planning_result, block.pair_refs)
-    result = llm_client.generate_structured(rendered_prompt, output_schema, semantic_profile)
+    if semantic_round == 2:
+        result = llm_client.generate_structured(
+            rendered_prompt,
+            output_schema,
+            semantic_profile,
+            execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+        )
+    else:
+        result = llm_client.generate_structured(rendered_prompt, output_schema, semantic_profile)
     _verify_fact_provenance(result.provenance, request, semantic_profile)
     try:
         payload = FactSelectorDecisionPayload.from_dict(result.parsed_json)
@@ -3486,7 +3495,17 @@ def _attempt_event_semantic_block(
 
     rendered_prompt = request.rendered_prompt
     endpoint_evidence = _event_block_endpoint_evidence(planning_result, block.pair_refs)
-    result = llm_client.generate_structured(rendered_prompt, request.output_schema, semantic_profile)
+    if semantic_round == 2:
+        result = llm_client.generate_structured(
+            rendered_prompt,
+            request.output_schema,
+            semantic_profile,
+            execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+        )
+    else:
+        result = llm_client.generate_structured(
+            rendered_prompt, request.output_schema, semantic_profile
+        )
     _verify_semantic_provenance(result.provenance, request, semantic_profile)
     try:
         payload = EventSelectorDecisionPayload.from_dict(result.parsed_json)
@@ -3539,7 +3558,17 @@ def _attempt_relationship_semantic_block(
 
     rendered_prompt = request.rendered_prompt
     endpoint_evidence = _relationship_block_endpoint_evidence(planning_result, block.pair_refs)
-    result = llm_client.generate_structured(rendered_prompt, request.output_schema, semantic_profile)
+    if semantic_round == 2:
+        result = llm_client.generate_structured(
+            rendered_prompt,
+            request.output_schema,
+            semantic_profile,
+            execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+        )
+    else:
+        result = llm_client.generate_structured(
+            rendered_prompt, request.output_schema, semantic_profile
+        )
     _verify_semantic_provenance(result.provenance, request, semantic_profile)
     try:
         payload = RelationshipSelectorDecisionPayload.from_dict(result.parsed_json)

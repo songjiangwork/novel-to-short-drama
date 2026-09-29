@@ -4,6 +4,7 @@ import json
 import socket as _socket
 import threading
 import time
+from dataclasses import FrozenInstanceError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,7 @@ from short_drama.llm import (
     LLMTransportError,
     LLMPromptError,
     OpenAICompatibleLLMClient,
+    GenerationExecutionOptions,
     OutputSchema,
     PromptSpec,
     ReasoningSettings,
@@ -370,6 +372,81 @@ def test_build_request_body_reflects_reasoning():
     assert body["model"] == "qwen"
 
 
+def test_generation_execution_options_are_immutable_and_validate_values():
+    options = GenerationExecutionOptions()
+    assert options.prompt_context_reuse == "provider_default"
+    with pytest.raises(FrozenInstanceError):
+        options.prompt_context_reuse = "disabled"
+    with pytest.raises(LLMConfigError, match="prompt_context_reuse"):
+        GenerationExecutionOptions(prompt_context_reuse="unexpected")
+
+
+def test_prompt_context_reuse_disabled_changes_only_provider_cache_field():
+    client = make_client(FakeTransport())
+    default_body = client.build_request_body(
+        make_rendered(), make_schema(), make_profile()
+    )
+    explicit_provider_default_body = client.build_request_body(
+        make_rendered(),
+        make_schema(),
+        make_profile(),
+        execution_options=GenerationExecutionOptions(),
+    )
+    disabled_body = client.build_request_body(
+        make_rendered(),
+        make_schema(),
+        make_profile(),
+        execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+    )
+
+    assert "cache_prompt" not in default_body
+    assert explicit_provider_default_body == default_body
+    assert disabled_body["cache_prompt"] is False
+    assert {key: value for key, value in disabled_body.items() if key != "cache_prompt"} == default_body
+
+
+def test_execution_options_do_not_change_request_or_provenance_semantic_identity():
+    rendered = make_rendered()
+    schema = make_schema()
+    profile = make_profile()
+    request_before = build_structured_request(
+        rendered_prompt=rendered, output_schema=schema, semantic_profile=profile
+    )
+    transport = FakeTransport()
+    transport.queue(ok_response(json.dumps({"a": "hello"})), ok_response(json.dumps({"a": "hello"})))
+    client = make_client(transport)
+    default_result = client.generate_structured(rendered, schema, profile)
+    disabled_result = client.generate_structured(
+        rendered,
+        schema,
+        profile,
+        execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+    )
+    request_after = build_structured_request(
+        rendered_prompt=rendered, output_schema=schema, semantic_profile=profile
+    )
+
+    assert request_before.request_hash == request_after.request_hash
+    assert request_before.semantic_profile.semantic_profile_hash == request_after.semantic_profile.semantic_profile_hash
+    semantic_identity_fields = (
+        "semantic_profile_id",
+        "semantic_profile_hash",
+        "prompt_id",
+        "prompt_version",
+        "prompt_content_hash",
+        "rendered_prompt_hash",
+        "output_schema_id",
+        "output_schema_version",
+        "output_schema_hash",
+        "request_hash",
+    )
+    assert tuple(
+        getattr(default_result.provenance, field) for field in semantic_identity_fields
+    ) == tuple(
+        getattr(disabled_result.provenance, field) for field in semantic_identity_fields
+    )
+
+
 def test_request_body_and_provenance_use_runtime_config_model():
     """The provider request body's model and the provenance backend identity
     come from the RuntimeConfig (request_model / provider_family), NOT from the
@@ -641,6 +718,25 @@ def test_retry_uses_identical_semantic_request():
     assert first.url == second.url
     assert first.body == second.body
     assert first.timeout_seconds == second.timeout_seconds
+
+
+def test_disabled_prompt_context_reuse_is_retained_across_technical_retries():
+    transport = FakeTransport()
+    transport.queue(
+        TransportResponse(429, b"rate limited"),
+        ok_response(json.dumps({"a": "hello"})),
+    )
+    client = make_client(transport)
+    client.generate_structured(
+        make_rendered(),
+        make_schema(),
+        make_profile(),
+        execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+    )
+
+    assert len(transport.calls) == 2
+    assert transport.calls[0].body == transport.calls[1].body
+    assert transport.calls[0].body["cache_prompt"] is False
 
 
 def test_no_real_sleep_in_tests():

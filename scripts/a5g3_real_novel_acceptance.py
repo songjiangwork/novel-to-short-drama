@@ -59,11 +59,23 @@ class CountingLLMClient(LLMClient):
         """Expose only the wrapped client's explicit concurrency capability."""
         return bool(getattr(self._inner, "supports_concurrent_calls", False))
 
-    def generate_structured(self, rendered_prompt, output_schema, semantic_profile):
+    def generate_structured(
+        self,
+        rendered_prompt,
+        output_schema,
+        semantic_profile,
+        *,
+        execution_options=None,
+    ):
         with self._lock:
             self.semantic_generation_calls += 1
         try:
-            result = self._inner.generate_structured(rendered_prompt, output_schema, semantic_profile)
+            result = self._inner.generate_structured(
+                rendered_prompt,
+                output_schema,
+                semantic_profile,
+                execution_options=execution_options,
+            )
         except LLMRetryExhaustedError as exc:
             with self._lock:
                 self.provider_attempts += exc.attempts

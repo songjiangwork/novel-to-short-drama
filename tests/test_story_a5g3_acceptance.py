@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from short_drama.llm import LLMRetryExhaustedError
+from short_drama.llm import GenerationExecutionOptions, LLMRetryExhaustedError
 from short_drama.story import ConsolidationSemanticError, ConsolidationSemanticGenerationError
 from short_drama.story.consolidation_semantic import _execute_prepared_blocks
 
@@ -181,11 +181,37 @@ def test_semantic_invalidation_gate_requires_new_hash_miss_calls_and_temp_curren
         acceptance.check_invalidation_gate(old_hash="old", new_hash="new", result=_result("new", reused=True), semantic_calls=1, provider_attempts=1, old_manifest={"artifact_id": "old"}, temp_current=current)
 
 
-def test_counting_client_counts_successful_result_attempts():
-    inner = SimpleNamespace(generate_structured=lambda *args: SimpleNamespace(attempts=2))
+def test_counting_client_counts_successful_result_attempts_with_default_execution_options():
+    received_options = []
+
+    def generate_structured(*args, execution_options=None):
+        received_options.append(execution_options)
+        return SimpleNamespace(attempts=2)
+
+    inner = SimpleNamespace(generate_structured=generate_structured)
     client = acceptance.CountingLLMClient(inner)
     result = client.generate_structured(None, None, None)
     assert result.attempts == 2
+    assert received_options == [None]
+    assert client.semantic_generation_calls == 1
+    assert client.provider_attempts == 2
+
+
+def test_counting_client_forwards_exact_execution_options_object():
+    received_options = []
+    options = GenerationExecutionOptions(prompt_context_reuse="disabled")
+
+    def generate_structured(*args, execution_options=None):
+        received_options.append(execution_options)
+        return SimpleNamespace(attempts=2)
+
+    client = acceptance.CountingLLMClient(
+        SimpleNamespace(generate_structured=generate_structured)
+    )
+    result = client.generate_structured(None, None, None, execution_options=options)
+    assert result.attempts == 2
+    assert received_options == [options]
+    assert received_options[0] is options
     assert client.semantic_generation_calls == 1
     assert client.provider_attempts == 2
 
@@ -193,7 +219,7 @@ def test_counting_client_counts_successful_result_attempts():
 def test_counting_client_accounting_is_safe_for_bounded_concurrent_calls():
     inner = SimpleNamespace(
         supports_concurrent_calls=True,
-        generate_structured=lambda *args: SimpleNamespace(attempts=2),
+        generate_structured=lambda *args, **kwargs: SimpleNamespace(attempts=2),
     )
     client = acceptance.CountingLLMClient(inner)
     with ThreadPoolExecutor(max_workers=acceptance.A5_MAX_CONCURRENCY) as executor:
@@ -228,14 +254,19 @@ def test_counting_client_passes_existing_bounded_executor_capability_gate():
 
 def test_counting_client_counts_exhausted_attempts_and_reraises_same_exception():
     error = LLMRetryExhaustedError(attempts=3, message="connection refused")
+    options = GenerationExecutionOptions(prompt_context_reuse="disabled")
+    received_options = []
 
-    def raise_error(*args):
+    def raise_error(*args, execution_options=None):
+        received_options.append(execution_options)
         raise error
 
     client = acceptance.CountingLLMClient(SimpleNamespace(generate_structured=raise_error))
     with pytest.raises(LLMRetryExhaustedError) as caught:
-        client.generate_structured(None, None, None)
+        client.generate_structured(None, None, None, execution_options=options)
     assert caught.value is error
+    assert received_options == [options]
+    assert received_options[0] is options
     assert client.semantic_generation_calls == 1
     assert client.provider_attempts == 3
     assert acceptance.live_failure_payload(error, client) == {

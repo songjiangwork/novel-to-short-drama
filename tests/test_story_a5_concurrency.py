@@ -13,7 +13,7 @@ from short_drama.story import (
     ConsolidationProvenanceError,
     ConsolidationSemanticError,
     ConsolidationSemanticGenerationError,
-    FACT_SEMANTIC_PACKING_V1,
+    FACT_SEMANTIC_PACKING_V2,
     build_fact_semantic_preparation,
     resolve_fact_semantic_ambiguity,
 )
@@ -359,7 +359,7 @@ def test_fact_resolution_is_identical_after_out_of_order_concurrent_completion(t
     planning = _planning(_tree(tmp_path, specs=_single_facts_specs(40)))
     preparation = build_fact_semantic_preparation(
         planning, _PROFILE, _SEM_PROFILE, prompts=_PROMPTS,
-        packing_policy=FACT_SEMANTIC_PACKING_V1,
+        packing_policy=FACT_SEMANTIC_PACKING_V2,
     )
     payloads = {
         request.request_hash: _payload_for_block(block)

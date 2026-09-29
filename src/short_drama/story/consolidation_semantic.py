@@ -384,20 +384,32 @@ A5C_PACKING_CANDIDATES: tuple[FactSemanticPackingPolicy, ...] = (
     FactSemanticPackingPolicy("P3", 24, 48),
 )
 
-# FROZEN production fact semantic packing policy (A5C-B).
+# Historical frozen fact semantic packing policy (A5C-B v1).
 #
 # ``fact-semantic-packing-v1`` is the FROZEN POST-AUDIT policy (docs
 # ``v1.2-A5C-fact-semantic-packing-v1.md``): 12 pairs / 24 candidates (audit
 # candidate P2). The canonical packing material is the frozen behavioral limits
 # (12 / 24), NOT the policy label: ``FactSemanticPackingPolicy.to_dict()``
 # carries only the two limits, so this policy produces byte-identical block ids
-# and request hashes to the audited P2 preparation (identical block
-# membership, request hashes). A5C-B consumes this exact policy and never
-# re-selects P1 / P2 / P3 at runtime.
+# and request hashes to the audited P2 preparation (identical block membership,
+# request hashes). It remains available for historical reproducibility.
 FACT_SEMANTIC_PACKING_V1: FactSemanticPackingPolicy = FactSemanticPackingPolicy(
     "fact-semantic-packing-v1",
     12,
     24,
+)
+
+# Production fact semantic packing policy (A5C-B v2).
+#
+# The observed P2 12-pair structured-output reliability boundary is addressed
+# by this explicit, static policy refinement: 6 pairs / 12 candidates. The
+# behavioral limits remain the only packing material in block/request identity;
+# there is no artificial version salt, runtime selection, or failure-driven
+# repacking.
+FACT_SEMANTIC_PACKING_V2: FactSemanticPackingPolicy = FactSemanticPackingPolicy(
+    "fact-semantic-packing-v2",
+    6,
+    12,
 )
 
 # A5 pair-local evidence selector (L0 / R0 / L1 / ...). This is the single
@@ -2787,13 +2799,14 @@ def resolve_fact_semantic_ambiguity(
     ``needs_semantic_decision`` fact pair via bounded LLM semantic generation.
 
     The deterministic, zero-provider request construction is delegated to
-    :func:`build_fact_semantic_preparation` with the FROZEN production policy
-    :data:`FACT_SEMANTIC_PACKING_V1` (12 pairs / 24 candidates, identical block
-    ids / request hashes to the audited P2). This function drives one bounded
-    concurrent first round for every prepared block, waits at the domain
-    barrier, then runs only semantic-invalid blocks serially in original
-    ordinal order. A5C-B does NOT persist, does NOT write CURRENT, and does
-    NOT build CanonicalFactSet / StateTransition / StoryConflict.
+    :func:`build_fact_semantic_preparation` with the explicit production policy
+    :data:`FACT_SEMANTIC_PACKING_V2` (6 pairs / 12 candidates). This explicit
+    static refinement naturally changes affected block / request identities
+    through its behavioral limits; it does not repack on failure. This function
+    drives one bounded concurrent first round for every prepared block, waits at
+    the domain barrier, then runs only semantic-invalid blocks serially in
+    original ordinal order. A5C-B does NOT persist, does NOT write CURRENT, and
+    does NOT build CanonicalFactSet / StateTransition / StoryConflict.
 
     Per block (block atomicity):
       * ``llm_client.generate_structured(...)`` (A-I3 owns the provider call and
@@ -2823,7 +2836,7 @@ def resolve_fact_semantic_ambiguity(
         consolidation_profile,
         semantic_profile,
         prompts=prompts,
-        packing_policy=FACT_SEMANTIC_PACKING_V1,
+        packing_policy=FACT_SEMANTIC_PACKING_V2,
     )
     blocks = preparation.blocks
 

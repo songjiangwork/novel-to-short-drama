@@ -1,0 +1,13 @@
+# A5 fact consolidation prompt — TRACKED (v1.2 Issue #80).
+#
+# v2 refines only the semantic meaning of ``same_fact``: it is identity-safe
+# semantic equivalence for downstream canonicalization, not merely overlap or
+# a shared core proposition.  The payload, selector, and decision contracts
+# remain identical to v1, which is preserved unchanged.
+schema_version: 1
+prompt_id: a5.fact-consolidation
+version: 2
+required_variables:
+  - block_id
+  - pair_contexts_json
+content_hash: 95c2dbf4295fd5ded3ada2256cd571b3af1d6d2ce4a2de3017e3c4a024ba24c8

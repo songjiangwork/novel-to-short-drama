@@ -188,6 +188,30 @@ def test_semantic_invalidation_of_existing_current_executes_provider(tmp_path):
     )
 
 
+def test_fact_prompt_v1_current_is_not_reused_by_v2_production_execution(
+    tmp_path, monkeypatch
+):
+    """Issue #80: an old Fact prompt identity must force a fresh provider path."""
+    from short_drama.story import consolidation_semantic as semantic_module
+
+    tree, profile_v2, semantic_profile, _planning = _semantic_pair_inputs(tmp_path)
+    profile_v1 = replace(profile_v2, fact=replace(profile_v2.fact, prompt_version=1))
+    responses = _valid_responses(_planning)
+    with monkeypatch.context() as prior_contract:
+        prior_contract.setattr(semantic_module, "A5C_FACT_PROMPT_VERSION", 1)
+        first = _run_semantic_pair(
+            tree, profile_v1, semantic_profile, FakeLLMClient(responses)
+        )
+
+    fresh_client = FakeLLMClient(_valid_responses(_planning))
+    second = _run_semantic_pair(tree, profile_v2, semantic_profile, fresh_client)
+
+    assert first.reused is False
+    assert second.reused is False
+    assert fresh_client.call_count == second.semantic_generation_call_count == 1
+    assert second.consolidation_manifest_ref.revision > first.consolidation_manifest_ref.revision
+
+
 def test_semantic_miss_executes_existing_provider_resolution(tmp_path):
     tree, profile, semantic_profile, planning = _semantic_pair_inputs(tmp_path)
     client = FakeLLMClient(_valid_responses(planning))

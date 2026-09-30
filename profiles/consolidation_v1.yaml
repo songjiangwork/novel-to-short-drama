@@ -35,7 +35,7 @@ blocking_policy_id: consolidation-blocking-v1
 fact:
   semantic_profile_id: consolidation-llm-v1
   prompt_id: a5.fact-consolidation
-  prompt_version: 1
+  prompt_version: 2
   output_schema_id: consolidation-fact-selector-payload
   output_schema_version: 1
 

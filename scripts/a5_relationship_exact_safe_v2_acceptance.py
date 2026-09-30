@@ -17,14 +17,13 @@ from pathlib import Path
 
 from short_drama.artifacts import FileArtifactStore
 from short_drama.foundation import FilePointerStore
-from short_drama.llm import LLMClient, LLMError, LLMRetryExhaustedError, OpenAICompatibleLLMClient, PromptRegistry, load_runtime_config
+from short_drama.llm import LLMClient, LLMRetryExhaustedError, LLMTransportError, OpenAICompatibleLLMClient, PromptRegistry, load_runtime_config
 from short_drama.paths import REPO_ROOT
 from short_drama.story import (
     PAIR_STATE_AUTO_SAME,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
     RELATIONSHIP_SEMANTIC_PACKING_V1,
     ConsolidationIdentityPlan,
-    ConsolidationSemanticGenerationError,
     build_canonical_relationship_set,
     build_consolidation_planning,
     build_relationship_identity_components,
@@ -265,9 +264,7 @@ def main() -> int:
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
             return 0 if report["run_tree_unchanged"] and report["git_status_unchanged"] else 2
         except Exception as exc:
-            retryable_wakeup = isinstance(
-                exc, (LLMError, ConsolidationSemanticGenerationError)
-            )
+            retryable_wakeup = isinstance(exc, LLMTransportError)
             if attempt == 1 and retryable_wakeup:
                 continue
             print(json.dumps({"pass": False, "error_type": type(exc).__name__, "error": str(exc), "gate_attempt": attempt}, ensure_ascii=False, indent=2))

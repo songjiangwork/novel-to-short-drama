@@ -257,6 +257,7 @@ from .consolidation_planning import (
     DETERMINISTIC_METHOD,
     EVENT_SIGNALS,
     EXACT_SAFE_POLICY_ID,
+    EXACT_SAFE_POLICY_ID_V1,
     FACT_SIGNALS,
     PLANNING_POLICY_ID,
     RELATIONSHIP_SIGNALS,
@@ -275,6 +276,7 @@ from .consolidation_planning import (
     normalize_consolidation_text,
     plan_consolidation_pairs,
     relationship_exact_safe_key,
+    relationship_exact_safe_key_v1,
 )
 from .consolidation_semantic import (
     A5C_BLOCK_PREFIX,
@@ -677,6 +679,7 @@ __all__ = [
     "DETERMINISTIC_METHOD",
     "EVENT_SIGNALS",
     "EXACT_SAFE_POLICY_ID",
+    "EXACT_SAFE_POLICY_ID_V1",
     "FACT_SIGNALS",
     "PLANNING_POLICY_ID",
     "RELATIONSHIP_SIGNALS",
@@ -689,6 +692,7 @@ __all__ = [
     "normalize_consolidation_text",
     "plan_consolidation_pairs",
     "relationship_exact_safe_key",
+    "relationship_exact_safe_key_v1",
     "A5C_BLOCK_PREFIX",
     "A5C_FACT_ENDPOINT_PACKET_FIELDS",
     "A5C_FACT_MAX_GENERATION_ROUNDS",

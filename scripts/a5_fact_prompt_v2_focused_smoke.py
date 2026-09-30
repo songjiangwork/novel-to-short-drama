@@ -138,7 +138,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-config", default=REPO_ROOT / "profiles" / "llm_local.yaml")
     parser.add_argument("--project", default=REPO_ROOT / "examples" / "a3e_real_novel" / "project.yaml")
-    parser.add_argument("--runs-root", default=REPO_ROOT / "runs")
+    parser.add_argument("--runs-root", default=REPO_ROOT / "runs" / "a4e_real_novel")
     parser.add_argument("--reconciliation-profile-id", default="entity-reconciliation-v2")
     args = parser.parse_args()
     profile = load_consolidation_profile(REPO_ROOT / "profiles" / "consolidation_v1.yaml")

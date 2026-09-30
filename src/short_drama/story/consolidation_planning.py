@@ -167,8 +167,10 @@ class ConsolidationInputSnapshot:
 A5B_BLOCKING_POLICY_ID = "consolidation-blocking-v1"
 #: The frozen deterministic text-normalization policy id.
 TEXT_NORMALIZATION_POLICY_ID = "a5-text-normalization-v1"
-#: The frozen exact-safe auto-same policy id.
-EXACT_SAFE_POLICY_ID = "a5-exact-safe-v1"
+#: The immutable historical exact-safe auto-same policy id.
+EXACT_SAFE_POLICY_ID_V1 = "a5-exact-safe-v1"
+#: The current exact-safe auto-same policy id.
+EXACT_SAFE_POLICY_ID = "a5-exact-safe-v2"
 #: The frozen deterministic pair-planning policy id.
 PLANNING_POLICY_ID = "a5-pair-planning-v1"
 #: The frozen deterministic method for exact-safe auto-same decisions.
@@ -306,11 +308,11 @@ def event_exact_safe_key(candidate: IndexedEventCandidate) -> tuple:
     )
 
 
-def relationship_exact_safe_key(candidate: IndexedRelationshipCandidate) -> tuple:
-    """Relationship exact-safe auto-same key (exact-safe-v1).
+def relationship_exact_safe_key_v1(candidate: IndexedRelationshipCandidate) -> tuple:
+    """Historical relationship exact-safe auto-same key (exact-safe-v1).
 
     ``(endpoint_identity_key, normalized type, normalized optional state)``.
-    ``None`` and the empty string are distinct for the optional state.
+    It remains available solely as the immutable v1 policy authority.
     """
     _require_exact_safe_text(
         candidate.relationship_type_zh, "relationship_type_zh"
@@ -329,6 +331,28 @@ def relationship_exact_safe_key(candidate: IndexedRelationshipCandidate) -> tupl
         endpoint_key,
         normalize_consolidation_text(candidate.relationship_type_zh),
         normalized_state,
+    )
+
+
+def relationship_exact_safe_key(candidate: IndexedRelationshipCandidate) -> tuple:
+    """Relationship exact-safe auto-same key (exact-safe-v2).
+
+    ``(direction-aware endpoint identity, normalized exact relationship type)``.
+    ``state_zh`` is deliberately excluded: relationship state belongs to the
+    canonical relationship's state history, not to relationship identity.
+    This performs exact normalized equality only; it does not map semantic
+    synonyms such as ``朋友`` / ``好友``.
+    """
+    _require_exact_safe_text(
+        candidate.relationship_type_zh, "relationship_type_zh"
+    )
+    return (
+        _endpoint_identity_key(
+            candidate.source_entity_ref,
+            candidate.target_entity_ref,
+            candidate.direction,
+        ),
+        normalize_consolidation_text(candidate.relationship_type_zh),
     )
 
 
@@ -1887,6 +1911,7 @@ __all__ = [
     "EVENT_SIGNALS",
     "EventPairPlan",
     "EXACT_SAFE_POLICY_ID",
+    "EXACT_SAFE_POLICY_ID_V1",
     "FACT_SIGNALS",
     "FactPairPlan",
     "PAIR_STATE_AUTO_SAME",
@@ -1904,4 +1929,5 @@ __all__ = [
     "normalize_consolidation_text",
     "plan_consolidation_pairs",
     "relationship_exact_safe_key",
+    "relationship_exact_safe_key_v1",
 ]

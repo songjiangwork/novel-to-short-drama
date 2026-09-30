@@ -1037,8 +1037,9 @@ def test_event_prep_selects_event_stream_relationship_prep_selects_relationship(
 
 
 # ---------------------------------------------------------------------------
-# Golden regression: the A5C fact block ids + request hashes are UNCHANGED
-# after the shared two-limit packing refactor.
+# Historical v1 ids are retained as regression witnesses.  Issue #82 changes
+# the authoritative A5B plan identity, so every downstream block/request id
+# must change even though Fact packing and its prompt contract do not.
 # ---------------------------------------------------------------------------
 
 
@@ -1146,37 +1147,38 @@ def _fact_prep(specs, policy):
     )
 
 
-def test_golden_fact_corpus_p2_unchanged():
+def test_fact_corpus_p2_changes_only_through_new_plan_identity():
     prep = _fact_prep(_fact_corpus_specs(), _FACT_P2)
-    assert [b.block_id for b in prep.blocks] == list(_CORPUS_P2_BLOCK_IDS)
-    assert list(prep.semantic_request_hashes) == list(_CORPUS_P2_REQUEST_HASHES)
+    assert prep.planning_result.exact_safe_policy_id == "a5-exact-safe-v2"
+    assert [b.block_id for b in prep.blocks] != list(_CORPUS_P2_BLOCK_IDS)
+    assert list(prep.semantic_request_hashes) != list(_CORPUS_P2_REQUEST_HASHES)
 
 
-def test_golden_fact_single30_p2_unchanged():
+def test_fact_single30_p2_changes_only_through_new_plan_identity():
     prep = _fact_prep(_fact_single_chunk_specs(30), _FACT_P2)
-    assert [b.block_id for b in prep.blocks] == list(_SINGLE30_P2_BLOCK_IDS)
+    assert [b.block_id for b in prep.blocks] != list(_SINGLE30_P2_BLOCK_IDS)
     hashes = list(prep.semantic_request_hashes)
     assert len(hashes) == len(_SINGLE30_P2_BLOCK_IDS)
-    assert hashes[0] == _SINGLE30_P2_REQUEST_HASH_FIRST
-    assert hashes[-1] == _SINGLE30_P2_REQUEST_HASH_LAST
+    assert hashes[0] != _SINGLE30_P2_REQUEST_HASH_FIRST
+    assert hashes[-1] != _SINGLE30_P2_REQUEST_HASH_LAST
 
 
-def test_golden_fact_single12_p1_unchanged():
+def test_fact_single12_p1_changes_only_through_new_plan_identity():
     prep = _fact_prep(_fact_single_chunk_specs(12), _FACT_P1)
-    assert [b.block_id for b in prep.blocks] == list(_SINGLE12_P1_BLOCK_IDS)
+    assert [b.block_id for b in prep.blocks] != list(_SINGLE12_P1_BLOCK_IDS)
     hashes = list(prep.semantic_request_hashes)
     assert len(hashes) == len(_SINGLE12_P1_BLOCK_IDS)
-    assert hashes[0] == _SINGLE12_P1_REQUEST_HASH_FIRST
-    assert hashes[-1] == _SINGLE12_P1_REQUEST_HASH_LAST
+    assert hashes[0] != _SINGLE12_P1_REQUEST_HASH_FIRST
+    assert hashes[-1] != _SINGLE12_P1_REQUEST_HASH_LAST
 
 
-def test_golden_fact_single48_p2_unchanged():
+def test_fact_single48_p2_changes_only_through_new_plan_identity():
     prep = _fact_prep(_fact_single_chunk_specs(48), _FACT_P2)
-    assert [b.block_id for b in prep.blocks] == list(_SINGLE48_P2_BLOCK_IDS)
+    assert [b.block_id for b in prep.blocks] != list(_SINGLE48_P2_BLOCK_IDS)
     hashes = list(prep.semantic_request_hashes)
     assert len(hashes) == len(_SINGLE48_P2_BLOCK_IDS)
-    assert hashes[0] == _SINGLE48_P2_REQUEST_HASH_FIRST
-    assert hashes[-1] == _SINGLE48_P2_REQUEST_HASH_LAST
+    assert hashes[0] != _SINGLE48_P2_REQUEST_HASH_FIRST
+    assert hashes[-1] != _SINGLE48_P2_REQUEST_HASH_LAST
 
 
 def test_shared_packing_helper_used_by_fact():

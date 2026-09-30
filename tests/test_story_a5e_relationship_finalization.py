@@ -147,6 +147,22 @@ class TestStateHistory:
         assert tuple((state.state_zh, state.candidate_relationship_refs) for state in relationship.state_history) == expected
         assert relationship.candidate_relationship_refs == tuple(_rel_ref(n) for n in range(1, len(states) + 1))
 
+    def test_same_exact_identity_with_distinct_states_is_one_relationship(self):
+        """A5E preserves identity/state separation after A5B v2 auto-same."""
+        relationship = self._one_component(("陌生", "熟悉", "陌生"))
+        assert relationship.relationship_type_zh == "朋友"
+        assert relationship.candidate_relationship_refs == (
+            _rel_ref(1), _rel_ref(2), _rel_ref(3),
+        )
+        assert tuple(
+            (state.state_zh, state.candidate_relationship_refs)
+            for state in relationship.state_history
+        ) == (
+            ("陌生", (_rel_ref(1),)),
+            ("熟悉", (_rel_ref(2),)),
+            ("陌生", (_rel_ref(3),)),
+        )
+
     def test_state_evidence_and_global_source_rank(self):
         # Relationship A has members at global ranks 1 and 3; B interleaves at ranks 2 and 4.
         a1 = _relationship(1, source_order=1, state="A", evidence=(_evidence(1, None), _evidence(2)))

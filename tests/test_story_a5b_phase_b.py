@@ -40,16 +40,20 @@ from pathlib import Path
 import pytest
 
 from short_drama.artifacts.canonical import content_hash
+from short_drama.llm import PromptRegistry
+from short_drama.paths import REPO_ROOT
 from short_drama.story import (
     A5B_BLOCKING_POLICY_ID,
     DETERMINISTIC_METHOD,
     EXACT_SAFE_POLICY_ID,
+    EXACT_SAFE_POLICY_ID_V1,
     EVENT_SIGNALS,
     FACT_SIGNALS,
     PAIR_STATE_AUTO_SAME,
     PAIR_STATE_NEEDS_SEMANTIC_DECISION,
     PLANNING_POLICY_ID,
     RELATIONSHIP_SIGNALS,
+    RELATIONSHIP_SEMANTIC_PACKING_V1,
     TEXT_NORMALIZATION_POLICY_ID,
     ConsolidationDecisionSet,
     EventCandidate,
@@ -60,10 +64,13 @@ from short_drama.story import (
     RelationshipSemanticDecision,
     StoryIntegrityError,
     build_consolidation_planning,
+    build_relationship_semantic_preparation,
     event_exact_safe_key,
     fact_exact_safe_key,
     normalize_consolidation_text,
     relationship_exact_safe_key,
+    relationship_exact_safe_key_v1,
+    load_relationship_semantic_profile,
 )
 from short_drama.story.extraction import EvidenceRef
 from test_story_a5b_audit import (
@@ -701,25 +708,29 @@ def test_event_exact_safe_auto_same(tmp_path):
     assert plan.state == PAIR_STATE_AUTO_SAME
 
 
-def test_relationship_exact_safe_auto_same_and_none_vs_state(tmp_path):
+def test_relationship_exact_safe_v2_auto_same_across_state_history(tmp_path):
     specs = [
         ChunkSpec(
             "CH001", ("CH001_P0001",),
             chars=(_char("cand_char_001", "Alice"), _char("cand_char_002", "Bob")),
             rels=(
                 _mk_rel("cand_rel_001", source_ref="cand_char_001", target_ref="cand_char_002",
-                        relationship_type_zh="helps", state_zh=None, para="CH001_P0001"),
+                        relationship_type_zh="朋友", state_zh=None, para="CH001_P0001"),
                 _mk_rel("cand_rel_002", source_ref="cand_char_001", target_ref="cand_char_002",
-                        relationship_type_zh=" helps ", state_zh=None, para="CH001_P0001"),
-                # same endpoints + type but a PRESENT (non-empty) state -> not auto_same
+                        relationship_type_zh=" 朋友 ", state_zh=None, para="CH001_P0001"),
+                # Same identity but a distinct observed state: v2 must retain
+                # this in A5E state_history rather than send it to Qwen.
                 _mk_rel("cand_rel_003", source_ref="cand_char_001", target_ref="cand_char_002",
-                        relationship_type_zh="helps", state_zh="active", para="CH001_P0001"),
+                        relationship_type_zh="朋友", state_zh="熟悉", para="CH001_P0001"),
+                # Type synonyms are semantic ambiguity, never deterministic.
+                _mk_rel("cand_rel_004", source_ref="cand_char_001", target_ref="cand_char_002",
+                        relationship_type_zh="好友", state_zh="熟悉", para="CH001_P0001"),
             ),
         ),
     ]
     tree = _build_multi_chunk_tree(tmp_path, *specs)
     result = _plan(tree)
-    refs = _global_refs_for(result, "relationships", {"cand_rel_001", "cand_rel_002", "cand_rel_003"})
+    refs = _global_refs_for(result, "relationships", {"cand_rel_001", "cand_rel_002", "cand_rel_003", "cand_rel_004"})
     plan_same = _pair_by_refs(result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_002"])
     assert plan_same is not None
     assert plan_same.state == PAIR_STATE_AUTO_SAME
@@ -727,7 +738,17 @@ def test_relationship_exact_safe_auto_same_and_none_vs_state(tmp_path):
         result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_003"]
     )
     assert plan_none_vs_state is not None
-    assert plan_none_vs_state.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
+    assert plan_none_vs_state.state == PAIR_STATE_AUTO_SAME
+    assert "exact_normalized_relationship_type" in plan_none_vs_state.signals
+    assert "exact_safe_key" in plan_none_vs_state.signals
+    assert _pair_by_refs(
+        result.relationship_pair_plans, refs["cand_rel_001"], refs["cand_rel_004"]
+    ).state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
+    deterministic = {
+        frozenset((decision.left_candidate_ref, decision.right_candidate_ref)): decision
+        for decision in result.deterministic_decision_set.relationship_decisions
+    }
+    assert deterministic[frozenset((refs["cand_rel_001"], refs["cand_rel_003"]))].decision == "same_relationship"
 
 
 def test_relationship_opposite_direction_not_auto_same(tmp_path):
@@ -881,10 +902,8 @@ def test_exact_safe_keys_pure():
     )
     assert event_exact_safe_key(e1) == event_exact_safe_key(e2)
 
-    # The relationship key distinguishes an ABSENT state (None) from a present
-    # one. The A5A/A3 models only permit None or non-empty state, so the
-    # defensive ``None`` vs ``""`` distinction is exercised on the key function
-    # itself (via a duck-typed namespace that bypasses model validation).
+    # v1 remains a separately testable immutable historical policy. Its state
+    # component distinguished ABSENT from present state. v2 excludes state.
     import types
 
     def _rel_ns(state):
@@ -894,11 +913,10 @@ def test_exact_safe_keys_pure():
             direction="directed", state_zh=state,
         )
 
-    # None vs empty string are distinct for the optional state.
-    assert relationship_exact_safe_key(_rel_ns(None)) != relationship_exact_safe_key(_rel_ns(""))
-    # None vs a present state are distinct.
-    assert relationship_exact_safe_key(_rel_ns(None)) != relationship_exact_safe_key(_rel_ns("active"))
-    # A valid indexed candidate with a None state is also accepted by the key.
+    assert relationship_exact_safe_key_v1(_rel_ns(None)) != relationship_exact_safe_key_v1(_rel_ns(""))
+    assert relationship_exact_safe_key_v1(_rel_ns(None)) != relationship_exact_safe_key_v1(_rel_ns("active"))
+    assert relationship_exact_safe_key(_rel_ns(None)) == relationship_exact_safe_key(_rel_ns("active"))
+    # A valid indexed candidate with a None state is also accepted by both keys.
     r_none = IndexedRelationshipCandidate(
         global_candidate_ref="CH001_C001:cand_rel_001", chunk_id="CH001_C001",
         local_candidate_id="cand_rel_001", source_order_key=_key(6),
@@ -907,6 +925,7 @@ def test_exact_safe_keys_pure():
         evidence_strength="explicit", evidence_refs=(_ev("CH001_P0001"),),
         candidate_extraction_ref=_ref(),
     )
+    assert relationship_exact_safe_key_v1(r_none) == relationship_exact_safe_key_v1(_rel_ns(None))
     assert relationship_exact_safe_key(r_none) == relationship_exact_safe_key(_rel_ns(None))
 
 
@@ -1027,6 +1046,9 @@ def test_plan_hash_over_documented_material(tmp_path):
         "deterministic_decision_set": result.deterministic_decision_set.to_dict(),
     }
     assert result.plan_hash == content_hash(material)
+    v1_material = {**material, "exact_safe_policy_id": EXACT_SAFE_POLICY_ID_V1}
+    assert result.exact_safe_policy_id == EXACT_SAFE_POLICY_ID == "a5-exact-safe-v2"
+    assert content_hash(v1_material) != result.plan_hash
 
 
 def test_plan_hash_changes_with_index(tmp_path):
@@ -1072,7 +1094,8 @@ def test_profile_policy_ids_are_frozen():
     profile = _consolidation_profile()
     assert profile.blocking_policy_id == A5B_BLOCKING_POLICY_ID == "consolidation-blocking-v1"
     assert TEXT_NORMALIZATION_POLICY_ID == "a5-text-normalization-v1"
-    assert EXACT_SAFE_POLICY_ID == "a5-exact-safe-v1"
+    assert EXACT_SAFE_POLICY_ID_V1 == "a5-exact-safe-v1"
+    assert EXACT_SAFE_POLICY_ID == "a5-exact-safe-v2"
     assert PLANNING_POLICY_ID == "a5-pair-planning-v1"
 
 
@@ -1150,14 +1173,17 @@ def test_alice_zero_provider_smoke():
     fact_total = len(result.fact_pair_plans)
     event_total = len(result.event_pair_plans)
     rel_total = len(result.relationship_pair_plans)
-    auto_total = sum(
-        1 for plans in (result.fact_pair_plans, result.event_pair_plans,
-                        result.relationship_pair_plans)
-        for p in plans if p.state == PAIR_STATE_AUTO_SAME
+    relationship_auto_total = sum(
+        1 for p in result.relationship_pair_plans if p.state == PAIR_STATE_AUTO_SAME
+    )
+    relationship_semantic_total = sum(
+        1 for p in result.relationship_pair_plans
+        if p.state == PAIR_STATE_NEEDS_SEMANTIC_DECISION
     )
     total_plans = fact_total + event_total + rel_total
 
-    assert auto_total == 0
+    assert relationship_auto_total == 403
+    assert relationship_semantic_total == 25
     assert fact_total <= 5300
     assert event_total <= 4300
     # Direction-aware relationship acceptance (section 9.1): the explicit count
@@ -1166,7 +1192,30 @@ def test_alice_zero_provider_smoke():
     assert rel_total == 428
     assert rel_total <= 845
     assert total_plans <= 10450
-    assert len(_all_decisions(result.deterministic_decision_set)) == 0
+    assert len(result.deterministic_decision_set.relationship_decisions) == 403
+    historical = _pair_by_refs(
+        result.relationship_pair_plans,
+        "CH005_C001:cand_rel_021",
+        "CH005_C001:cand_rel_031",
+    )
+    assert historical is not None
+    assert historical.state == PAIR_STATE_AUTO_SAME
+    historical_decision = next(
+        decision for decision in result.deterministic_decision_set.relationship_decisions
+        if {decision.left_candidate_ref, decision.right_candidate_ref}
+        == {"CH005_C001:cand_rel_021", "CH005_C001:cand_rel_031"}
+    )
+    assert historical_decision.decision == "same_relationship"
+    preparation = build_relationship_semantic_preparation(
+        result,
+        _consolidation_profile(),
+        load_relationship_semantic_profile(),
+        prompts=PromptRegistry(REPO_ROOT / "prompts" / "story"),
+        packing_policy=RELATIONSHIP_SEMANTIC_PACKING_V1,
+    )
+    assert preparation.auto_same_pair_count == 403
+    assert preparation.semantic_pair_count == 25
+    assert len(preparation.blocks) == 3
 
     result2 = build_consolidation_planning(
         store, pointers, project_id=_ALICE_PROJECT, document_id=_ALICE_DOCUMENT,

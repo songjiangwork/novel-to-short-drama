@@ -289,7 +289,7 @@ def _execute_two_stage_semantic_blocks(
 
 #: Tracked A5 fact consolidation prompt identity.
 A5C_FACT_PROMPT_ID = "a5.fact-consolidation"
-A5C_FACT_PROMPT_VERSION = 1
+A5C_FACT_PROMPT_VERSION = 2
 
 #: Tracked A5 fact selector-payload output schema identity.
 A5C_FACT_OUTPUT_SCHEMA_ID = "consolidation-fact-selector-payload"

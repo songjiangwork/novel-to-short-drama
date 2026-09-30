@@ -13,6 +13,7 @@ import pytest
 from short_drama.llm import OutputSchema, PromptSpec, build_structured_request
 from short_drama.llm.config import RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig
 from short_drama.foundation import PointerIntegrityError
+from short_drama.paths import REPO_ROOT
 from short_drama.story import (
     ConsolidationPersistenceService,
     ConsolidationUpstreamUnstableError,
@@ -123,6 +124,59 @@ def test_transport_only_runtime_change_remains_reusable(tmp_path):
     # RuntimeConfig is intentionally test context only: it is absent from the
     # production reuse API and cannot affect the preparation/request hashes.
     assert _reuse(service, tree, planning, preparations) == replace(published, reused=True)
+
+
+def test_fact_prompt_v1_to_v2_changes_semantic_identity_and_misses_reuse(
+    tmp_path, monkeypatch
+):
+    """The immutable Fact prompt revision is result-affecting, unlike transport."""
+    from short_drama.llm import PromptRegistry
+    from short_drama.story import consolidation_semantic as semantic_module
+    from short_drama.story.consolidation_semantic import (
+        EVENT_SEMANTIC_PACKING_V1,
+        RELATIONSHIP_SEMANTIC_PACKING_V1,
+        build_event_semantic_preparation,
+        build_fact_semantic_preparation,
+        build_relationship_semantic_preparation,
+    )
+
+    tree, planning, _published, preparations, service = _published_current(tmp_path)
+    fact_v2, event, relationship = preparations
+    profile_v1 = replace(
+        tree.consolidation_profile,
+        fact=replace(tree.consolidation_profile.fact, prompt_version=1),
+    )
+    with monkeypatch.context() as prior_contract:
+        prior_contract.setattr(semantic_module, "A5C_FACT_PROMPT_VERSION", 1)
+        fact_v1 = build_fact_semantic_preparation(
+            planning,
+            profile_v1,
+            fact_v2.semantic_profile,
+            prompts=PromptRegistry(REPO_ROOT / "prompts" / "story"),
+            packing_policy=fact_v2.packing_policy,
+        )
+    event_v1 = build_event_semantic_preparation(
+        planning,
+        profile_v1,
+        fact_v2.semantic_profile,
+        prompts=PromptRegistry(REPO_ROOT / "prompts" / "story"),
+        packing_policy=EVENT_SEMANTIC_PACKING_V1,
+    )
+    relationship_v1 = build_relationship_semantic_preparation(
+        planning,
+        profile_v1,
+        fact_v2.semantic_profile,
+        prompts=PromptRegistry(REPO_ROOT / "prompts" / "story"),
+        packing_policy=RELATIONSHIP_SEMANTIC_PACKING_V1,
+    )
+
+    identity_v1 = build_a5_semantic_identity(fact_v1, event_v1, relationship_v1)
+    identity_v2 = build_a5_semantic_identity(fact_v2, event, relationship)
+    assert fact_v1.prompt_version == 1
+    assert fact_v2.prompt_version == 2
+    assert fact_v1.prompt_content_hash != fact_v2.prompt_content_hash
+    assert identity_v1 != identity_v2
+    assert _reuse(service, tree, planning, (fact_v1, event_v1, relationship_v1), profile_v1) is None
 
 
 def test_ordered_semantic_request_hashes_are_not_sorted_or_deduplicated(tmp_path):

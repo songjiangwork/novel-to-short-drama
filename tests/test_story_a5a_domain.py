@@ -105,9 +105,11 @@ A5_LLM_PROFILE_PATH = PROFILES_DIR / "consolidation_llm_v1.yaml"
 A5_FACT_PROMPT_ID = "a5.fact-consolidation"
 A5_EVENT_PROMPT_ID = "a5.event-consolidation"
 A5_RELATIONSHIP_PROMPT_ID = "a5.relationship-consolidation"
-PROMPT_VERSION = 1
+FACT_PROMPT_VERSION = 2
+EVENT_PROMPT_VERSION = 1
+RELATIONSHIP_PROMPT_VERSION = 1
 FACT_PROMPT_CONTENT_HASH = (
-    "bb505266f990b018287ef841c9a99c1778c0160b9b9758fcc5b6ccc7cd256b7f"
+    "95c2dbf4295fd5ded3ada2256cd571b3af1d6d2ce4a2de3017e3c4a024ba24c8"
 )
 EVENT_PROMPT_CONTENT_HASH = (
     "79a25a0ceb9a87ca49a78f01fc46d5cc0b78e52161a614fcfba50182169fc2c7"
@@ -177,7 +179,7 @@ def make_provenance(**overrides) -> LLMInvocationProvenance:
         "semantic_profile_id": "consolidation-llm-v1",
         "semantic_profile_hash": H,
         "prompt_id": A5_FACT_PROMPT_ID,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": FACT_PROMPT_VERSION,
         "prompt_content_hash": FACT_PROMPT_CONTENT_HASH,
         "rendered_prompt_hash": H2,
         "output_schema_id": "consolidation-fact-selector-payload",
@@ -257,7 +259,7 @@ def make_fact_decision(**overrides) -> FactSemanticDecision:
         "reason_zh": "两条事实表述同一身份。",
         "evidence_refs": (make_evidence(),),
         "prompt_id": A5_FACT_PROMPT_ID,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": FACT_PROMPT_VERSION,
         "generation_provenance": make_provenance(),
     }
     values.update(overrides)
@@ -411,7 +413,7 @@ def make_semantic_identity(**overrides) -> A5SemanticIdentity:
         "prompt_identities": (
             PromptAssetIdentity(
                 prompt_id=A5_FACT_PROMPT_ID,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=FACT_PROMPT_VERSION,
                 prompt_content_hash=FACT_PROMPT_CONTENT_HASH,
             ),
         ),
@@ -541,7 +543,7 @@ class TestConsolidationProfile:
         assert profile.fact.prompt_id == A5_FACT_PROMPT_ID
         assert profile.event.prompt_id == A5_EVENT_PROMPT_ID
         assert profile.relationship.prompt_id == A5_RELATIONSHIP_PROMPT_ID
-        assert profile.fact.prompt_version == PROMPT_VERSION
+        assert profile.fact.prompt_version == FACT_PROMPT_VERSION
         assert profile.max_generation_rounds == 2
 
     def test_profile_hash_is_stable(self) -> None:
@@ -791,7 +793,7 @@ class TestFactSemanticDecision:
             make_fact_decision(
                 method="deterministic",
                 prompt_id=A5_FACT_PROMPT_ID,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=FACT_PROMPT_VERSION,
                 generation_provenance=None,
             )
 
@@ -1518,22 +1520,22 @@ class TestTrackedA5Assets:
         assert profile.reasoning.enabled is False
 
     @pytest.mark.parametrize(
-        "prompt_id, content_hash",
+        "prompt_id, prompt_version, content_hash",
         [
-            (A5_FACT_PROMPT_ID, FACT_PROMPT_CONTENT_HASH),
-            (A5_EVENT_PROMPT_ID, EVENT_PROMPT_CONTENT_HASH),
-            (A5_RELATIONSHIP_PROMPT_ID, RELATIONSHIP_PROMPT_CONTENT_HASH),
+            (A5_FACT_PROMPT_ID, FACT_PROMPT_VERSION, FACT_PROMPT_CONTENT_HASH),
+            (A5_EVENT_PROMPT_ID, EVENT_PROMPT_VERSION, EVENT_PROMPT_CONTENT_HASH),
+            (A5_RELATIONSHIP_PROMPT_ID, RELATIONSHIP_PROMPT_VERSION, RELATIONSHIP_PROMPT_CONTENT_HASH),
         ],
     )
-    def test_prompt_loads_with_pinned_hash(self, prompt_id: str, content_hash: str) -> None:
+    def test_prompt_loads_with_pinned_hash(self, prompt_id: str, prompt_version: int, content_hash: str) -> None:
         registry = PromptRegistry(PROMPTS_STORY_DIR)
-        spec = registry.load(prompt_id, version=PROMPT_VERSION)
+        spec = registry.load(prompt_id, version=prompt_version)
         assert spec.content_hash == content_hash
         assert tuple(spec.required_variables) == ("block_id", "pair_contexts_json")
 
     def test_fact_prompt_renders_with_exact_variables(self) -> None:
         registry = PromptRegistry(PROMPTS_STORY_DIR)
-        spec = registry.load(A5_FACT_PROMPT_ID, version=PROMPT_VERSION)
+        spec = registry.load(A5_FACT_PROMPT_ID, version=FACT_PROMPT_VERSION)
         rendered = render_prompt(
             spec,
             {"block_id": "block_0001", "pair_contexts_json": "[]"},
@@ -1543,7 +1545,7 @@ class TestTrackedA5Assets:
 
     def test_prompt_rejects_extra_variable(self) -> None:
         registry = PromptRegistry(PROMPTS_STORY_DIR)
-        spec = registry.load(A5_FACT_PROMPT_ID, version=PROMPT_VERSION)
+        spec = registry.load(A5_FACT_PROMPT_ID, version=FACT_PROMPT_VERSION)
         with pytest.raises(LLMPromptError):
             render_prompt(
                 spec,
@@ -1556,7 +1558,7 @@ class TestTrackedA5Assets:
 
     def test_prompt_rejects_missing_variable(self) -> None:
         registry = PromptRegistry(PROMPTS_STORY_DIR)
-        spec = registry.load(A5_FACT_PROMPT_ID, version=PROMPT_VERSION)
+        spec = registry.load(A5_FACT_PROMPT_ID, version=FACT_PROMPT_VERSION)
         with pytest.raises(LLMPromptError):
             render_prompt(spec, {"block_id": "block_0001"})
 
@@ -1584,7 +1586,12 @@ class TestPromptPairLocalSelectorContract:
     @staticmethod
     def _system_text(prompt_id: str) -> str:
         registry = PromptRegistry(PROMPTS_STORY_DIR)
-        spec = registry.load(prompt_id, version=PROMPT_VERSION)
+        version = {
+            A5_FACT_PROMPT_ID: FACT_PROMPT_VERSION,
+            A5_EVENT_PROMPT_ID: EVENT_PROMPT_VERSION,
+            A5_RELATIONSHIP_PROMPT_ID: RELATIONSHIP_PROMPT_VERSION,
+        }[prompt_id]
+        spec = registry.load(prompt_id, version=version)
         return " ".join(spec.system_template.split())
 
     def test_fact_prompt_documents_pair_local_selectors(self) -> None:
@@ -1607,6 +1614,34 @@ class TestPromptPairLocalSelectorContract:
         assert "labeled L0, L1, L2" in text
         assert "the ONLY way to cite evidence" in text
 
+
+class TestFactPromptV2IdentitySafetyContract:
+    """Issue #80: Fact v2 narrows same_fact to merge-safe equivalence."""
+
+    @staticmethod
+    def _system_text() -> str:
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        return " ".join(
+            registry.load(A5_FACT_PROMPT_ID, version=FACT_PROMPT_VERSION)
+            .system_template.split()
+        )
+
+    def test_v1_is_preserved_unchanged(self) -> None:
+        registry = PromptRegistry(PROMPTS_STORY_DIR)
+        assert registry.load(A5_FACT_PROMPT_ID, version=1).content_hash == (
+            "bb505266f990b018287ef841c9a99c1778c0160b9b9758fcc5b6ccc7cd256b7f"
+        )
+
+    def test_v2_defines_identity_safe_same_fact(self) -> None:
+        text = self._system_text()
+        assert "identity-safe semantic equivalence" in text
+        assert "material factual assertion" in text
+        assert "would lose no material factual assertion" in text
+
+    def test_v2_keeps_compatible_and_uncertain_boundaries(self) -> None:
+        text = self._system_text()
+        assert "prefer compatible_fact" in text
+        assert "choose \"uncertain\"" in text
 
 # ---------------------------------------------------------------------------
 # A5A contract / parity repair (issue #50 independent review)

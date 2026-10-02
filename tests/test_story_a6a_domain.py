@@ -109,6 +109,7 @@ def test_a6_schemas_are_strict_draft_2020_12():
     for name in ("a6-character-analysis-output", "a6-plot-window-analysis-output", "a6-global-skeleton-output", "a6-story-bible-output"):
         serialized = json.dumps(_schema(f"{name}.schema.json"), ensure_ascii=False)
         assert not any(field in serialized for field in ("arc_id", "turning_point_id", "reveal_id", "payoff_id"))
+        assert "(?=" not in serialized
 
 
 def test_global_skeleton_provider_schema_has_complete_request_local_semantics():

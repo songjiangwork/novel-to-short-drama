@@ -41,8 +41,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -114,8 +113,7 @@
           },
           "arc_kind": {
             "type": "string",
-            "minLength": 1,
-            "pattern": "^(?=.*\\S)[^\\u0000]+$"
+            "minLength": 1
           },
           "involved_character_refs": {
             "type": "array",
@@ -177,8 +175,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -281,8 +278,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -399,8 +395,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -497,8 +492,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -577,8 +571,7 @@
           "properties": {
             "text_zh": {
               "type": "string",
-              "minLength": 1,
-              "pattern": "^(?=.*\\S)[^\\u0000]+$"
+              "minLength": 1
             },
             "evidence_mode": {
               "enum": [
@@ -640,8 +633,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -702,8 +694,7 @@
           "properties": {
             "text_zh": {
               "type": "string",
-              "minLength": 1,
-              "pattern": "^(?=.*\\S)[^\\u0000]+$"
+              "minLength": 1
             },
             "evidence_mode": {
               "enum": [
@@ -765,8 +756,7 @@
             "properties": {
               "text_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -827,8 +817,7 @@
           "properties": {
             "text_zh": {
               "type": "string",
-              "minLength": 1,
-              "pattern": "^(?=.*\\S)[^\\u0000]+$"
+              "minLength": 1
             },
             "evidence_mode": {
               "enum": [
@@ -892,8 +881,7 @@
               },
               "label_zh": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                "minLength": 1
               },
               "event_refs": {
                 "type": "array",
@@ -918,8 +906,7 @@
                 "properties": {
                   "text_zh": {
                     "type": "string",
-                    "minLength": 1,
-                    "pattern": "^(?=.*\\S)[^\\u0000]+$"
+                    "minLength": 1
                   },
                   "evidence_mode": {
                     "enum": [

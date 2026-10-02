@@ -33,45 +33,57 @@
         "properties": {
           "arc_id": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^arc_[0-9]{6,}$"
           },
           "arc_kind": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "involved_character_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^char_[0-9]{4,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "involved_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_fact_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "start_event_ref": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
           },
           "end_event_ref": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
           },
           "interpretation": {
@@ -87,7 +99,8 @@
             ],
             "properties": {
               "text_zh": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -99,29 +112,37 @@
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^fact_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_event_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^evt_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_relationship_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^rel_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_conflict_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^conf_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               }
             }
           }
@@ -143,25 +164,31 @@
         "properties": {
           "turning_point_id": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^turn_[0-9]{6,}$"
           },
           "event_ref": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
           },
           "supporting_fact_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "interpretation": {
             "type": "object",
@@ -176,7 +203,8 @@
             ],
             "properties": {
               "text_zh": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -188,29 +216,37 @@
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^fact_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_event_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^evt_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_relationship_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^rel_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_conflict_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^conf_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               }
             }
           }
@@ -233,35 +269,44 @@
         "properties": {
           "reveal_id": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^reveal_[0-9]{6,}$"
           },
           "reveal_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_fact_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "affected_character_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^char_[0-9]{4,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "setup_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "interpretation": {
             "type": "object",
@@ -276,7 +321,8 @@
             ],
             "properties": {
               "text_zh": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -288,29 +334,37 @@
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^fact_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_event_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^evt_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_relationship_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^rel_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_conflict_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^conf_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               }
             }
           }
@@ -331,21 +385,26 @@
         "properties": {
           "payoff_id": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^payoff_[0-9]{6,}$"
           },
           "setup_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "payoff_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "interpretation": {
             "type": "object",
@@ -360,7 +419,8 @@
             ],
             "properties": {
               "text_zh": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "evidence_mode": {
                 "enum": [
@@ -372,29 +432,37 @@
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^fact_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_event_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^evt_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_relationship_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^rel_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               },
               "supporting_conflict_refs": {
                 "type": "array",
                 "items": {
                   "type": "string",
+                  "minLength": 1,
                   "pattern": "^conf_[0-9]{6,}$"
-                }
+                },
+                "uniqueItems": true
               }
             }
           }

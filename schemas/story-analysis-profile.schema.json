@@ -24,30 +24,35 @@
     },
     "profile_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "working_language": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "character_analysis_policy_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "plot_window_policy_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "global_skeleton_policy_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "story_bible_policy_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "max_generation_rounds": {
-      "type": "integer",
-      "minimum": 1
+      "const": 2
     },
     "planning_policy": {
       "type": "object",
@@ -100,10 +105,12 @@
       "properties": {
         "semantic_profile_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "prompt_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "prompt_version": {
           "type": "integer",
@@ -111,6 +118,7 @@
         },
         "output_schema_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "output_schema_version": {
@@ -132,10 +140,12 @@
       "properties": {
         "semantic_profile_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "prompt_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "prompt_version": {
           "type": "integer",
@@ -143,6 +153,7 @@
         },
         "output_schema_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "output_schema_version": {
@@ -164,10 +175,12 @@
       "properties": {
         "semantic_profile_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "prompt_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "prompt_version": {
           "type": "integer",
@@ -175,6 +188,7 @@
         },
         "output_schema_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "output_schema_version": {
@@ -196,10 +210,12 @@
       "properties": {
         "semantic_profile_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "prompt_id": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "prompt_version": {
           "type": "integer",
@@ -207,6 +223,7 @@
         },
         "output_schema_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "output_schema_version": {

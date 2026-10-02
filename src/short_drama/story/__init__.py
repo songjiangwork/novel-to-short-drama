@@ -49,7 +49,8 @@ from .story_analysis import (
     GlobalEventAnalysis, GlobalEventImportance, GlobalSection,
     GlobalStoryBible, GlobalStructure, PlotWindowAnalysis, Reveal, StoryArc,
     StoryAnalysisCoverageSummary, StoryAnalysisManifest, StoryAnalysisPlanningPolicy,
-    StoryAnalysisProfile, StoryAnalysisSemanticPass, TurningPoint,
+    StoryAnalysisProfile, StoryAnalysisSemanticPass,
+    STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1, TurningPoint,
     load_story_analysis_profile,
 )
 from .reconciliation import (
@@ -951,6 +952,7 @@ __all__ = [
     "StoryConflictSet",
     "load_consolidation_profile",
     "StoryAnalysisModelError",
+    "STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1",
     "StoryAnalysisSemanticPass",
     "StoryAnalysisPlanningPolicy",
     "StoryAnalysisProfile",

@@ -18,6 +18,7 @@
   "properties": {
     "character_ref": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^char_[0-9]{4,}$"
     },
     "role": {
@@ -33,7 +34,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -45,29 +47,37 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -86,7 +96,8 @@
         ],
         "properties": {
           "text_zh": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "evidence_mode": {
             "enum": [
@@ -98,29 +109,37 @@
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_conflict_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^conf_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           }
         }
       }
@@ -140,7 +159,8 @@
         ],
         "properties": {
           "text_zh": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "evidence_mode": {
             "enum": [
@@ -152,29 +172,37 @@
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_conflict_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^conf_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           }
         }
       }
@@ -194,7 +222,8 @@
         ],
         "properties": {
           "text_zh": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "evidence_mode": {
             "enum": [
@@ -206,29 +235,37 @@
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_conflict_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^conf_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           }
         }
       }
@@ -237,22 +274,28 @@
       "type": "array",
       "items": {
         "type": "string",
+        "minLength": 1,
         "pattern": "^evt_[0-9]{6,}$"
-      }
+      },
+      "uniqueItems": true
     },
     "key_fact_refs": {
       "type": "array",
       "items": {
         "type": "string",
+        "minLength": 1,
         "pattern": "^fact_[0-9]{6,}$"
-      }
+      },
+      "uniqueItems": true
     },
     "important_relationship_refs": {
       "type": "array",
       "items": {
         "type": "string",
+        "minLength": 1,
         "pattern": "^rel_[0-9]{6,}$"
-      }
+      },
+      "uniqueItems": true
     },
     "arc_summary": {
       "type": "object",
@@ -267,7 +310,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -279,29 +323,37 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -320,7 +372,8 @@
         ],
         "properties": {
           "text_zh": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "evidence_mode": {
             "enum": [
@@ -332,29 +385,37 @@
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_conflict_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^conf_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           }
         }
       }

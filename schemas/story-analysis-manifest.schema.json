@@ -23,10 +23,12 @@
     },
     "project_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "document_id": {
       "type": "string",
+      "minLength": 1,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "consolidation_manifest_ref": {
@@ -41,10 +43,12 @@
       "properties": {
         "artifact_type": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "artifact_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "revision": {
@@ -53,6 +57,7 @@
         },
         "content_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         }
       }
@@ -69,10 +74,12 @@
       "properties": {
         "artifact_type": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "artifact_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "revision": {
@@ -81,6 +88,7 @@
         },
         "content_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         }
       }
@@ -97,10 +105,12 @@
       "properties": {
         "artifact_type": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "artifact_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "revision": {
@@ -109,6 +119,7 @@
         },
         "content_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         }
       }
@@ -125,10 +136,12 @@
       "properties": {
         "artifact_type": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "artifact_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "revision": {
@@ -137,6 +150,7 @@
         },
         "content_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         }
       }
@@ -153,10 +167,12 @@
       "properties": {
         "artifact_type": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "artifact_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "revision": {
@@ -165,6 +181,7 @@
         },
         "content_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         }
       }
@@ -181,10 +198,12 @@
       "properties": {
         "artifact_type": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "artifact_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "revision": {
@@ -193,6 +212,7 @@
         },
         "content_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         }
       }
@@ -216,18 +236,22 @@
       "properties": {
         "story_analysis_profile_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "story_analysis_profile_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         },
         "semantic_profile_id": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
         },
         "semantic_profile_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         },
         "prompt_identities": {
@@ -242,7 +266,8 @@
             ],
             "properties": {
               "prompt_id": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "prompt_version": {
                 "type": "integer",
@@ -250,6 +275,7 @@
               },
               "prompt_content_hash": {
                 "type": "string",
+                "minLength": 1,
                 "pattern": "^[0-9a-f]{64}$"
               }
             }
@@ -267,7 +293,8 @@
             ],
             "properties": {
               "schema_id": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "schema_version": {
                 "type": "integer",
@@ -275,6 +302,7 @@
               },
               "schema_hash": {
                 "type": "string",
+                "minLength": 1,
                 "pattern": "^[0-9a-f]{64}$"
               }
             }
@@ -282,12 +310,14 @@
         },
         "plan_hash": {
           "type": "string",
+          "minLength": 1,
           "pattern": "^[0-9a-f]{64}$"
         },
         "character_request_hashes": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^[0-9a-f]{64}$"
           }
         },
@@ -295,6 +325,7 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^[0-9a-f]{64}$"
           }
         },
@@ -302,6 +333,7 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^[0-9a-f]{64}$"
           }
         },
@@ -309,6 +341,7 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^[0-9a-f]{64}$"
           }
         }
@@ -333,10 +366,12 @@
           "properties": {
             "artifact_type": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
             },
             "artifact_id": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
             },
             "revision": {
@@ -345,6 +380,7 @@
             },
             "content_hash": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^[0-9a-f]{64}$"
             }
           }

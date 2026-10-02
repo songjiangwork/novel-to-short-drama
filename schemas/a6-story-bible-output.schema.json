@@ -27,7 +27,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -39,29 +40,37 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -78,7 +87,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -90,37 +100,47 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
     "genre": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "tone": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "setting": {
       "type": "object",
@@ -135,7 +155,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -147,29 +168,37 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -188,7 +217,8 @@
         ],
         "properties": {
           "text_zh": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "evidence_mode": {
             "enum": [
@@ -200,29 +230,37 @@
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^fact_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_event_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^evt_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_relationship_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^rel_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           },
           "supporting_conflict_refs": {
             "type": "array",
             "items": {
               "type": "string",
+              "minLength": 1,
               "pattern": "^conf_[0-9]{6,}$"
-            }
+            },
+            "uniqueItems": true
           }
         }
       }
@@ -240,7 +278,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -252,29 +291,37 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     },
@@ -291,7 +338,8 @@
       ],
       "properties": {
         "text_zh": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "evidence_mode": {
           "enum": [
@@ -303,29 +351,37 @@
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^fact_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_event_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^evt_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_relationship_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^rel_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         },
         "supporting_conflict_refs": {
           "type": "array",
           "items": {
             "type": "string",
+            "minLength": 1,
             "pattern": "^conf_[0-9]{6,}$"
-          }
+          },
+          "uniqueItems": true
         }
       }
     }

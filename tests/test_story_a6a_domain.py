@@ -19,7 +19,7 @@ from short_drama.story import (
     GlobalStructure, PlotWindowAnalysis, PromptAssetIdentity, OutputSchemaAssetIdentity,
     Reveal, StoryAnalysisCoverageSummary, StoryAnalysisManifest, StoryAnalysisModelError,
     StoryAnalysisPlanningPolicy, StoryAnalysisProfile, StoryAnalysisSemanticPass,
-    StoryArc, TurningPoint,
+    STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1, StoryArc, TurningPoint,
 )
 from short_drama.story.chunking import ChunkPlanningProfile
 
@@ -59,6 +59,12 @@ def test_profile_round_trip_hash_schema_and_a2_a6_profile_boundaries():
     assert a2_profile_path.read_bytes() == a2_bytes
     assert not (REPO_ROOT / "profiles/global_story_analysis_v1.yaml").exists()
     with pytest.raises(StoryAnalysisModelError): StoryAnalysisProfile.from_dict({**profile.to_dict(), "base_url": "x"})
+    assert STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1 == 2
+    for rounds in (1, 3):
+        invalid = {**profile.to_dict(), "max_generation_rounds": rounds}
+        with pytest.raises(StoryAnalysisModelError):
+            StoryAnalysisProfile.from_dict(invalid)
+        assert list(Draft202012Validator(_schema("story-analysis-profile.schema.json")).iter_errors(invalid))
 
 
 def test_interpretation_closed_evidence_mode_and_namespace_round_trip():
@@ -105,6 +111,26 @@ def test_a6_schemas_are_strict_draft_2020_12():
         assert not any(field in serialized for field in ("arc_id", "turning_point_id", "reveal_id", "payoff_id"))
 
 
+def test_global_skeleton_provider_schema_has_complete_request_local_semantics():
+    schema = _schema("a6-global-skeleton-output.schema.json")
+    props = schema["properties"]
+    assert set(props) == {
+        "event_importance_overlay", "arc_proposals", "turning_point_proposals",
+        "reveal_proposals", "foreshadow_payoff_proposals", "global_structure",
+    }
+    arc = props["arc_proposals"]["items"]["properties"]
+    assert {"proposal_ordinal", "arc_kind", "involved_character_refs",
+            "involved_relationship_refs", "supporting_event_refs", "supporting_fact_refs",
+            "start_event_ref", "end_event_ref", "interpretation"} <= set(arc)
+    structure = props["global_structure"]["properties"]
+    assert {"main_conflict", "secondary_conflicts", "main_plot", "subplots",
+            "ending_state", "global_sections", "main_character_refs",
+            "major_arc_proposal_ordinals", "major_turning_point_proposal_ordinals",
+            "major_reveal_proposal_ordinals"} <= set(structure)
+    serialized = json.dumps(schema, ensure_ascii=False)
+    assert not any(field in serialized for field in ("arc_id", "turning_point_id", "reveal_id", "payoff_id"))
+
+
 def test_character_event_arc_structure_and_bible_round_trip_schema_parity():
     item = _interpretation()
     characters = CharacterAnalysisSet(1, (CharacterAnalysis(
@@ -127,6 +153,22 @@ def test_character_event_arc_structure_and_bible_round_trip_schema_parity():
         _validate(name, value)
     with pytest.raises(StoryAnalysisModelError): StoryArc("arc_1", "plot", (), (), (), (), "evt_000001", "evt_000001", item)
     with pytest.raises(StoryAnalysisModelError): CharacterAnalysisSet(1, (CharacterAnalysis("loc_0001", item, (), (), (), (), (), (), item, ()),))
+
+
+def test_persisted_schema_rejects_same_direct_invalid_text_and_duplicate_refs_as_python():
+    item = _interpretation()
+    characters = CharacterAnalysisSet(1, (CharacterAnalysis(
+        "char_0001", item, (), (), (), ("evt_000001",), (), (), item, (),
+    ),))
+    for mutate in (
+        lambda raw: raw["analyses"][0]["role"].__setitem__("text_zh", ""),
+        lambda raw: raw["analyses"][0].__setitem__("key_event_refs", ["evt_000001", "evt_000001"]),
+    ):
+        raw = characters.to_dict()
+        mutate(raw)
+        with pytest.raises(StoryAnalysisModelError):
+            CharacterAnalysisSet.from_dict(raw)
+        assert list(Draft202012Validator(_schema("character-analysis-set.schema.json")).iter_errors(raw))
 
 
 def test_manifest_identity_is_backend_neutral_and_schema_parity():

@@ -13,6 +13,7 @@ from short_drama.story.consolidation import OutputSchemaAssetIdentity, PromptAss
 from short_drama.story.errors import StoryAnalysisModelError
 
 STORY_ANALYSIS_SCHEMA_VERSION = 1
+STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1 = 2
 EVIDENCE_MODES = frozenset(("explicit", "inferred"))
 _ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
@@ -88,7 +89,12 @@ class StoryAnalysisProfile:
     def __post_init__(self):
         if self.schema_version != 1: raise StoryAnalysisModelError("unsupported schema_version")
         for n in ("profile_id","character_analysis_policy_id","plot_window_policy_id","global_skeleton_policy_id","story_bible_policy_id"): _id(getattr(self,n),n)
-        _text(self.working_language,"working_language"); _pos(self.max_generation_rounds,"max_generation_rounds")
+        _text(self.working_language,"working_language")
+        if self.max_generation_rounds != STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1:
+            raise StoryAnalysisModelError(
+                "max_generation_rounds must be "
+                f"{STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1} for A6 v1"
+            )
         if not isinstance(self.planning_policy,StoryAnalysisPlanningPolicy) or any(not isinstance(getattr(self,n),StoryAnalysisSemanticPass) for n in ("character_analysis","plot_window_analysis","global_skeleton","story_bible")): raise StoryAnalysisModelError("invalid profile nested contract")
     def to_dict(self):
         scalar=("schema_version","profile_id","working_language","character_analysis_policy_id","plot_window_policy_id","global_skeleton_policy_id","story_bible_policy_id","max_generation_rounds")
@@ -321,4 +327,4 @@ class StoryAnalysisManifest:
         v=_keys(v,set(cls.__dataclass_fields__),cls.__name__); refs=("consolidation_manifest_ref","character_analysis_ref","global_event_analysis_ref","arc_analysis_ref","global_structure_ref","global_story_bible_ref")
         return cls(**{**v,**{n:ArtifactRef.from_dict(v[n]) for n in refs},"semantic_identity":A6SemanticIdentity.from_dict(v["semantic_identity"]),"upstream_identity":A6UpstreamIdentity.from_dict(v["upstream_identity"]),"coverage_summary":StoryAnalysisCoverageSummary.from_dict(v["coverage_summary"])})
 
-__all__ = ["STORY_ANALYSIS_SCHEMA_VERSION","EVIDENCE_MODES","StoryAnalysisSemanticPass","StoryAnalysisPlanningPolicy","StoryAnalysisProfile","load_story_analysis_profile","EvidenceBackedInterpretation","CharacterAnalysis","CharacterAnalysisSet","PlotWindowAnalysis","GlobalEventImportance","GlobalEventAnalysis","StoryArc","TurningPoint","Reveal","ForeshadowPayoff","ArcAnalysis","GlobalSection","GlobalStructure","GlobalStoryBible","A6UpstreamIdentity","A6SemanticIdentity","StoryAnalysisCoverageSummary","StoryAnalysisManifest"]
+__all__ = ["STORY_ANALYSIS_SCHEMA_VERSION","STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1","EVIDENCE_MODES","StoryAnalysisSemanticPass","StoryAnalysisPlanningPolicy","StoryAnalysisProfile","load_story_analysis_profile","EvidenceBackedInterpretation","CharacterAnalysis","CharacterAnalysisSet","PlotWindowAnalysis","GlobalEventImportance","GlobalEventAnalysis","StoryArc","TurningPoint","Reveal","ForeshadowPayoff","ArcAnalysis","GlobalSection","GlobalStructure","GlobalStoryBible","A6UpstreamIdentity","A6SemanticIdentity","StoryAnalysisCoverageSummary","StoryAnalysisManifest"]

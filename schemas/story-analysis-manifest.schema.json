@@ -267,7 +267,8 @@
             "properties": {
               "prompt_id": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "pattern": "^(?=.*\\S)[^\\u0000]+$"
               },
               "prompt_version": {
                 "type": "integer",
@@ -294,7 +295,8 @@
             "properties": {
               "schema_id": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "pattern": "^(?=.*\\S)[^\\u0000]+$"
               },
               "schema_version": {
                 "type": "integer",

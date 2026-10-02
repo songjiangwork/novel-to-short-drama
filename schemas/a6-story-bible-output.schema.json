@@ -28,7 +28,8 @@
       "properties": {
         "text_zh": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "evidence_mode": {
           "enum": [
@@ -88,7 +89,8 @@
       "properties": {
         "text_zh": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "evidence_mode": {
           "enum": [
@@ -136,11 +138,13 @@
     },
     "genre": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
     },
     "tone": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
     },
     "setting": {
       "type": "object",
@@ -156,7 +160,8 @@
       "properties": {
         "text_zh": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "evidence_mode": {
           "enum": [
@@ -218,7 +223,8 @@
         "properties": {
           "text_zh": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^(?=.*\\S)[^\\u0000]+$"
           },
           "evidence_mode": {
             "enum": [
@@ -279,7 +285,8 @@
       "properties": {
         "text_zh": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "evidence_mode": {
           "enum": [
@@ -339,7 +346,8 @@
       "properties": {
         "text_zh": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "evidence_mode": {
           "enum": [

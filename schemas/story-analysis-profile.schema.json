@@ -29,7 +29,8 @@
     },
     "working_language": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
     },
     "character_analysis_policy_id": {
       "type": "string",
@@ -110,7 +111,8 @@
         },
         "prompt_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "prompt_version": {
           "type": "integer",
@@ -145,7 +147,8 @@
         },
         "prompt_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "prompt_version": {
           "type": "integer",
@@ -180,7 +183,8 @@
         },
         "prompt_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "prompt_version": {
           "type": "integer",
@@ -215,7 +219,8 @@
         },
         "prompt_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^(?=.*\\S)[^\\u0000]+$"
         },
         "prompt_version": {
           "type": "integer",

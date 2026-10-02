@@ -171,6 +171,28 @@ def test_persisted_schema_rejects_same_direct_invalid_text_and_duplicate_refs_as
         assert list(Draft202012Validator(_schema("character-analysis-set.schema.json")).iter_errors(raw))
 
 
+def test_persisted_schema_matches_python_text_whitespace_and_nul_rejection():
+    item = _interpretation()
+    characters = CharacterAnalysisSet(1, (CharacterAnalysis(
+        "char_0001", item, (), (), (), (), (), (), item, (),
+    ),))
+    for invalid_text in ("   ", "解释\x00内容"):
+        raw = characters.to_dict()
+        raw["analyses"][0]["role"]["text_zh"] = invalid_text
+        with pytest.raises(StoryAnalysisModelError):
+            CharacterAnalysisSet.from_dict(raw)
+        assert list(Draft202012Validator(_schema("character-analysis-set.schema.json")).iter_errors(raw))
+
+    bible = GlobalStoryBible(
+        1, item, item, "悬疑", "克制", item, (), (), (), (), (), item, item, (),
+    )
+    raw_bible = bible.to_dict()
+    raw_bible["genre"] = "\t\n"
+    with pytest.raises(StoryAnalysisModelError):
+        GlobalStoryBible.from_dict(raw_bible)
+    assert list(Draft202012Validator(_schema("global-story-bible.schema.json")).iter_errors(raw_bible))
+
+
 def test_manifest_identity_is_backend_neutral_and_schema_parity():
     ref = _artifact("consolidation-manifest")
     semantic = A6SemanticIdentity(

@@ -1,0 +1,379 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/character-analysis-set.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "analyses"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "analyses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "character_ref",
+          "role",
+          "goals",
+          "motivations",
+          "traits",
+          "key_event_refs",
+          "key_fact_refs",
+          "important_relationship_refs",
+          "arc_summary",
+          "unresolved_or_conflicting_points"
+        ],
+        "properties": {
+          "character_ref": {
+            "type": "string",
+            "pattern": "^char_[0-9]{4,}$"
+          },
+          "role": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text_zh",
+              "evidence_mode",
+              "supporting_fact_refs",
+              "supporting_event_refs",
+              "supporting_relationship_refs",
+              "supporting_conflict_refs"
+            ],
+            "properties": {
+              "text_zh": {
+                "type": "string"
+              },
+              "evidence_mode": {
+                "enum": [
+                  "explicit",
+                  "inferred"
+                ]
+              },
+              "supporting_fact_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^fact_[0-9]{6,}$"
+                }
+              },
+              "supporting_event_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^evt_[0-9]{6,}$"
+                }
+              },
+              "supporting_relationship_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^rel_[0-9]{6,}$"
+                }
+              },
+              "supporting_conflict_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^conf_[0-9]{6,}$"
+                }
+              }
+            }
+          },
+          "goals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          },
+          "motivations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          },
+          "traits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          },
+          "key_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^evt_[0-9]{6,}$"
+            }
+          },
+          "key_fact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^fact_[0-9]{6,}$"
+            }
+          },
+          "important_relationship_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^rel_[0-9]{6,}$"
+            }
+          },
+          "arc_summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text_zh",
+              "evidence_mode",
+              "supporting_fact_refs",
+              "supporting_event_refs",
+              "supporting_relationship_refs",
+              "supporting_conflict_refs"
+            ],
+            "properties": {
+              "text_zh": {
+                "type": "string"
+              },
+              "evidence_mode": {
+                "enum": [
+                  "explicit",
+                  "inferred"
+                ]
+              },
+              "supporting_fact_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^fact_[0-9]{6,}$"
+                }
+              },
+              "supporting_event_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^evt_[0-9]{6,}$"
+                }
+              },
+              "supporting_relationship_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^rel_[0-9]{6,}$"
+                }
+              },
+              "supporting_conflict_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^conf_[0-9]{6,}$"
+                }
+              }
+            }
+          },
+          "unresolved_or_conflicting_points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

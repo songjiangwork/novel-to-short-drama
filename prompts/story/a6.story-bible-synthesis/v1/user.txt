@@ -1,0 +1,2 @@
+Story Bible canonical context:
+{{story_context_json}}

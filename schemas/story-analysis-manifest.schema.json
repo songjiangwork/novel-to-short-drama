@@ -1,0 +1,413 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/story-analysis-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "document_id",
+    "consolidation_manifest_ref",
+    "character_analysis_ref",
+    "global_event_analysis_ref",
+    "arc_analysis_ref",
+    "global_structure_ref",
+    "global_story_bible_ref",
+    "semantic_identity",
+    "upstream_identity",
+    "coverage_summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "document_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "consolidation_manifest_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "character_analysis_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "global_event_analysis_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "arc_analysis_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "global_structure_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "global_story_bible_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "semantic_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "story_analysis_profile_id",
+        "story_analysis_profile_hash",
+        "semantic_profile_id",
+        "semantic_profile_hash",
+        "prompt_identities",
+        "output_schema_identities",
+        "plan_hash",
+        "character_request_hashes",
+        "plot_window_request_hashes",
+        "global_skeleton_request_hashes",
+        "story_bible_request_hashes"
+      ],
+      "properties": {
+        "story_analysis_profile_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "story_analysis_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "semantic_profile_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "semantic_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_identities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "prompt_id",
+              "prompt_version",
+              "prompt_content_hash"
+            ],
+            "properties": {
+              "prompt_id": {
+                "type": "string"
+              },
+              "prompt_version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "prompt_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "output_schema_identities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schema_id",
+              "schema_version",
+              "schema_hash"
+            ],
+            "properties": {
+              "schema_id": {
+                "type": "string"
+              },
+              "schema_version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "schema_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "plan_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "character_request_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "plot_window_request_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "global_skeleton_request_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "story_bible_request_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "upstream_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "consolidation_manifest_ref"
+      ],
+      "properties": {
+        "consolidation_manifest_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact_type",
+            "artifact_id",
+            "revision",
+            "content_hash"
+          ],
+          "properties": {
+            "artifact_type": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "artifact_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "content_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "coverage_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_character_count",
+        "character_analysis_count",
+        "canonical_event_count",
+        "owned_event_count",
+        "plot_window_count",
+        "global_event_importance_count",
+        "arc_count",
+        "turning_point_count",
+        "reveal_count",
+        "foreshadow_payoff_count"
+      ],
+      "properties": {
+        "canonical_character_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "character_analysis_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "canonical_event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "owned_event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plot_window_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "global_event_importance_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "arc_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turning_point_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reveal_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "foreshadow_payoff_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

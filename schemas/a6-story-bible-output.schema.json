@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/a6-story-bible-output.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "premise_zh",
+    "synopsis_zh",
+    "genre",
+    "tone",
+    "setting",
+    "themes",
+    "unresolved_summary",
+    "source_conflict_summary"
+  ],
+  "properties": {
+    "premise_zh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string"
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^fact_[0-9]{6,}$"
+          }
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^evt_[0-9]{6,}$"
+          }
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^rel_[0-9]{6,}$"
+          }
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^conf_[0-9]{6,}$"
+          }
+        }
+      }
+    },
+    "synopsis_zh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string"
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^fact_[0-9]{6,}$"
+          }
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^evt_[0-9]{6,}$"
+          }
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^rel_[0-9]{6,}$"
+          }
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^conf_[0-9]{6,}$"
+          }
+        }
+      }
+    },
+    "genre": {
+      "type": "string"
+    },
+    "tone": {
+      "type": "string"
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string"
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^fact_[0-9]{6,}$"
+          }
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^evt_[0-9]{6,}$"
+          }
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^rel_[0-9]{6,}$"
+          }
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^conf_[0-9]{6,}$"
+          }
+        }
+      }
+    },
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text_zh",
+          "evidence_mode",
+          "supporting_fact_refs",
+          "supporting_event_refs",
+          "supporting_relationship_refs",
+          "supporting_conflict_refs"
+        ],
+        "properties": {
+          "text_zh": {
+            "type": "string"
+          },
+          "evidence_mode": {
+            "enum": [
+              "explicit",
+              "inferred"
+            ]
+          },
+          "supporting_fact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^fact_[0-9]{6,}$"
+            }
+          },
+          "supporting_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^evt_[0-9]{6,}$"
+            }
+          },
+          "supporting_relationship_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^rel_[0-9]{6,}$"
+            }
+          },
+          "supporting_conflict_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^conf_[0-9]{6,}$"
+            }
+          }
+        }
+      }
+    },
+    "unresolved_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string"
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^fact_[0-9]{6,}$"
+          }
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^evt_[0-9]{6,}$"
+          }
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^rel_[0-9]{6,}$"
+          }
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^conf_[0-9]{6,}$"
+          }
+        }
+      }
+    },
+    "source_conflict_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string"
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^fact_[0-9]{6,}$"
+          }
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^evt_[0-9]{6,}$"
+          }
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^rel_[0-9]{6,}$"
+          }
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^conf_[0-9]{6,}$"
+          }
+        }
+      }
+    }
+  }
+}

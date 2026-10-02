@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/global-event-analysis.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "plot_window_plan_hash",
+    "windows",
+    "event_importance_overlay",
+    "coverage_metadata"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "plot_window_plan_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "windows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "window_id",
+          "window_ordinal",
+          "owned_event_refs",
+          "context_event_refs",
+          "interpretation",
+          "candidate_turning_points",
+          "candidate_reveals",
+          "arc_continuation_markers"
+        ],
+        "properties": {
+          "window_id": {
+            "type": "string",
+            "pattern": "^window_[0-9]{4,}$"
+          },
+          "window_ordinal": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "owned_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^evt_[0-9]{6,}$"
+            }
+          },
+          "context_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^evt_[0-9]{6,}$"
+            }
+          },
+          "interpretation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text_zh",
+              "evidence_mode",
+              "supporting_fact_refs",
+              "supporting_event_refs",
+              "supporting_relationship_refs",
+              "supporting_conflict_refs"
+            ],
+            "properties": {
+              "text_zh": {
+                "type": "string"
+              },
+              "evidence_mode": {
+                "enum": [
+                  "explicit",
+                  "inferred"
+                ]
+              },
+              "supporting_fact_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^fact_[0-9]{6,}$"
+                }
+              },
+              "supporting_event_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^evt_[0-9]{6,}$"
+                }
+              },
+              "supporting_relationship_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^rel_[0-9]{6,}$"
+                }
+              },
+              "supporting_conflict_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^conf_[0-9]{6,}$"
+                }
+              }
+            }
+          },
+          "candidate_turning_points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          },
+          "candidate_reveals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          },
+          "arc_continuation_markers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_zh",
+                "evidence_mode",
+                "supporting_fact_refs",
+                "supporting_event_refs",
+                "supporting_relationship_refs",
+                "supporting_conflict_refs"
+              ],
+              "properties": {
+                "text_zh": {
+                  "type": "string"
+                },
+                "evidence_mode": {
+                  "enum": [
+                    "explicit",
+                    "inferred"
+                  ]
+                },
+                "supporting_fact_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^fact_[0-9]{6,}$"
+                  }
+                },
+                "supporting_event_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^evt_[0-9]{6,}$"
+                  }
+                },
+                "supporting_relationship_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^rel_[0-9]{6,}$"
+                  }
+                },
+                "supporting_conflict_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^conf_[0-9]{6,}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "event_importance_overlay": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event_ref",
+          "interpretation"
+        ],
+        "properties": {
+          "event_ref": {
+            "type": "string",
+            "pattern": "^evt_[0-9]{6,}$"
+          },
+          "interpretation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text_zh",
+              "evidence_mode",
+              "supporting_fact_refs",
+              "supporting_event_refs",
+              "supporting_relationship_refs",
+              "supporting_conflict_refs"
+            ],
+            "properties": {
+              "text_zh": {
+                "type": "string"
+              },
+              "evidence_mode": {
+                "enum": [
+                  "explicit",
+                  "inferred"
+                ]
+              },
+              "supporting_fact_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^fact_[0-9]{6,}$"
+                }
+              },
+              "supporting_event_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^evt_[0-9]{6,}$"
+                }
+              },
+              "supporting_relationship_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^rel_[0-9]{6,}$"
+                }
+              },
+              "supporting_conflict_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^conf_[0-9]{6,}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverage_metadata": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9._-]{0,127}$": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

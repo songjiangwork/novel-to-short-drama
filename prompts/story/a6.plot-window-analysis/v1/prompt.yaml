@@ -1,0 +1,5 @@
+schema_version: 1
+prompt_id: a6.plot-window-analysis
+version: 1
+required_variables: [window_context_json]
+content_hash: 41a4b489a3745ae3f8bc96f478bbc4a3d97a9a05665b3ea930c31ae0d7c1c22a

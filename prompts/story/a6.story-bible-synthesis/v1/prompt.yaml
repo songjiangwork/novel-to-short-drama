@@ -1,0 +1,5 @@
+schema_version: 1
+prompt_id: a6.story-bible-synthesis
+version: 1
+required_variables: [story_context_json]
+content_hash: bdeb964ac8408b95de5946677cedb6a97f607685c2afe002a3ab1a8d34972bc9

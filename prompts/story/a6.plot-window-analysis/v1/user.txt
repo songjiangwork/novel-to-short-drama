@@ -1,0 +1,2 @@
+Plot-window canonical context:
+{{window_context_json}}

@@ -1,0 +1,424 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/a6-character-analysis-output.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "character_ref",
+    "role",
+    "goals",
+    "motivations",
+    "traits",
+    "key_event_refs",
+    "key_fact_refs",
+    "important_relationship_refs",
+    "arc_summary",
+    "unresolved_or_conflicting_points"
+  ],
+  "properties": {
+    "character_ref": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^char_[0-9]{4,}$"
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^fact_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^evt_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^rel_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^conf_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text_zh",
+          "evidence_mode",
+          "supporting_fact_refs",
+          "supporting_event_refs",
+          "supporting_relationship_refs",
+          "supporting_conflict_refs"
+        ],
+        "properties": {
+          "text_zh": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_mode": {
+            "enum": [
+              "explicit",
+              "inferred"
+            ]
+          },
+          "supporting_fact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^fact_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^evt_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_relationship_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^rel_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_conflict_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^conf_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "motivations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text_zh",
+          "evidence_mode",
+          "supporting_fact_refs",
+          "supporting_event_refs",
+          "supporting_relationship_refs",
+          "supporting_conflict_refs"
+        ],
+        "properties": {
+          "text_zh": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_mode": {
+            "enum": [
+              "explicit",
+              "inferred"
+            ]
+          },
+          "supporting_fact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^fact_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^evt_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_relationship_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^rel_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_conflict_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^conf_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "traits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text_zh",
+          "evidence_mode",
+          "supporting_fact_refs",
+          "supporting_event_refs",
+          "supporting_relationship_refs",
+          "supporting_conflict_refs"
+        ],
+        "properties": {
+          "text_zh": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_mode": {
+            "enum": [
+              "explicit",
+              "inferred"
+            ]
+          },
+          "supporting_fact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^fact_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^evt_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_relationship_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^rel_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_conflict_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^conf_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "key_event_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^evt_[0-9]{6,}$"
+      },
+      "uniqueItems": true
+    },
+    "key_fact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^fact_[0-9]{6,}$"
+      },
+      "uniqueItems": true
+    },
+    "important_relationship_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^rel_[0-9]{6,}$"
+      },
+      "uniqueItems": true
+    },
+    "arc_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_zh",
+        "evidence_mode",
+        "supporting_fact_refs",
+        "supporting_event_refs",
+        "supporting_relationship_refs",
+        "supporting_conflict_refs"
+      ],
+      "properties": {
+        "text_zh": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_mode": {
+          "enum": [
+            "explicit",
+            "inferred"
+          ]
+        },
+        "supporting_fact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^fact_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        },
+        "supporting_event_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^evt_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        },
+        "supporting_relationship_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^rel_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        },
+        "supporting_conflict_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^conf_[0-9]{6,}$"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "unresolved_or_conflicting_points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text_zh",
+          "evidence_mode",
+          "supporting_fact_refs",
+          "supporting_event_refs",
+          "supporting_relationship_refs",
+          "supporting_conflict_refs"
+        ],
+        "properties": {
+          "text_zh": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_mode": {
+            "enum": [
+              "explicit",
+              "inferred"
+            ]
+          },
+          "supporting_fact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^fact_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_event_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^evt_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_relationship_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^rel_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          },
+          "supporting_conflict_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^conf_[0-9]{6,}$"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}

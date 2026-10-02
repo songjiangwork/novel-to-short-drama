@@ -1,0 +1,8 @@
+schema_version: 2
+profile_id: story-analysis-llm-v1
+temperature: 0.0
+max_output_tokens: 16384
+structured_output_mode: json_schema
+reasoning:
+  enabled: false
+  effort: null

@@ -1,0 +1,2 @@
+Whole-story compressed context:
+{{global_context_json}}

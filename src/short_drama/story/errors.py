@@ -86,6 +86,10 @@ class ConsolidationModelError(StoryError):
     """
 
 
+class StoryAnalysisModelError(StoryError):
+    """A6A static Story Analysis domain/profile contract is invalid."""
+
+
 class ConsolidationSemanticError(StoryError):
     """A5C fact semantic ambiguity resolution failure.
 

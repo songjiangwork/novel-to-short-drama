@@ -35,13 +35,13 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore, content_hash
 from short_drama.artifacts.canonical import canonical_json_bytes
 from short_drama.foundation import FilePointerStore
 
-from .chunking import estimate_tokens
+from .chunking import TOKEN_COUNTER_ID, estimate_tokens
 from .consolidation import (
     CanonicalEvent,
     CanonicalFact,
@@ -84,6 +84,59 @@ from .story_analysis import StoryAnalysisPlanningPolicy, StoryAnalysisProfile
 
 # A4 EntityMap logical-id suffix (``<a4_base>.entity-map``).
 _ENTITY_MAP_ID_SUFFIX = ".entity-map"
+
+# The four versioned A6 planning policy IDs bound into the plan identity. These
+# are the *identity* of the versioned A6 policy (character / plot-window /
+# global-skeleton / story-bible) and are distinct from the numeric
+# :class:`StoryAnalysisPlanningPolicy` values. Binding them (plus the
+# token-counter ID) into the plan hash keeps the plan identity stable across
+# numeric-policy changes while still binding the versioned policy identity and
+# the measurement counter (BLOCK 2: the plan hash must bind the versioned
+# policy IDs and the stable token-counter ID, not only the numeric values).
+_POLICY_ID_KEYS: tuple[str, ...] = (
+    "character_analysis_policy_id",
+    "plot_window_policy_id",
+    "global_skeleton_policy_id",
+    "story_bible_policy_id",
+)
+
+
+def _validate_planning_policy_ids(
+    planning_policy_ids: Mapping[str, str],
+) -> dict[str, str]:
+    """Validate the four versioned A6 planning policy IDs (fail closed)."""
+    if not isinstance(planning_policy_ids, Mapping):
+        raise StoryAnalysisPlanningError(
+            "planning_policy_ids must be a mapping of the four versioned policy "
+            "IDs"
+        )
+    if set(planning_policy_ids.keys()) != set(_POLICY_ID_KEYS):
+        raise StoryAnalysisPlanningError(
+            "planning_policy_ids must contain exactly the four versioned policy "
+            f"IDs: {list(_POLICY_ID_KEYS)!r}"
+        )
+    for key in _POLICY_ID_KEYS:
+        value = planning_policy_ids[key]
+        if not isinstance(value, str) or not value:
+            raise StoryAnalysisPlanningError(
+                f"planning_policy_ids[{key!r}] must be a non-empty string"
+            )
+    return {key: str(planning_policy_ids[key]) for key in _POLICY_ID_KEYS}
+
+
+def planning_policy_ids_from_profile(
+    profile: StoryAnalysisProfile,
+) -> dict[str, str]:
+    """Extract the four versioned A6 planning policy IDs from a full A6
+    :class:`StoryAnalysisProfile`."""
+    return _validate_planning_policy_ids(
+        {
+            "character_analysis_policy_id": profile.character_analysis_policy_id,
+            "plot_window_policy_id": profile.plot_window_policy_id,
+            "global_skeleton_policy_id": profile.global_skeleton_policy_id,
+            "story_bible_policy_id": profile.story_bible_policy_id,
+        }
+    )
 
 
 def _estimate_bytes_tokens(data: bytes) -> int:
@@ -552,7 +605,9 @@ def validate_window_ownership(
 
     Requires: union(owned) == all canonical events (missing = 0); every event is
     owned exactly once (duplicate = 0); no unknown owned / context refs; window
-    ids are unique and strictly ordered by ordinal.
+    ids are unique and strictly ordered by ordinal; and no event appears in both
+    a window's ``owned_event_ids`` and ``context_event_ids`` (context overlap
+    never confers ownership, so an owned/context overlap is a planning bug).
     """
     owned_counts: Counter[str] = Counter()
     seen_ids: set[str] = set()
@@ -578,6 +633,12 @@ def validate_window_ownership(
                     f"window {w.window_id!r} references unknown context event "
                     f"{eid!r}"
                 )
+        overlap = set(w.owned_event_ids) & set(w.context_event_ids)
+        if overlap:
+            raise StoryAnalysisPlanningError(
+                f"window {w.window_id!r} lists event(s) in both owned and "
+                f"context: {sorted(overlap)!r}"
+            )
     missing = sorted(all_event_ids - set(owned_counts))
     if missing:
         raise StoryAnalysisPlanningError(
@@ -889,6 +950,8 @@ class StoryAnalysisPlan:
 
     consolidation_manifest_ref: ArtifactRef
     planning_policy: StoryAnalysisPlanningPolicy
+    planning_policy_ids: dict[str, str]
+    token_counter_id: str
     character_packages: tuple[CharacterEvidencePackage, ...]
     event_stream: tuple[str, ...]
     windows: tuple[PlotWindowPlan, ...]
@@ -899,6 +962,8 @@ class StoryAnalysisPlan:
         return {
             "consolidation_manifest_ref": self.consolidation_manifest_ref.to_dict(),
             "planning_policy": self.planning_policy.to_dict(),
+            "planning_policy_ids": dict(self.planning_policy_ids),
+            "token_counter_id": self.token_counter_id,
             "character_package_hashes": [p.content_hash() for p in self.character_packages],
             "event_stream": list(self.event_stream),
             "windows": [w.to_dict() for w in self.windows],
@@ -909,16 +974,21 @@ class StoryAnalysisPlan:
 def compute_plan_hash(
     consolidation_manifest_ref: ArtifactRef,
     planning_policy: StoryAnalysisPlanningPolicy,
+    planning_policy_ids: Mapping[str, str],
+    token_counter_id: str,
     character_packages: tuple[CharacterEvidencePackage, ...],
     event_stream: tuple[str, ...],
     windows: tuple[PlotWindowPlan, ...],
     global_index: GlobalIndexBase,
 ) -> str:
     """Compute the stable A6 plan hash from the deterministic canonical
-    planning identity (backend-neutral)."""
+    planning identity (backend-neutral). Binds the numeric policy, the four
+    versioned policy IDs, and the token-counter ID (BLOCK 2)."""
     payload = {
         "consolidation_manifest_ref": consolidation_manifest_ref.to_dict(),
         "planning_policy": planning_policy.to_dict(),
+        "planning_policy_ids": dict(planning_policy_ids),
+        "token_counter_id": token_counter_id,
         "character_package_hashes": [p.content_hash() for p in character_packages],
         "event_stream": list(event_stream),
         "windows": [w.to_dict() for w in windows],
@@ -930,14 +1000,23 @@ def compute_plan_hash(
 def build_story_analysis_plan(
     snapshot: StoryAnalysisInputSnapshot,
     planning_policy: StoryAnalysisPlanningPolicy,
+    *,
+    planning_policy_ids: Mapping[str, str],
+    token_counter_id: str = TOKEN_COUNTER_ID,
 ) -> StoryAnalysisPlan:
     """Build the deterministic A6 plan for an exact snapshot + planning policy.
 
     Fails closed (never truncates) when a measured packet exceeds the frozen
     policy budget: an oversized character package, an oversized window packet,
     or an oversized global-index base raises
-    :class:`StoryAnalysisPlanningError`.
+    :class:`StoryAnalysisPlanningError`. The four versioned planning policy IDs
+    and the token-counter ID are bound into the plan identity (BLOCK 2).
     """
+    policy_ids = _validate_planning_policy_ids(planning_policy_ids)
+    if not isinstance(token_counter_id, str) or not token_counter_id:
+        raise StoryAnalysisPlanningError(
+            "token_counter_id must be a non-empty string"
+        )
     packages = build_character_evidence_packages(snapshot)
     assert_full_character_coverage(snapshot, packages)
 
@@ -986,6 +1065,8 @@ def build_story_analysis_plan(
     plan_hash = compute_plan_hash(
         snapshot.consolidation_manifest_ref,
         planning_policy,
+        policy_ids,
+        token_counter_id,
         packages,
         event_ids,
         windows,
@@ -994,6 +1075,8 @@ def build_story_analysis_plan(
     return StoryAnalysisPlan(
         consolidation_manifest_ref=snapshot.consolidation_manifest_ref,
         planning_policy=planning_policy,
+        planning_policy_ids=policy_ids,
+        token_counter_id=token_counter_id,
         character_packages=packages,
         event_stream=event_ids,
         windows=windows,
@@ -1007,5 +1090,10 @@ def build_story_analysis_plan_from_profile(
     profile: StoryAnalysisProfile,
 ) -> StoryAnalysisPlan:
     """Convenience: build the plan from a full A6 :class:`StoryAnalysisProfile`
-    (using its pinned :attr:`planning_policy`)."""
-    return build_story_analysis_plan(snapshot, profile.planning_policy)
+    (using its pinned :attr:`planning_policy` plus the four versioned policy
+    IDs)."""
+    return build_story_analysis_plan(
+        snapshot,
+        profile.planning_policy,
+        planning_policy_ids=planning_policy_ids_from_profile(profile),
+    )

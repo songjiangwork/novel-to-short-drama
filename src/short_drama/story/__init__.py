@@ -60,7 +60,7 @@ from .story_analysis_planning import (
     build_character_evidence_packages, build_global_index_base, build_story_analysis_plan,
     build_story_analysis_plan_from_profile, build_story_analysis_snapshot,
     build_window_packet, build_window_packets, compute_plan_hash, ordered_event_stream,
-    plan_plot_windows, validate_window_ownership,
+    plan_plot_windows, planning_policy_ids_from_profile, validate_window_ownership,
 )
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
@@ -1003,4 +1003,5 @@ __all__ = [
     "build_story_analysis_plan",
     "build_story_analysis_plan_from_profile",
     "compute_plan_hash",
+    "planning_policy_ids_from_profile",
 ]

@@ -191,6 +191,37 @@ core/major event details
 
 ---
 
+## Whole-story packet ceiling authority is staged
+
+A6 的 character/window packet 可以在 A6B 通过 exact A5 snapshot 直接测量；但 global-skeleton 与 StoryBible 的完整 request 依赖前序 semantic outputs，因此它们的 ceiling 不能在 A6B 被诚实测量。
+
+冻结顺序：
+
+```text
+A6B
+→ freeze character evidence budget
+→ freeze plot-window budget / ownership / overlap
+→ global-skeleton ceiling = DEFERRED
+→ story-bible ceiling = DEFERRED
+
+A6C + A6D semantic outputs complete
+→ construct exact complete A6E input
+→ measure
+→ freeze global-skeleton ceiling
+
+A6E semantic output complete
+→ construct exact complete A6F input
+→ measure
+→ freeze story-bible ceiling
+```
+
+`DEFERRED` 是正式 authority state，不代表 unlimited，也不得用 A5-only placeholder 数字冒充完整 whole-story ceiling。
+
+任何 semantic pass 在自己的 ceiling 尚未 freeze 时必须 fail closed，并且不得调用 provider。
+
+这也意味着是否需要 recursive compression 必须基于 actual complete compressed representation 的 measured size 决定，而不能仅根据 A6B 的 A5-derived base 推断。
+
+---
 ## 如果 262K 足够怎么办？
 
 如果压缩后的 A5 canonical evidence 可以安全放进 262K，并仍保留足够输出空间，则 A6 final synthesis 可以直接读取整个 compressed evidence package。

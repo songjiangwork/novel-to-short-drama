@@ -16,37 +16,49 @@
 # characters / 20 locations / 13 unresolved / 158 facts / 30 state transitions
 # / 166 events / 56 relationships / 0 conflicts). It is NOT derived from the
 # Alice source word count, the 262K theoretical context, or the operator's
-# current llama.cpp slots. Each budget is the measured ceiling rounded up to the
-# next 1000-token step:
+# current llama.cpp slots.
+#
+# STAGED CEILING AUTHORITY (merged #97 contract): A6B freezes only the values
+# it can actually measure. The character / window values below are MEASURED and
+# CONCRETE. The two whole-story ceilings (global-skeleton / story-bible) are
+# DEFERRED = null because the complete A6E / A6F whole-story packet joins the
+# A6C character dossiers + A6D window analyses (+ the A6E global-skeleton
+# output for the story bible), which are future semantic outputs that do not
+# exist yet and carry no frozen size bound in the authoritative architecture.
+# A6B measures the A5-derived base as a MEASUREMENT but does NOT freeze it as a
+# whole-story ceiling (that would be an A5-only placeholder). ``null`` =
+# DEFERRED (not unlimited, not zero); the corresponding pass fails closed (zero
+# provider calls) while the ceiling is ``null``. The complete fail-closed gate
+# belongs to pre-A6E (global-skeleton) and pre-A6F (story-bible), and the
+# recursive-global-compression decision is DEFERRED TO A6E MEASUREMENT.
 #
 #   * character_packet_max_estimated_tokens = 70000
 #       Measured max character evidence package is 69550 tokens
 #       (``char_0001``, the protagonist); frozen at the measured max rounded up
 #       to the next 1000-token step.
-#   * plot_window_packet_max_estimated_tokens = 46000
-#   * plot_window_owned_event_target = 1
-#   * plot_window_context_event_count = 0
-#       Selected by the deterministic BLOCK 4 objective (lexicographic min of
-#       max-window-packet-ceiling, then window count, then overlap cost) over
-#       the corpus-derived candidate space (owned target 1..166 x context
-#       0..16). This is the smallest plot-window packet ceiling that fits the
-#       corpus (per #87): the densest single-event window is 45669 tokens.
-#   * global_skeleton_packet_max_estimated_tokens = 114000
-#   * story_bible_packet_max_estimated_tokens = 114000
-#       BLOCK 1 SEQUENCING CONTRADICTION (reported, NOT guessed): the frozen
-#       profile schema requires these two numeric fields, but the A6E /
-#       A6F whole-story input also joins the A6C character dossiers + A6D
-#       window analyses (+ the A6E global-skeleton output for the story
-#       bible), which are future semantic outputs that do not exist yet and
-#       carry NO frozen size bound in the authoritative architecture (the
-#       architecture / implementation plan / task map / A6 output schemas all
-#       specify structure, not size, and #10 forbids deriving the size from the
-#       262K context / word count / llama.cpp slots). A6B therefore freezes
-#       BOTH fields at the A5-DERIVED BASE BOUND ONLY (114000 tokens = the
-#       measured serialized A5/A4 exact typed-leaf total of 113735 tokens,
-#       rounded up). The full semantic ceiling is KNOWN to be larger and is
-#       DEFERRED to A6C/A6D/A6E/A6G measurement + re-freeze. This is NOT a
-#       fabricated semantic-output size and NOT set from the 262K context.
+#   * plot_window_packet_max_estimated_tokens = 58000
+#   * plot_window_owned_event_target = 12
+#   * plot_window_context_event_count = 4
+#       ARCHITECTURE-AWARE measured frontier choice (NOT a byte-minimization
+#       objective). It keeps non-zero boundary context and multi-event owned
+#       windows so the window/context preserve their semantic role (avoiding
+#       hard cuts around turning points, allowing relationship transitions
+#       across boundaries, preserving setup/payoff adjacency) while fitting the
+#       corpus: 166 events partition into 14 windows, max measured window
+#       packet 57360 tokens, frozen at the measured max rounded up to the next
+#       1000-token step. A pure byte minimization would collapse this to a
+#       degenerate one-event / zero-context policy and defeat hierarchical
+#       compression. The corpus-derived sweep is retained in the audit as
+#       measurement evidence only.
+#   * global_skeleton_packet_max_estimated_tokens = null  (DEFERRED)
+#   * story_bible_packet_max_estimated_tokens = null      (DEFERRED)
+#       The complete A6E / A6F whole-story packet cannot be measured in A6B.
+#       A6B measures the A5-derived base (serialized A5/A4 exact typed-leaf
+#       total 113735 tokens; compact A5-derived global-index base 21940 tokens)
+#       as a MEASUREMENT ONLY; the full semantic ceiling is DEFERRED (null) and
+#       is measured at the pre-A6E / pre-A6F gate. This is NOT a fabricated
+#       semantic-output size, NOT an A5-derived placeholder, and NOT set from
+#       the 262K theoretical context.
 #
 # The audit is zero-write: it proves (before/after SHA-256 equality of the
 # story runs tree) that it mutates nothing, and it refuses to write any report
@@ -71,13 +83,15 @@ story_bible_policy_id: a6-bible-v1
 max_generation_rounds: 2
 
 # Post-audit numeric planning / token policy (A6B Alice zero-provider audit).
+# character / window values are MEASURED + CONCRETE; the two whole-story
+# ceilings are DEFERRED (null) per the merged #97 staged ceiling authority.
 planning_policy:
   character_packet_max_estimated_tokens: 70000
-  plot_window_packet_max_estimated_tokens: 46000
-  plot_window_owned_event_target: 1
-  plot_window_context_event_count: 0
-  global_skeleton_packet_max_estimated_tokens: 114000
-  story_bible_packet_max_estimated_tokens: 114000
+  plot_window_packet_max_estimated_tokens: 58000
+  plot_window_owned_event_target: 12
+  plot_window_context_event_count: 4
+  global_skeleton_packet_max_estimated_tokens: null
+  story_bible_packet_max_estimated_tokens: null
 
 # A6 character-analysis semantic pass.
 character_analysis:

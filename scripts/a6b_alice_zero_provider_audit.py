@@ -19,9 +19,12 @@ The audit:
   * reports the event stream (per-event bytes / tokens, cumulative) and a
     CORPUS-DERIVED, bounded, exhaustive deterministic sweep of candidate
     plot-window owned-target / context counts (BLOCK 4: the candidate space is
-    generated from the actual event universe, not a curated tuple), with an
-    EXPLICIT DETERMINISTIC SELECTION OBJECTIVE that selects the frozen
-    owned-target / context values from the measured metrics;
+    generated from the actual event universe, not a curated tuple). The sweep is
+    retained as MEASUREMENT EVIDENCE; the frozen window policy is an
+    ARCHITECTURE-AWARE measured frontier choice (non-zero boundary context,
+    multi-event owned windows), NOT a byte-minimization objective (that would
+    degenerate to one-event / zero-context windows and defeat the window/context
+    semantic role);
   * reports the compact A5-derived global-index base bytes / tokens (the
     measurable A5-derived portion of the A6E global-skeleton input; the A6C
     character dossiers + A6D window analyses that join on top are future
@@ -34,13 +37,16 @@ The audit:
   * PROVES ZERO-WRITE: it snapshots the artifact / pointer runs tree before and
     after the audit and asserts path/hash equality (BLOCK 3), and it refuses to
     write any diagnostic report into the story runs tree;
-  * reports the SEQUENCING CONTRADICTION (BLOCK 1): the frozen profile schema
-    requires six numeric fields, but two of them (the whole-story
-    global-skeleton / story-bible ceilings) depend on the A6C / A6D / A6E /
-    A6F semantic outputs that do not exist yet and carry NO frozen size bound in
-    the authoritative architecture. A6B therefore freezes those two fields at
-    the A5-DERIVED BASE BOUND ONLY (the only A6B-measurable portion) and
-    defers the full semantic ceiling to A6C / A6D / A6E / A6G measurement.
+  * reports the STAGED CEILING AUTHORITY (BLOCK 1, resolved by the merged #97
+    contract): A6B freezes the character / window planning values concrete
+    (measured), but DEFERS the two whole-story ceilings (global-skeleton /
+    story-bible) to ``null``. The complete A6E / A6F whole-story packet joins
+    the A6C / A6D (+ A6E) semantic outputs that do not exist yet, so A6B
+    measures the A5-derived base as a MEASUREMENT but does NOT freeze it as a
+    whole-story ceiling (that would be an A5-only placeholder). ``null`` =
+    DEFERRED (not unlimited, not zero); the corresponding pass fails closed
+    while the ceiling is ``null``. Recursive global compression is DEFERRED TO
+    A6E MEASUREMENT.
 
 It performs NO provider call, writes NO A6 artifact, modifies NO A5/A6 CURRENT,
 and modifies NO tracked profile (and writes NO file inside the story runs tree).
@@ -110,6 +116,20 @@ FROZEN_POLICY_IDS: dict[str, str] = {
 # to the next :data:`_TOKEN_MARGIN_STEP` tokens (a small, documented,
 # corpus-derived margin above the measured max — never a fabricated bound).
 _TOKEN_MARGIN_STEP = 1000
+
+# The frozen v1 plot-window policy is an ARCHITECTURE-AWARE measured choice, not
+# the product of a packet-size-minimization objective. Plot-window context has
+# a semantic purpose (avoiding hard cuts around turning points, allowing
+# relationship transitions across boundaries, preserving setup/payoff adjacency),
+# and pure byte minimization would collapse the plan to a degenerate
+# one-event / zero-context policy that defeats hierarchical compression. The
+# frozen (owned_target, context) below is a human/architecture choice taken from
+# the measured frontier and validated against the real corpus (non-zero boundary
+# context, multi-event owned windows, exact-one ownership, measured packet fits
+# the concrete budget). The corpus-derived sweep is retained purely as
+# measurement evidence (see the JSON report).
+FROZEN_WINDOW_OWNED_TARGET = 12
+FROZEN_WINDOW_CONTEXT_EVENT_COUNT = 4
 
 
 def _round_up_to_step(value: int, step: int) -> int:
@@ -340,34 +360,48 @@ def _window_candidate_space(n_events: int) -> list[tuple[int, int]]:
 
 
 def _select_frozen_window_policy(sweep: list[dict]) -> dict:
-    """Deterministic selection of the frozen window policy (BLOCK 4).
+    """Select the frozen ARCHITECTURE-AWARE window policy from the measured
+    frontier.
 
-    EXPLICIT DETERMINISTIC SELECTION OBJECTIVE over the measured metrics
-    (packet ceiling, overlap cost, and window count):
+    Unlike a packet-size-minimization objective, this does NOT let a resource-
+    only formula "discover" the semantic policy. The frozen v1 policy
+    (:data:`FROZEN_WINDOW_OWNED_TARGET` / :data:`FROZEN_WINDOW_CONTEXT_EVENT_COUNT`)
+    is a human/architecture choice; it is validated here against the measured
+    frontier so the freeze is corpus-grounded and deterministic. The frozen
+    point must:
 
-      1. minimize ``max_window_packet_estimated_tokens`` — the smallest
-         plot-window packet ceiling that fits the corpus (the "smallest
-         planning-v1 numeric policy that fits the real corpus", per #87);
-      2. tie-break by minimizing ``window_count`` — fewer windows among those
-         with the minimum ceiling (less A6D / A6E overhead);
-      3. tie-break by minimizing ``overlap_cost_tokens`` — less redundant
-         boundary context among those with the same ceiling and window count.
+      * exist in the measured sweep (a valid candidate);
+      * have non-zero boundary context (``context >= 1``) so windows keep their
+        semantic role (no degenerate one-event / zero-context collapse);
+      * use multi-event owned windows (``owned_target >= 2``);
 
-    The selected row is the lexicographic minimum of
-    ``(max_window_packet_estimated_tokens, window_count, overlap_cost_tokens)``.
-    This lets the rule select the frozen owned-target / context values instead
-    of choosing them first.
+    The full corpus-derived sweep is retained in the JSON report as measurement
+    evidence; it is NOT used to auto-select the policy by minimizing bytes.
     """
     if not sweep:
         raise ValueError("window sweep is empty; cannot select a frozen policy")
-    return min(
-        sweep,
-        key=lambda m: (
-            m["max_window_packet_estimated_tokens"],
-            m["window_count"],
-            m["overlap_cost_tokens"],
-        ),
-    )
+    match = [
+        m
+        for m in sweep
+        if m["owned_event_target"] == FROZEN_WINDOW_OWNED_TARGET
+        and m["context_event_count"] == FROZEN_WINDOW_CONTEXT_EVENT_COUNT
+    ]
+    if not match:
+        raise ValueError(
+            "the frozen architecture-aware window policy "
+            f"({FROZEN_WINDOW_OWNED_TARGET}/{FROZEN_WINDOW_CONTEXT_EVENT_COUNT}) "
+            "is not a valid measured frontier point for this corpus"
+        )
+    selected = match[0]
+    if selected["context_event_count"] < 1:
+        raise ValueError(
+            "the frozen window policy must have non-zero boundary context"
+        )
+    if selected["owned_event_target"] < 2:
+        raise ValueError(
+            "the frozen window policy must use multi-event owned windows"
+        )
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -525,14 +559,20 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
         )
     print()
 
-    # --- Window policy selection (BLOCK 4: deterministic objective) ---
+    # --- Window policy (architecture-aware measured frontier choice) ---
     selected_window = _select_frozen_window_policy(sweep)
-    print("=== PLOT-WINDOW POLICY SELECTION (deterministic objective) ===")
+    print("=== PLOT-WINDOW POLICY (architecture-aware measured frontier choice) ===")
     print(
-        f"  selected owned_target: {selected_window['owned_event_target']}  "
+        f"  frozen owned_target: {selected_window['owned_event_target']}  "
         f"context: {selected_window['context_event_count']}  "
         f"windows: {selected_window['window_count']}  "
         f"max_packet_tokens: {selected_window['max_window_packet_estimated_tokens']}"
+    )
+    print(
+        "  NOTE: the frozen window policy is an ARCHITECTURE-AWARE measured "
+        "choice (non-zero boundary context, multi-event owned windows), NOT a "
+        "packet-size minimization. The corpus-derived sweep above is measurement "
+        "evidence only."
     )
     print()
 
@@ -552,24 +592,34 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
     )
     print()
 
-    # --- A5-derived base bound (BLOCK 1: the only A6B-measurable whole-story
-    #     base; the two future ceilings are frozen at this base bound ONLY) ---
+    # --- A5-derived base (MEASUREMENT ONLY; NOT a whole-story ceiling) ---
+    # A6B measures the exact serialized A5/A4 typed-leaf total and the compact
+    # global-index base. These are the A5-DERIVED BASE of the A6E / A6F input.
+    # The complete whole-story packet also joins the A6C character dossiers +
+    # A6D window analyses (+ A6E output for the story bible), which are future
+    # semantic outputs that do not exist yet. A6B therefore does NOT freeze a
+    # whole-story ceiling from this base (it would be an A5-only placeholder);
+    # the two whole-story ceilings are DEFERRED (null) and are measured at the
+    # pre-A6E / pre-A6F gate.
     a5_base_tokens = leaf_tokens["total"]
-    a5_base_bound = _round_up_to_step(a5_base_tokens, _TOKEN_MARGIN_STEP)
-    print("=== A5-DERIVED BASE BOUND (BLOCK 1) ===")
-    print(f"  serialized A5/A4 leaf total tokens: {a5_base_tokens}")
-    print(f"  A5-derived base bound (rounded up): {a5_base_bound}")
+    print("=== A5-DERIVED BASE (MEASURED; NOT A WHOLE-STORY CEILING) ===")
+    print(f"  serialized A5/A4 exact typed-leaf total tokens: {a5_base_tokens}")
+    print(f"  compact global-index base tokens (A5-derived):   {gindex.estimated_tokens()}")
     print(
-        "  NOTE: this is the A5-DERIVED BASE ONLY. The full global-skeleton / "
-        "story-bible input also joins the A6C character dossiers + A6D window "
-        "analyses (+ A6E global-skeleton output for the story bible), which are "
-        "future semantic outputs with NO frozen size bound. The two whole-story "
-        "ceilings are therefore frozen at the A5-derived base bound ONLY, and "
-        "the full semantic ceiling is deferred to A6C/A6D/A6E/A6G measurement."
+        "  NOTE: MEASURED NOW (the A5-derived base only). The complete A6E "
+        "global-skeleton and A6F story-bible whole-story packet ceilings are "
+        "DEFERRED (null); they cannot be measured in A6B because they join the "
+        "A6C dossiers + A6D window analyses (+ A6E output) that do not yet "
+        "exist. This base is NOT used as a whole-story ceiling."
     )
     print()
 
-    # --- Frozen policy (built from the measurements — corpus-derived) ---
+    # --- Frozen policy (A6B-measurable values concrete; whole-story deferred) ---
+    # character / window values are measured and frozen concrete. The two
+    # whole-story ceilings are DEFERRED (null): A6B measures the A5-derived base
+    # but does NOT freeze a whole-story ceiling (the complete A6E / A6F packet
+    # joins future semantic outputs that do not exist yet). The corresponding
+    # complete fail-closed gate belongs to pre-A6E / pre-A6F.
     character_budget = _round_up_to_step(
         char_report["largest"]["estimated_tokens"], _TOKEN_MARGIN_STEP
     )
@@ -581,10 +631,10 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
         plot_window_packet_max_estimated_tokens=window_budget,
         plot_window_owned_event_target=selected_window["owned_event_target"],
         plot_window_context_event_count=selected_window["context_event_count"],
-        # BLOCK 1: frozen at the A5-derived base bound ONLY (the only
-        # A6B-measurable portion). The full semantic ceiling is deferred.
-        global_skeleton_packet_max_estimated_tokens=a5_base_bound,
-        story_bible_packet_max_estimated_tokens=a5_base_bound,
+        # DEFERRED (null): the complete whole-story packet cannot be measured in
+        # A6B (the A6C dossiers + A6D window analyses do not exist yet).
+        global_skeleton_packet_max_estimated_tokens=None,
+        story_bible_packet_max_estimated_tokens=None,
     )
     policy_dict = policy.to_dict()
     print("=== FROZEN A6B PLANNING POLICY + PLAN IDENTITY ===")
@@ -674,12 +724,13 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
         },
         "global_skeleton_input": {
             "a5_derived_base_estimated_tokens": a5_base_tokens,
-            "a5_derived_base_bound": a5_base_bound,
             "a5_derived_base_bytes": leaf_bytes["total"],
+            "status": "DEFERRED",
             "note": (
-                "A5-DERIVED BASE ONLY; A6C dossiers + A6D window analyses are "
-                "future semantic outputs joined on top (not faked). The full "
-                "semantic ceiling is deferred to A6C/A6D/A6E/A6G measurement."
+                "A5-DERIVED BASE ONLY (measured); the complete A6E global-"
+                "skeleton packet joins the A6C character dossiers + A6D window "
+                "analyses (future semantic outputs, not faked). The whole-story "
+                "ceiling is DEFERRED (null) and is measured at the pre-A6E gate."
             ),
         },
     }
@@ -693,43 +744,41 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
             "(measured max rounded up to the next 1000-token step)."
         ),
         "plot_window_packet_max_estimated_tokens": (
-            f"Selected by the deterministic BLOCK 4 objective "
-            "(minimize max packet ceiling, then window count, then overlap "
-            f"cost): owned_target={policy_dict['plot_window_owned_event_target']}, "
-            f"context={policy_dict['plot_window_context_event_count']}, "
-            f"max window packet "
+            f"ARCHITECTURE-AWARE measured choice: owned_target="
+            f"{policy_dict['plot_window_owned_event_target']}, "
+            f"context={policy_dict['plot_window_context_event_count']} (non-zero "
+            f"boundary context, multi-event owned windows), max window packet "
             f"{selected_window['max_window_packet_estimated_tokens']} tokens; "
             f"frozen at "
             f"{policy_dict['plot_window_packet_max_estimated_tokens']} "
-            "(rounded up to the next 1000-token step)."
+            "(measured max rounded up to the next 1000-token step). NOT chosen "
+            "by byte minimization — that would degenerate to 1-event / 0-context "
+            "windows and defeat the window/context semantic role."
         ),
         "plot_window_owned_event_target": (
-            f"Selected by the deterministic BLOCK 4 objective over the "
-            f"corpus-derived candidate space (1..{n_events} owned targets x "
-            f"0..{max(1, n_events // 10)} context counts); "
-            f"{n_events} canonical events partition into "
-            f"{selected_window['window_count']} windows."
+            f"ARCHITECTURE-AWARE frozen choice ({FROZEN_WINDOW_OWNED_TARGET}) "
+            f"taken from the measured corpus-derived frontier (bounded sweep of "
+            f"1..{n_events} owned targets x 0..{max(1, n_events // 10)} context "
+            f"counts, retained as measurement evidence). {n_events} canonical "
+            f"events partition into {selected_window['window_count']} windows; "
+            f"context={FROZEN_WINDOW_CONTEXT_EVENT_COUNT} preserves boundary "
+            "adjacency without hard-cutting turning points."
         ),
         "global_skeleton_packet_max_estimated_tokens": (
-            f"BLOCK 1 SEQUENCING CONTRADICTION: the frozen profile schema "
-            "requires this numeric field, but the A6E global-skeleton input "
-            "also joins the A6C character dossiers + A6D window analyses, "
-            "which are future semantic outputs with NO frozen size bound in "
-            "the authoritative architecture. A6B therefore freezes it at the "
-            f"A5-DERIVED BASE BOUND ONLY ({a5_base_bound} tokens = the "
-            f"serialized A5/A4 leaf total of {a5_base_tokens} tokens rounded "
-            "up), and defers the full semantic ceiling to A6C/A6D/A6E/A6G "
-            "measurement. This is NOT a fabricated semantic-output size and "
-            "NOT set from the 262K theoretical context."
+            "DEFERRED (null). A6B measures the A5-derived base "
+            f"({a5_base_tokens} tokens) but does NOT freeze a whole-story "
+            "ceiling: the complete A6E global-skeleton input joins the A6C "
+            "character dossiers + A6D window analyses, which are future semantic "
+            "outputs with no frozen size bound. Using the A5-derived base as the "
+            "ceiling would be an A5-only placeholder. The complete fail-closed "
+            "gate belongs to pre-A6E."
         ),
         "story_bible_packet_max_estimated_tokens": (
-            f"BLOCK 1 SEQUENCING CONTRADICTION: the A6F story-bible input is "
-            "the complete compressed global representation (A5 base + global "
-            "skeleton + character dossiers + window analyses), which includes "
-            "future semantic outputs with NO frozen size bound. A6B freezes it "
-            f"at the A5-DERIVED BASE BOUND ONLY ({a5_base_bound} tokens) and "
-            "defers the full semantic ceiling to A6C/A6D/A6E/A6G measurement. "
-            "NOT set from the 262K theoretical context."
+            "DEFERRED (null). The complete A6F story-bible input is the full "
+            "compressed global representation (A5 base + global skeleton + "
+            "character dossiers + window analyses). A6B measures the A5-derived "
+            f"base ({a5_base_tokens} tokens) but does NOT freeze a whole-story "
+            "ceiling; the complete fail-closed gate belongs to pre-A6F."
         ),
     }
 
@@ -780,20 +829,26 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
             >= selected_window["max_window_packet_estimated_tokens"],
         ),
         (
-            "BLOCK 1: global-skeleton budget is the A5-derived base bound (not a "
-            "fabricated semantic ceiling)",
-            policy_dict["global_skeleton_packet_max_estimated_tokens"]
-            == a5_base_bound
-            and policy_dict["global_skeleton_packet_max_estimated_tokens"]
-            >= a5_base_tokens,
+            "frozen window policy is architecture-aware (non-zero boundary "
+            "context, multi-event owned windows)",
+            selected_window["context_event_count"] >= 1
+            and selected_window["owned_event_target"] >= 2,
         ),
         (
-            "BLOCK 1: story-bible budget is the A5-derived base bound and >= "
-            "the global-skeleton budget",
-            policy_dict["story_bible_packet_max_estimated_tokens"]
-            == a5_base_bound
-            and policy_dict["story_bible_packet_max_estimated_tokens"]
-            >= policy_dict["global_skeleton_packet_max_estimated_tokens"],
+            "whole-story global-skeleton ceiling is DEFERRED (null) in A6B "
+            "(not an A5-derived placeholder)",
+            policy_dict["global_skeleton_packet_max_estimated_tokens"] is None,
+        ),
+        (
+            "whole-story story-bible ceiling is DEFERRED (null) in A6B (not an "
+            "A5-derived placeholder)",
+            policy_dict["story_bible_packet_max_estimated_tokens"] is None,
+        ),
+        (
+            "A5-derived base is measured (typed-leaf total) but NOT used as a "
+            "whole-story ceiling",
+            a5_base_tokens > 0
+            and policy_dict["global_skeleton_packet_max_estimated_tokens"] is None,
         ),
         (
             "BLOCK 2: the plan identity binds the four versioned policy IDs and "
@@ -812,7 +867,7 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
 
     report = {
         "audit_id": "a6b-alice-zero-provider-shape-audit",
-        "schema_version": 2,
+        "schema_version": 3,
         "zero_provider": True,
         "zero_write": True,
         "input": {
@@ -825,6 +880,77 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
             "pinned_a4_entity_map_ref": snap.consolidation_manifest.entity_map_ref.to_dict(),
         },
         "corpus_counts": counts,
+        # --- MEASURED NOW (A6B, zero-provider, read-only) ---
+        "measured_now": {
+            "exact_a4_a5_typed_leaf_bytes": leaf_bytes,
+            "exact_a4_a5_typed_leaf_estimated_tokens": leaf_tokens,
+            "character_packets": char_report,
+            "event_stream": event_report,
+            "window_packets": {
+                "frozen_architecture_aware_policy": selected_window,
+                "sweep_candidate_space": {
+                    "owned_target_range": [1, n_events],
+                    "context_range": [0, max(1, n_events // 10)],
+                    "combination_count": len(candidate_space),
+                    "sweep_note": (
+                        "bounded corpus-scaled sweep, retained as measurement "
+                        "evidence; NOT used to auto-select the policy by "
+                        "minimizing bytes (the frozen choice is architecture-"
+                        "aware)"
+                    ),
+                },
+                "sweep": sweep,
+            },
+            "global_index_base": {
+                "estimated_bytes": gi_bytes,
+                "estimated_tokens": gi_tokens,
+                "content_hash": gi_hash,
+            },
+            "a5_derived_base": {
+                "serialized_leaf_total_tokens": a5_base_tokens,
+                "global_index_base_estimated_tokens": gi_tokens,
+                "note": (
+                    "A5-DERIVED BASE ONLY (measured). This is the measurable "
+                    "A5 portion of the A6E / A6F whole-story input; it is NOT "
+                    "used as a whole-story ceiling."
+                ),
+            },
+            "largest_candidates": largest,
+        },
+        # --- DEFERRED (cannot be measured in A6B; future semantic outputs) ---
+        "deferred": {
+            "global_skeleton_packet_ceiling": {
+                "value": None,
+                "status": "DEFERRED",
+                "reason": (
+                    "The complete A6E global-skeleton input joins the A6C "
+                    "character dossiers + A6D window analyses, which are future "
+                    "semantic outputs that do not exist yet. The complete fail-"
+                    "closed gate belongs to pre-A6E."
+                ),
+            },
+            "story_bible_packet_ceiling": {
+                "value": None,
+                "status": "DEFERRED",
+                "reason": (
+                    "The complete A6F story-bible input is the full compressed "
+                    "global representation (A5 base + global skeleton + "
+                    "character dossiers + window analyses). The complete fail-"
+                    "closed gate belongs to pre-A6F."
+                ),
+            },
+            "recursive_global_compression": {
+                "status": "DEFERRED TO A6E MEASUREMENT",
+                "reason": (
+                    "Whether recursive section-layer compression is needed "
+                    "cannot be decided from the A5-derived base alone; it "
+                    "requires the actual A6C / A6D outputs. A6E makes the first "
+                    "authoritative judgment; A6G re-validates against the real "
+                    "provider."
+                ),
+            },
+        },
+        # Flat mirrors for backward compatibility with consumers/tests.
         "serialized_exact_typed_a5_a4_leaf_bytes": leaf_bytes,
         "serialized_exact_typed_a5_a4_leaf_estimated_tokens": leaf_tokens,
         "character_packages": char_report,
@@ -834,9 +960,12 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
             "owned_target_range": [1, n_events],
             "context_range": [0, max(1, n_events // 10)],
             "combination_count": len(candidate_space),
-            "selection_objective": (
-                "lexicographic min of (max_window_packet_estimated_tokens, "
-                "window_count, overlap_cost_tokens)"
+            "selection_basis": (
+                "architecture-aware measured frontier choice "
+                f"(owned_target={FROZEN_WINDOW_OWNED_TARGET}, "
+                f"context={FROZEN_WINDOW_CONTEXT_EVENT_COUNT}); the corpus-"
+                "derived sweep is measurement evidence only, NOT a byte-"
+                "minimization objective"
             ),
         },
         "window_policy_selection": selected_window,
@@ -845,30 +974,25 @@ def run_audit(store, pointers, *, project_id, document_id, consolidation_profile
             "estimated_tokens": gi_tokens,
             "content_hash": gi_hash,
         },
-        "a5_derived_base": {
-            "serialized_leaf_total_tokens": a5_base_tokens,
-            "base_bound": a5_base_bound,
-            "note": (
-                "A5-DERIVED BASE ONLY; the full global-skeleton / story-bible "
-                "semantic ceiling is deferred to A6C/A6D/A6E/A6G measurement "
-                "(BLOCK 1 sequencing contradiction)."
-            ),
-        },
-        "largest_candidates": largest,
         "planning_policy_frozen": policy_dict,
         "planning_policy_ids": dict(FROZEN_POLICY_IDS),
         "token_counter_id": TOKEN_COUNTER_ID,
         "planning_policy_rationale": rationale,
-        "sequencing_contradiction": {
-            "present": True,
-            "summary": (
-                "The frozen profile schema requires six numeric planning-policy "
-                "fields, but two of them (global_skeleton / story_bible packet "
-                "ceilings) depend on the A6C/A6D/A6E/A6F semantic outputs that "
-                "do not exist yet and carry no frozen size bound in the "
-                "authoritative architecture. A6B freezes those two fields at the "
-                "A5-derived base bound ONLY and defers the full semantic ceiling "
-                "to A6C/A6D/A6E/A6G measurement."
+        "staged_ceiling_authority": {
+            "a6b_concrete": [
+                "character_packet_max_estimated_tokens",
+                "plot_window_packet_max_estimated_tokens",
+                "plot_window_owned_event_target",
+                "plot_window_context_event_count",
+            ],
+            "a6b_deferred_null": [
+                "global_skeleton_packet_max_estimated_tokens",
+                "story_bible_packet_max_estimated_tokens",
+            ],
+            "null_semantics": (
+                "DEFERRED / not-yet-measurable; != unlimited, != zero, != A5-"
+                "derived placeholder. The corresponding pass fails closed (zero "
+                "provider calls) while the ceiling is null."
             ),
         },
         "plan_identity": {
@@ -990,9 +1114,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print("A6B AUDIT RESULT: PASS (zero-provider, read-only, zero-write)")
     print(
-        "Measurements collected; numeric planning policy is corpus-derived "
-        "(the two whole-story ceilings are the A5-derived base bound only, "
-        "pending A6C/A6D/A6E/A6G re-freeze)."
+        "MEASURED NOW: exact A4/A5 typed leaves, character packets, window "
+        "packets, A5-derived global-index base."
+    )
+    print(
+        "DEFERRED (null): complete A6E global-skeleton + A6F story-bible "
+        "whole-story packet ceilings (measured at the pre-A6E / pre-A6F gate). "
+        "Recursive global compression: DEFERRED TO A6E MEASUREMENT."
     )
     return 0
 

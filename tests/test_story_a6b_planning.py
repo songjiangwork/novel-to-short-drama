@@ -86,16 +86,19 @@ _POLICY = StoryAnalysisPlanningPolicy(
     story_bible_packet_max_estimated_tokens=100_000,
 )
 
-# The exact frozen planning policy measured by the A6B Alice audit. The two
-# whole-story ceilings are the A5-DERIVED BASE BOUND ONLY (BLOCK 1 sequencing
-# contradiction: the full semantic ceiling is deferred to A6C/A6D/A6E/A6G).
+# The exact frozen planning policy measured by the A6B Alice audit.
+# character / window values are MEASURED + CONCRETE; the two whole-story
+# ceilings are DEFERRED (null) per the merged #97 staged ceiling authority
+# (the complete A6E / A6F whole-story packet joins future semantic outputs that
+# do not exist yet; A6B measures the A5-derived base but does NOT freeze it as
+# a whole-story ceiling).
 _FROZEN_POLICY = {
     "character_packet_max_estimated_tokens": 70_000,
-    "plot_window_packet_max_estimated_tokens": 46_000,
-    "plot_window_owned_event_target": 1,
-    "plot_window_context_event_count": 0,
-    "global_skeleton_packet_max_estimated_tokens": 114_000,
-    "story_bible_packet_max_estimated_tokens": 114_000,
+    "plot_window_packet_max_estimated_tokens": 58_000,
+    "plot_window_owned_event_target": 12,
+    "plot_window_context_event_count": 4,
+    "global_skeleton_packet_max_estimated_tokens": None,
+    "story_bible_packet_max_estimated_tokens": None,
 }
 
 _FORBIDDEN = (
@@ -399,6 +402,11 @@ def test_global_index_base_is_a5_derived_and_deterministic(tmp_path: Path) -> No
 # --- fail-closed budget enforcement -----------------------------------------
 
 def test_budget_overflow_fails_closed_not_truncated(tmp_path: Path) -> None:
+    """A6B enforces exactly the budgets it can currently enforce (character +
+    window) and fails closed on overflow (never truncates). The two whole-story
+    ceilings are NOT enforced by A6B — the complete A6E / A6F gate belongs to
+    pre-A6E / pre-A6F — so a tiny concrete or null whole-story ceiling does not
+    fail A6B closed (and a null ceiling never compares ``int > None``)."""
     _tree, _planning, _pub, snap = _snapshot(tmp_path)
 
     # Character budget smaller than the real (non-trivial) character package.
@@ -413,12 +421,19 @@ def test_budget_overflow_fails_closed_not_truncated(tmp_path: Path) -> None:
             snap,
             StoryAnalysisPlanningPolicy(100_000, 1, 1, 0, 100_000, 100_000),
         )
-    # Global-skeleton budget smaller than the real A5-derived index base.
-    with pytest.raises(StoryAnalysisPlanningError, match="refusing to truncate"):
-        _plan(
-            snap,
-            StoryAnalysisPlanningPolicy(100_000, 100_000, 1, 0, 1, 100_000),
-        )
+    # A6B does NOT enforce the whole-story ceilings (deferred): a tiny concrete
+    # global-skeleton budget (smaller than the real A5-derived index base) does
+    # NOT fail A6B closed, and a null ceiling never compares int > None.
+    plan_concrete = _plan(
+        snap,
+        StoryAnalysisPlanningPolicy(100_000, 100_000, 1, 0, 1, 100_000),
+    )
+    plan_null = _plan(
+        snap,
+        StoryAnalysisPlanningPolicy(100_000, 100_000, 1, 0, None, None),
+    )
+    assert plan_concrete.plan_hash
+    assert plan_null.plan_hash
     # A passing budget yields a full plan (no truncation of coverage).
     plan = _plan(snap, _POLICY)
     assert len(plan.character_packages) == len(snap.canonical_characters)
@@ -493,24 +508,37 @@ def test_plan_hash_binds_policy_ids(tmp_path: Path) -> None:
 
 
 def test_plan_hash_binds_token_counter_id(tmp_path: Path) -> None:
-    """BLOCK 2: changing the token-counter ID changes the plan hash."""
+    """BLOCK 2 + BLOCK C: the supported token-counter ID is bound into the plan
+    identity, and an unsupported ID FAILS CLOSED (it must not claim v2 identity
+    while the v1 estimator actually executes)."""
     _tree, _planning, _pub, snap = _snapshot(tmp_path)
-    h_a = build_story_analysis_plan(
+    # The supported TOKEN_COUNTER_ID is accepted and bound into the identity.
+    plan = build_story_analysis_plan(
         snap, _POLICY,
         planning_policy_ids=dict(_POLICY_IDS),
         token_counter_id=TOKEN_COUNTER_ID,
-    ).plan_hash
-    h_b = build_story_analysis_plan(
-        snap, _POLICY,
-        planning_policy_ids=dict(_POLICY_IDS),
-        token_counter_id="utf8-bytes-div3-v2",
-    ).plan_hash
-    assert h_a != h_b
-    plan = build_story_analysis_plan(
-        snap, _POLICY, planning_policy_ids=dict(_POLICY_IDS)
     )
     assert plan.token_counter_id == TOKEN_COUNTER_ID
     assert plan.plan_identity_payload()["token_counter_id"] == TOKEN_COUNTER_ID
+    # An unsupported token-counter ID fails closed (no identity dishonesty).
+    with pytest.raises(StoryAnalysisPlanningError, match="token_counter_id"):
+        build_story_analysis_plan(
+            snap, _POLICY,
+            planning_policy_ids=dict(_POLICY_IDS),
+            token_counter_id="utf8-bytes-div3-v2",
+        )
+    # A non-string token-counter ID also fails closed.
+    with pytest.raises(StoryAnalysisPlanningError, match="token_counter_id"):
+        build_story_analysis_plan(
+            snap, _POLICY,
+            planning_policy_ids=dict(_POLICY_IDS),
+            token_counter_id="",
+        )
+    # The default token counter is the supported one.
+    default_plan = build_story_analysis_plan(
+        snap, _POLICY, planning_policy_ids=dict(_POLICY_IDS)
+    )
+    assert default_plan.token_counter_id == TOKEN_COUNTER_ID
 
 
 def test_policy_ids_validation_fail_closed(tmp_path: Path) -> None:
@@ -536,11 +564,24 @@ def test_policy_ids_validation_fail_closed(tmp_path: Path) -> None:
 
 
 def test_planning_policy_ids_from_profile(tmp_path: Path) -> None:
-    """BLOCK 2: the four versioned policy IDs are extracted from the profile."""
+    """BLOCK 2 + BLOCK D: the four versioned policy IDs are extracted from the
+    profile as the immutable, canonically-ordered representation."""
     profile = load_story_analysis_profile(
         REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
     )
-    assert planning_policy_ids_from_profile(profile) == _POLICY_IDS
+    ids = planning_policy_ids_from_profile(profile)
+    # The immutable tuple materializes to exactly the four policy IDs.
+    assert dict(ids) == _POLICY_IDS
+    # The canonical ordering matches the four policy-ID keys (deterministic).
+    assert [k for k, _ in ids] == [
+        "character_analysis_policy_id",
+        "plot_window_policy_id",
+        "global_skeleton_policy_id",
+        "story_bible_policy_id",
+    ]
+    # The tuple is immutable (no accidental mutation of the identity).
+    with pytest.raises(TypeError):
+        ids[0] = ("character_analysis_policy_id", "a6-character-v9")
 
 
 # --- BLOCK 3: the audit is zero-write (before/after runs-tree equality) ------
@@ -612,20 +653,42 @@ def test_window_candidate_space_is_corpus_derived() -> None:
 
 
 def test_window_policy_selection_is_deterministic() -> None:
-    """BLOCK 4: the selection objective is an explicit deterministic min."""
+    """BLOCK 4: the frozen window policy is the architecture-aware measured
+    frontier choice (12/4), NOT a byte-minimization. It is selected from the
+    measured sweep and fails closed if the frozen point is absent or degenerate.
+    """
     audit = _load_audit_module()
+    target = audit.FROZEN_WINDOW_OWNED_TARGET
+    ctx = audit.FROZEN_WINDOW_CONTEXT_EVENT_COUNT
+    assert (target, ctx) == (12, 4)
+    # A sweep containing the frozen architecture-aware point selects it (the
+    # smaller / larger byte rows are NOT chosen just because they minimize
+    # bytes).
     sweep = [
-        {"max_window_packet_estimated_tokens": 100, "window_count": 5, "overlap_cost_tokens": 10},
-        {"max_window_packet_estimated_tokens": 80, "window_count": 10, "overlap_cost_tokens": 5},
-        {"max_window_packet_estimated_tokens": 80, "window_count": 4, "overlap_cost_tokens": 5},
-        {"max_window_packet_estimated_tokens": 80, "window_count": 4, "overlap_cost_tokens": 3},
+        {"owned_event_target": 1, "context_event_count": 0,
+         "max_window_packet_estimated_tokens": 45000, "window_count": 166,
+         "overlap_cost_tokens": 0},
+        {"owned_event_target": target, "context_event_count": ctx,
+         "max_window_packet_estimated_tokens": 57360, "window_count": 14,
+         "overlap_cost_tokens": 23890},
+        {"owned_event_target": 32, "context_event_count": 8,
+         "max_window_packet_estimated_tokens": 90000, "window_count": 6,
+         "overlap_cost_tokens": 40000},
     ]
     selected = audit._select_frozen_window_policy(sweep)
-    # The lexicographic min of (max_packet, window_count, overlap) is the last.
-    assert selected == sweep[3]
+    assert (selected["owned_event_target"], selected["context_event_count"]) == (
+        target, ctx
+    )
     # Deterministic: re-running gives the same result.
     assert audit._select_frozen_window_policy(sweep) == selected
-    # Empty sweep fails closed.
+    # Fails closed if the frozen architecture-aware point is absent.
+    no_frozen = [
+        m for m in sweep
+        if (m["owned_event_target"], m["context_event_count"]) != (target, ctx)
+    ]
+    with pytest.raises(ValueError, match="not a valid measured frontier point"):
+        audit._select_frozen_window_policy(no_frozen)
+    # Fails closed on an empty sweep.
     with pytest.raises(ValueError):
         audit._select_frozen_window_policy([])
 
@@ -651,6 +714,7 @@ def test_leaf_bytes_measures_exact_typed_leaf(tmp_path: Path) -> None:
 
 # --- owned/context overlap invariant (additional) ---------------------------
 
+
 def test_validate_window_ownership_rejects_owned_context_overlap() -> None:
     """The owned∩context overlap invariant fails closed (additional invariant).
 
@@ -669,3 +733,124 @@ def test_validate_window_ownership_rejects_owned_context_overlap() -> None:
     all_ids = frozenset({"evt_000001", "evt_000002"})
     with pytest.raises(StoryAnalysisPlanningError, match="both owned and context"):
         validate_window_ownership(windows, all_ids)
+
+
+# --- BLOCK C / BLOCK D / staged ceilings / architecture-aware window policy --
+
+def test_production_profile_has_deferred_whole_story_ceilings() -> None:
+    """The A6B production profile defers (null) the two whole-story ceilings and
+    freezes character / window values concrete (merged #97 staged authority)."""
+    profile = load_story_analysis_profile(
+        REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
+    )
+    policy = profile.planning_policy
+    # Whole-story ceilings are DEFERRED (null) — not an A5-derived placeholder.
+    assert policy.global_skeleton_packet_max_estimated_tokens is None
+    assert policy.story_bible_packet_max_estimated_tokens is None
+    # character / window values are concrete (measured) and positive.
+    assert isinstance(policy.character_packet_max_estimated_tokens, int)
+    assert policy.character_packet_max_estimated_tokens > 0
+    assert isinstance(policy.plot_window_packet_max_estimated_tokens, int)
+    assert policy.plot_window_packet_max_estimated_tokens > 0
+    assert policy.plot_window_owned_event_target >= 1
+    assert policy.plot_window_context_event_count >= 0
+
+
+def test_deferred_profile_builds_a6b_plan(tmp_path: Path) -> None:
+    """A6B production profile (null/null whole-story ceilings) builds a
+    deterministic A6B plan successfully. A6B does NOT execute A6E / A6F; it only
+    enforces the character + window budgets. With deferred (null) ceilings there
+    is no ``int > None`` comparison and no default placeholder, and A6B does not
+    claim the complete A6E / A6F packet is verified."""
+    profile = load_story_analysis_profile(
+        REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
+    )
+    assert profile.planning_policy.global_skeleton_packet_max_estimated_tokens is None
+    assert profile.planning_policy.story_bible_packet_max_estimated_tokens is None
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    plan = build_story_analysis_plan_from_profile(snap, profile)
+    # Deterministic A6B plan built successfully with deferred whole-story ceilings.
+    assert plan.plan_hash
+    assert plan.plan_hash == build_story_analysis_plan_from_profile(snap, profile).plan_hash
+    # A6B measured the A5-derived global-index base (bound into the identity).
+    assert plan.plan_identity_payload()["global_index_hash"] == plan.global_index.content_hash()
+    # A6B does NOT claim the full A6E / A6F packet is verified: the ceilings
+    # remain deferred (null), not a concrete bound.
+    assert plan.planning_policy.global_skeleton_packet_max_estimated_tokens is None
+    assert plan.planning_policy.story_bible_packet_max_estimated_tokens is None
+    # Character + window coverage is complete and exact-one ownership holds.
+    assert len(plan.character_packages) == len(snap.canonical_characters)
+    validate_window_ownership(plan.windows, frozenset(plan.event_stream))
+
+
+def test_story_analysis_plan_policy_identity_immutable(tmp_path: Path) -> None:
+    """BLOCK D: the plan's policy-ID identity is stored immutably, so the
+    ``plan_hash`` stays equal to ``hash(plan_identity_payload())`` for the
+    lifetime of the plan — a caller cannot mutate the identity after
+    construction."""
+    from short_drama.artifacts import content_hash
+
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    plan = _plan(snap, _POLICY)
+    # The identity is stored as an immutable tuple of (key, value) pairs.
+    assert isinstance(plan.planning_policy_ids, tuple)
+    # The plan_hash is bound to the identity materialized from the immutable
+    # authority (recompute matches for the lifetime of the plan).
+    assert content_hash(plan.plan_identity_payload()) == plan.plan_hash
+    # A caller cannot rebind the (frozen) identity slot.
+    with pytest.raises(AttributeError):
+        plan.planning_policy_ids = (("character_analysis_policy_id", "x"),)
+    # A caller cannot mutate the tuple content in place.
+    with pytest.raises(TypeError):
+        plan.planning_policy_ids[0] = ("character_analysis_policy_id", "a6-character-v9")
+    # Mutating a materialized dict does NOT affect the plan authority: a fresh
+    # payload still hashes to the same plan_hash.
+    payload = plan.plan_identity_payload()
+    payload["planning_policy_ids"]["character_analysis_policy_id"] = "a6-character-v9"
+    assert content_hash(plan.plan_identity_payload()) == plan.plan_hash
+    assert plan.plan_hash == content_hash(plan.plan_identity_payload())
+
+
+def test_architecture_aware_window_policy_matches_frozen_profile() -> None:
+    """The production profile's window policy is architecture-aware (NOT the
+    degenerate 1/0 byte-minimum): non-zero boundary context and multi-event
+    owned windows, matching the frozen measured frontier choice."""
+    profile = load_story_analysis_profile(
+        REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
+    )
+    policy = profile.planning_policy
+    # Not the degenerate one-event / zero-context byte-minimum.
+    assert policy.plot_window_owned_event_target >= 2
+    assert policy.plot_window_context_event_count >= 1
+    # Matches the frozen architecture-aware measured choice.
+    assert policy.plot_window_owned_event_target == 12
+    assert policy.plot_window_context_event_count == 4
+
+
+def test_window_policy_reproduces_deterministic_plan_hash(tmp_path: Path) -> None:
+    """The window owned-target/context are bound into the plan identity: the same
+    window policy reproduces the same deterministic plan hash, and a different
+    window policy produces a different hash."""
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    base = dict(
+        character_packet_max_estimated_tokens=100_000,
+        plot_window_packet_max_estimated_tokens=100_000,
+        global_skeleton_packet_max_estimated_tokens=None,
+        story_bible_packet_max_estimated_tokens=None,
+    )
+    p12_4 = StoryAnalysisPlanningPolicy(
+        plot_window_owned_event_target=12, plot_window_context_event_count=4, **base
+    )
+    p12_4_re = StoryAnalysisPlanningPolicy(
+        plot_window_owned_event_target=12, plot_window_context_event_count=4, **base
+    )
+    p6_2 = StoryAnalysisPlanningPolicy(
+        plot_window_owned_event_target=6, plot_window_context_event_count=2, **base
+    )
+    h_a = build_story_analysis_plan(snap, p12_4, planning_policy_ids=dict(_POLICY_IDS)).plan_hash
+    h_b = build_story_analysis_plan(snap, p12_4_re, planning_policy_ids=dict(_POLICY_IDS)).plan_hash
+    h_c = build_story_analysis_plan(snap, p6_2, planning_policy_ids=dict(_POLICY_IDS)).plan_hash
+    # Same window policy -> same deterministic plan hash.
+    assert h_a == h_b
+    # Different window policy (different target/context) -> different hash.
+    assert h_a != h_c

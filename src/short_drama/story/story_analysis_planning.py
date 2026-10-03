@@ -102,33 +102,53 @@ _POLICY_ID_KEYS: tuple[str, ...] = (
 
 
 def _validate_planning_policy_ids(
-    planning_policy_ids: Mapping[str, str],
-) -> dict[str, str]:
-    """Validate the four versioned A6 planning policy IDs (fail closed)."""
-    if not isinstance(planning_policy_ids, Mapping):
+    planning_policy_ids: "Mapping[str, str] | tuple[tuple[str, str], ...]",
+) -> tuple[tuple[str, str], ...]:
+    """Validate the four versioned A6 planning policy IDs (fail closed).
+
+    Accepts a mapping (the common caller input) or the immutable tuple
+    representation, and returns the immutable, canonically-ordered
+    representation: a tuple of ``(key, value)`` pairs ordered by
+    :data:`_POLICY_ID_KEYS`. This is the authoritative, mutation-proof identity
+    used by the frozen plan (BLOCK D); a plain dict is only ever *materialized*
+    in the plan-identity payload for canonical hashing.
+    """
+    if isinstance(planning_policy_ids, Mapping):
+        raw: dict[str, str] = {str(k): v for k, v in planning_policy_ids.items()}
+    elif isinstance(planning_policy_ids, (tuple, list)):
+        if any(
+            not isinstance(p, (tuple, list)) or len(p) != 2
+            for p in planning_policy_ids
+        ):
+            raise StoryAnalysisPlanningError(
+                "planning_policy_ids tuple items must be (key, value) pairs"
+            )
+        raw = {str(k): v for k, v in planning_policy_ids}
+    else:
         raise StoryAnalysisPlanningError(
-            "planning_policy_ids must be a mapping of the four versioned policy "
-            "IDs"
+            "planning_policy_ids must be a mapping (or tuple of pairs) of the "
+            "four versioned policy IDs"
         )
-    if set(planning_policy_ids.keys()) != set(_POLICY_ID_KEYS):
+    if set(raw.keys()) != set(_POLICY_ID_KEYS):
         raise StoryAnalysisPlanningError(
             "planning_policy_ids must contain exactly the four versioned policy "
             f"IDs: {list(_POLICY_ID_KEYS)!r}"
         )
     for key in _POLICY_ID_KEYS:
-        value = planning_policy_ids[key]
+        value = raw[key]
         if not isinstance(value, str) or not value:
             raise StoryAnalysisPlanningError(
                 f"planning_policy_ids[{key!r}] must be a non-empty string"
             )
-    return {key: str(planning_policy_ids[key]) for key in _POLICY_ID_KEYS}
+    return tuple((key, str(raw[key])) for key in _POLICY_ID_KEYS)
 
 
 def planning_policy_ids_from_profile(
     profile: StoryAnalysisProfile,
-) -> dict[str, str]:
+) -> tuple[tuple[str, str], ...]:
     """Extract the four versioned A6 planning policy IDs from a full A6
-    :class:`StoryAnalysisProfile`."""
+    :class:`StoryAnalysisProfile` as the immutable, canonically-ordered
+    representation (see :func:`_validate_planning_policy_ids`)."""
     return _validate_planning_policy_ids(
         {
             "character_analysis_policy_id": profile.character_analysis_policy_id,
@@ -950,7 +970,7 @@ class StoryAnalysisPlan:
 
     consolidation_manifest_ref: ArtifactRef
     planning_policy: StoryAnalysisPlanningPolicy
-    planning_policy_ids: dict[str, str]
+    planning_policy_ids: tuple[tuple[str, str], ...]
     token_counter_id: str
     character_packages: tuple[CharacterEvidencePackage, ...]
     event_stream: tuple[str, ...]
@@ -959,6 +979,14 @@ class StoryAnalysisPlan:
     plan_hash: str
 
     def plan_identity_payload(self) -> dict[str, Any]:
+        """Materialize the canonical plan-identity payload.
+
+        The authoritative policy-ID identity is the immutable tuple stored on
+        the plan; a plain dict is materialized here (and only here) for
+        canonical hashing. Mutating the returned dict (or any local copy) can
+        never change :attr:`plan_hash`, because the hash is bound to the
+        immutable tuple authority (BLOCK D).
+        """
         return {
             "consolidation_manifest_ref": self.consolidation_manifest_ref.to_dict(),
             "planning_policy": self.planning_policy.to_dict(),
@@ -974,7 +1002,7 @@ class StoryAnalysisPlan:
 def compute_plan_hash(
     consolidation_manifest_ref: ArtifactRef,
     planning_policy: StoryAnalysisPlanningPolicy,
-    planning_policy_ids: Mapping[str, str],
+    planning_policy_ids: "Mapping[str, str] | tuple[tuple[str, str], ...]",
     token_counter_id: str,
     character_packages: tuple[CharacterEvidencePackage, ...],
     event_stream: tuple[str, ...],
@@ -983,7 +1011,13 @@ def compute_plan_hash(
 ) -> str:
     """Compute the stable A6 plan hash from the deterministic canonical
     planning identity (backend-neutral). Binds the numeric policy, the four
-    versioned policy IDs, and the token-counter ID (BLOCK 2)."""
+    versioned policy IDs, and the token-counter ID (BLOCK 2).
+
+    ``planning_policy_ids`` may be the immutable tuple (the plan authority) or
+    a mapping; it is materialized to a dict only for the canonical payload
+    (canonical JSON sorts keys, so the ordering is not significant to the
+    hash).
+    """
     payload = {
         "consolidation_manifest_ref": consolidation_manifest_ref.to_dict(),
         "planning_policy": planning_policy.to_dict(),
@@ -1006,16 +1040,27 @@ def build_story_analysis_plan(
 ) -> StoryAnalysisPlan:
     """Build the deterministic A6 plan for an exact snapshot + planning policy.
 
-    Fails closed (never truncates) when a measured packet exceeds the frozen
-    policy budget: an oversized character package, an oversized window packet,
-    or an oversized global-index base raises
-    :class:`StoryAnalysisPlanningError`. The four versioned planning policy IDs
-    and the token-counter ID are bound into the plan identity (BLOCK 2).
+    Fails closed (never truncates) when a measured packet exceeds a budget
+    that A6B can currently enforce: an oversized character package or an
+    oversized window packet raises :class:`StoryAnalysisPlanningError`. The two
+    whole-story ceilings (global-skeleton / story-bible) are NOT enforced by
+    A6B — they bound the complete A6E / A6F packet, which joins the A6C / A6D
+    (+ A6E) semantic outputs that do not exist yet, so the corresponding
+    complete fail-closed gate belongs to pre-A6E / pre-A6F (a later issue).
+    A6B still measures the A5-derived global-index base and binds it into the
+    plan identity, but it does not claim the complete A6E / A6F packet is
+    verified. The four versioned planning policy IDs and the token-counter ID
+    are bound into the plan identity (BLOCK 2), and the token-counter ID is
+    required to equal the single supported estimator identity (BLOCK C: an
+    unsupported ID fails closed rather than claiming one algorithm while
+    executing another).
     """
     policy_ids = _validate_planning_policy_ids(planning_policy_ids)
-    if not isinstance(token_counter_id, str) or not token_counter_id:
+    if not isinstance(token_counter_id, str) or token_counter_id != TOKEN_COUNTER_ID:
         raise StoryAnalysisPlanningError(
-            "token_counter_id must be a non-empty string"
+            f"token_counter_id must equal the supported estimator identity "
+            f"{TOKEN_COUNTER_ID!r} (got {token_counter_id!r}); refusing to plan "
+            "with an unsupported token counter"
         )
     packages = build_character_evidence_packages(snapshot)
     assert_full_character_coverage(snapshot, packages)
@@ -1052,14 +1097,13 @@ def build_story_analysis_plan(
                 f"{planning_policy.plot_window_packet_max_estimated_tokens}; "
                 "refusing to truncate"
             )
-    gi_tokens = global_index.estimated_tokens()
-    if gi_tokens > planning_policy.global_skeleton_packet_max_estimated_tokens:
-        raise StoryAnalysisPlanningError(
-            f"global-index base estimate {gi_tokens} tokens exceeds the frozen "
-            "global_skeleton_packet_max_estimated_tokens="
-            f"{planning_policy.global_skeleton_packet_max_estimated_tokens}; "
-            "refusing to truncate"
-        )
+    # Whole-story ceilings (DEFERRED in A6B). A6B does NOT enforce the
+    # global-skeleton / story-bible ceilings: they bound the complete A6E / A6F
+    # packet (A5 base + A6C dossiers + A6D window analyses + A6E output), and
+    # A6B only has the A5 base. Enforcing them here would either compare
+    # ``int > None`` (deferred) or falsely claim the complete packet is
+    # verified. A6B measures the A5-derived global-index base (bound into the
+    # plan identity) and defers the complete gate to pre-A6E / pre-A6F.
 
     event_ids = tuple(e.event_id for e in stream)
     plan_hash = compute_plan_hash(

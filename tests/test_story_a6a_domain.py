@@ -57,7 +57,14 @@ def test_profile_round_trip_hash_schema_and_a2_a6_profile_boundaries():
     a2_profile = ChunkPlanningProfile.from_dict(yaml.safe_load(a2_bytes))
     assert a2_profile.profile_id == "story-analysis-v1"
     assert a2_profile_path.read_bytes() == a2_bytes
-    assert not (REPO_ROOT / "profiles/global_story_analysis_v1.yaml").exists()
+    # A6B (issue #87) ships the DISTINCT global story-analysis profile (its
+    # identity + planning policy are pinned separately by the A6B tests).
+    a6b_profile_path = REPO_ROOT / "profiles/global_story_analysis_v1.yaml"
+    a6b_bytes = a6b_profile_path.read_bytes()
+    a6b_profile = StoryAnalysisProfile.from_dict(yaml.safe_load(a6b_bytes))
+    assert a6b_profile.profile_id == "global-story-analysis-v1"
+    assert a6b_profile.profile_id != a2_profile.profile_id
+    assert a6b_profile_path.read_bytes() == a6b_bytes
     with pytest.raises(StoryAnalysisModelError): StoryAnalysisProfile.from_dict({**profile.to_dict(), "base_url": "x"})
     assert STORY_ANALYSIS_MAX_GENERATION_ROUNDS_V1 == 2
     for rounds in (1, 3):

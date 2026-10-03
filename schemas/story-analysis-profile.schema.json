@@ -84,11 +84,11 @@
           "minimum": 0
         },
         "global_skeleton_packet_max_estimated_tokens": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1
         },
         "story_bible_packet_max_estimated_tokens": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1
         }
       }

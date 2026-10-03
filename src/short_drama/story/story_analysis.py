@@ -75,9 +75,14 @@ class StoryAnalysisSemanticPass:
 
 @dataclass(frozen=True, slots=True)
 class StoryAnalysisPlanningPolicy:
-    character_packet_max_estimated_tokens: int; plot_window_packet_max_estimated_tokens: int; plot_window_owned_event_target: int; plot_window_context_event_count: int; global_skeleton_packet_max_estimated_tokens: int; story_bible_packet_max_estimated_tokens: int
+    character_packet_max_estimated_tokens: int; plot_window_packet_max_estimated_tokens: int; plot_window_owned_event_target: int; plot_window_context_event_count: int; global_skeleton_packet_max_estimated_tokens: int | None; story_bible_packet_max_estimated_tokens: int | None
     def __post_init__(self):
-        for n in self.__dataclass_fields__: _pos(getattr(self,n),n,zero=n=="plot_window_context_event_count")
+        for n in ("character_packet_max_estimated_tokens","plot_window_packet_max_estimated_tokens","plot_window_owned_event_target"):
+            _pos(getattr(self,n),n)
+        _pos(self.plot_window_context_event_count,"plot_window_context_event_count",zero=True)
+        for n in ("global_skeleton_packet_max_estimated_tokens","story_bible_packet_max_estimated_tokens"):
+            v=getattr(self,n)
+            if v is not None: _pos(v,n)
     def to_dict(self): return {n:getattr(self,n) for n in self.__dataclass_fields__}
     @classmethod
     def from_dict(cls,v): return cls(**_keys(v,set(cls.__dataclass_fields__),cls.__name__))

@@ -26,7 +26,7 @@ from short_drama.story.chunking import ChunkPlanningProfile
 
 def _profile():
     semantic = StoryAnalysisSemanticPass("story-analysis-llm-v1", "a6.character-analysis", 1, "a6-character-analysis-output", 1)
-    return StoryAnalysisProfile(1, "story-analysis-v1", "zh-CN", "a6-character-v1", "a6-window-v1", "a6-skeleton-v1", "a6-bible-v1", 2, StoryAnalysisPlanningPolicy(1, 1, 1, 0, 1, 1), semantic, semantic, semantic, semantic)
+    return StoryAnalysisProfile(1, "story-analysis-v1", "zh-CN", "a6-character-v1", "a6-window-v1", "a6-skeleton-v1", "a6-bible-v1", 2, StoryAnalysisPlanningPolicy(1, 1, 1, 0, None, None), semantic, semantic, semantic, semantic)
 
 
 def _schema(name): return json.loads((SCHEMAS_DIR / name).read_text())
@@ -65,6 +65,30 @@ def test_profile_round_trip_hash_schema_and_a2_a6_profile_boundaries():
         with pytest.raises(StoryAnalysisModelError):
             StoryAnalysisProfile.from_dict(invalid)
         assert list(Draft202012Validator(_schema("story-analysis-profile.schema.json")).iter_errors(invalid))
+
+
+def test_planning_policy_stages_whole_story_ceilings():
+    deferred = StoryAnalysisPlanningPolicy(10, 20, 3, 1, None, None)
+    assert StoryAnalysisPlanningPolicy.from_dict(deferred.to_dict()) == deferred
+    assert list(Draft202012Validator(_schema("story-analysis-profile.schema.json")).iter_errors(_profile().to_dict())) == []
+
+    concrete = StoryAnalysisPlanningPolicy(10, 20, 3, 1, 30, 40)
+    assert StoryAnalysisPlanningPolicy.from_dict(concrete.to_dict()) == concrete
+
+    for field in (
+        "global_skeleton_packet_max_estimated_tokens",
+        "story_bible_packet_max_estimated_tokens",
+    ):
+        raw = deferred.to_dict()
+        raw[field] = 0
+        with pytest.raises(StoryAnalysisModelError):
+            StoryAnalysisPlanningPolicy.from_dict(raw)
+
+        profile_raw = _profile().to_dict()
+        profile_raw["planning_policy"][field] = 0
+        assert list(
+            Draft202012Validator(_schema("story-analysis-profile.schema.json")).iter_errors(profile_raw)
+        )
 
 
 def test_interpretation_closed_evidence_mode_and_namespace_round_trip():

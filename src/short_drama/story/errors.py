@@ -90,6 +90,18 @@ class StoryAnalysisModelError(StoryError):
     """A6A static Story Analysis domain/profile contract is invalid."""
 
 
+class StoryAnalysisPlanningError(StoryError):
+    """A6B deterministic Story Analysis planning invariant is violated.
+
+    This is the object-level planning error for A6B: a budget that the frozen
+    policy cannot satisfy (which must FAIL CLOSED rather than truncate), a
+    window ownership/coverage breach, or an unknown canonical ref encountered
+    while building a deterministic plan. It is deliberately distinct from the
+    A6A static-contract model error and from the A5 persistence/integrity
+    errors (which surface while resolving the exact A5 CURRENT snapshot).
+    """
+
+
 class ConsolidationSemanticError(StoryError):
     """A5C fact semantic ambiguity resolution failure.
 

@@ -58,8 +58,24 @@ from short_drama.story import (
     load_story_analysis_profile,
     ordered_event_stream,
     plan_plot_windows,
+    planning_policy_ids_from_profile,
     validate_window_ownership,
 )
+from short_drama.story.chunking import TOKEN_COUNTER_ID
+
+# The four versioned A6 planning policy IDs (bound into the plan hash, BLOCK 2).
+_POLICY_IDS = {
+    "character_analysis_policy_id": "a6-character-v1",
+    "plot_window_policy_id": "a6-window-v1",
+    "global_skeleton_policy_id": "a6-skeleton-v1",
+    "story_bible_policy_id": "a6-bible-v1",
+}
+
+
+def _plan(snap, policy):
+    """Build a plan with the default four versioned policy IDs + token counter."""
+    return build_story_analysis_plan(snap, policy, planning_policy_ids=_POLICY_IDS)
+
 
 _POLICY = StoryAnalysisPlanningPolicy(
     character_packet_max_estimated_tokens=100_000,
@@ -70,14 +86,16 @@ _POLICY = StoryAnalysisPlanningPolicy(
     story_bible_packet_max_estimated_tokens=100_000,
 )
 
-# The exact frozen planning policy measured by the A6B Alice audit.
+# The exact frozen planning policy measured by the A6B Alice audit. The two
+# whole-story ceilings are the A5-DERIVED BASE BOUND ONLY (BLOCK 1 sequencing
+# contradiction: the full semantic ceiling is deferred to A6C/A6D/A6E/A6G).
 _FROZEN_POLICY = {
-    "character_packet_max_estimated_tokens": 72_000,
-    "plot_window_packet_max_estimated_tokens": 58_000,
-    "plot_window_owned_event_target": 12,
-    "plot_window_context_event_count": 4,
-    "global_skeleton_packet_max_estimated_tokens": 160_000,
-    "story_bible_packet_max_estimated_tokens": 192_000,
+    "character_packet_max_estimated_tokens": 70_000,
+    "plot_window_packet_max_estimated_tokens": 46_000,
+    "plot_window_owned_event_target": 1,
+    "plot_window_context_event_count": 0,
+    "global_skeleton_packet_max_estimated_tokens": 114_000,
+    "story_bible_packet_max_estimated_tokens": 114_000,
 }
 
 _FORBIDDEN = (
@@ -338,8 +356,8 @@ def _sorted_stream(events: list[CanonicalEvent]) -> tuple[CanonicalEvent, ...]:
 
 def test_plan_hash_deterministic_and_backend_neutral(tmp_path: Path) -> None:
     _tree, _planning, _pub, snap = _snapshot(tmp_path)
-    plan1 = build_story_analysis_plan(snap, _POLICY)
-    plan2 = build_story_analysis_plan(snap, _POLICY)
+    plan1 = _plan(snap, _POLICY)
+    plan2 = _plan(snap, _POLICY)
     assert plan1.plan_hash == plan2.plan_hash
     assert re.fullmatch(r"[0-9a-f]{64}", plan1.plan_hash)
 
@@ -358,10 +376,10 @@ def test_plan_hash_deterministic_and_backend_neutral(tmp_path: Path) -> None:
 
 def test_plan_hash_binds_policy(tmp_path: Path) -> None:
     _tree, _planning, _pub, snap = _snapshot(tmp_path)
-    h_a = build_story_analysis_plan(
+    h_a = _plan(
         snap, StoryAnalysisPlanningPolicy(100_000, 100_000, 2, 1, 100_000, 100_000)
     ).plan_hash
-    h_b = build_story_analysis_plan(
+    h_b = _plan(
         snap, StoryAnalysisPlanningPolicy(100_000, 100_000, 3, 1, 100_000, 100_000)
     ).plan_hash
     assert h_a != h_b
@@ -385,24 +403,24 @@ def test_budget_overflow_fails_closed_not_truncated(tmp_path: Path) -> None:
 
     # Character budget smaller than the real (non-trivial) character package.
     with pytest.raises(StoryAnalysisPlanningError, match="refusing to truncate"):
-        build_story_analysis_plan(
+        _plan(
             snap,
             StoryAnalysisPlanningPolicy(1, 100_000, 1, 0, 100_000, 100_000),
         )
     # Window budget smaller than the real window packet.
     with pytest.raises(StoryAnalysisPlanningError, match="refusing to truncate"):
-        build_story_analysis_plan(
+        _plan(
             snap,
             StoryAnalysisPlanningPolicy(100_000, 1, 1, 0, 100_000, 100_000),
         )
     # Global-skeleton budget smaller than the real A5-derived index base.
     with pytest.raises(StoryAnalysisPlanningError, match="refusing to truncate"):
-        build_story_analysis_plan(
+        _plan(
             snap,
             StoryAnalysisPlanningPolicy(100_000, 100_000, 1, 0, 1, 100_000),
         )
     # A passing budget yields a full plan (no truncation of coverage).
-    plan = build_story_analysis_plan(snap, _POLICY)
+    plan = _plan(snap, _POLICY)
     assert len(plan.character_packages) == len(snap.canonical_characters)
     assert list(plan.event_stream) == [e.event_id for e in snap.events]
 
@@ -452,3 +470,202 @@ def test_production_profile_identity_is_stable() -> None:
     h = profile.content_hash()
     assert re.fullmatch(r"[0-9a-f]{64}", h)
     assert h == load_story_analysis_profile(REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml").content_hash()
+
+
+# --- BLOCK 2: the plan identity binds the versioned policy IDs + token counter
+
+def test_plan_hash_binds_policy_ids(tmp_path: Path) -> None:
+    """BLOCK 2: changing a versioned policy ID changes the plan hash."""
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    h_a = build_story_analysis_plan(
+        snap, _POLICY, planning_policy_ids=dict(_POLICY_IDS)
+    ).plan_hash
+    h_b = build_story_analysis_plan(
+        snap, _POLICY,
+        planning_policy_ids={**_POLICY_IDS, "character_analysis_policy_id": "a6-character-v2"},
+    ).plan_hash
+    assert h_a != h_b
+    # The plan identity payload binds the four versioned policy IDs.
+    plan = build_story_analysis_plan(snap, _POLICY, planning_policy_ids=dict(_POLICY_IDS))
+    payload = plan.plan_identity_payload()
+    assert payload["planning_policy_ids"] == dict(_POLICY_IDS)
+    assert set(payload["planning_policy_ids"].keys()) == set(_POLICY_IDS.keys())
+
+
+def test_plan_hash_binds_token_counter_id(tmp_path: Path) -> None:
+    """BLOCK 2: changing the token-counter ID changes the plan hash."""
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    h_a = build_story_analysis_plan(
+        snap, _POLICY,
+        planning_policy_ids=dict(_POLICY_IDS),
+        token_counter_id=TOKEN_COUNTER_ID,
+    ).plan_hash
+    h_b = build_story_analysis_plan(
+        snap, _POLICY,
+        planning_policy_ids=dict(_POLICY_IDS),
+        token_counter_id="utf8-bytes-div3-v2",
+    ).plan_hash
+    assert h_a != h_b
+    plan = build_story_analysis_plan(
+        snap, _POLICY, planning_policy_ids=dict(_POLICY_IDS)
+    )
+    assert plan.token_counter_id == TOKEN_COUNTER_ID
+    assert plan.plan_identity_payload()["token_counter_id"] == TOKEN_COUNTER_ID
+
+
+def test_policy_ids_validation_fail_closed(tmp_path: Path) -> None:
+    """BLOCK 2: the four versioned policy IDs are validated (fail closed)."""
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    # Missing a policy ID.
+    with pytest.raises(StoryAnalysisPlanningError, match="four versioned policy"):
+        build_story_analysis_plan(
+            snap, _POLICY,
+            planning_policy_ids={k: v for k, v in _POLICY_IDS.items() if k != "story_bible_policy_id"},
+        )
+    # An extra (unknown) key.
+    with pytest.raises(StoryAnalysisPlanningError, match="four versioned policy"):
+        build_story_analysis_plan(
+            snap, _POLICY, planning_policy_ids={**_POLICY_IDS, "extra_policy_id": "x"}
+        )
+    # An empty value.
+    with pytest.raises(StoryAnalysisPlanningError, match="non-empty string"):
+        build_story_analysis_plan(
+            snap, _POLICY,
+            planning_policy_ids={**_POLICY_IDS, "story_bible_policy_id": ""},
+        )
+
+
+def test_planning_policy_ids_from_profile(tmp_path: Path) -> None:
+    """BLOCK 2: the four versioned policy IDs are extracted from the profile."""
+    profile = load_story_analysis_profile(
+        REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
+    )
+    assert planning_policy_ids_from_profile(profile) == _POLICY_IDS
+
+
+# --- BLOCK 3: the audit is zero-write (before/after runs-tree equality) ------
+
+def _load_audit_module():
+    import importlib.util
+    path = REPO_ROOT / "scripts" / "a6b_alice_zero_provider_audit.py"
+    spec = importlib.util.spec_from_file_location("a6b_audit_module", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_audit_zero_write() -> None:
+    """BLOCK 3 regression: the audit does NOT mutate the story runs tree.
+
+    Runs the full zero-provider audit against the real Alice corpus and asserts
+    the before/after SHA-256 snapshot of the story runs tree is exactly equal.
+    """
+    audit = _load_audit_module()
+    store, pointers = audit._stores(audit.DEFAULT_RUNS_ROOT, audit.DEFAULT_PROJECT)
+    before = audit._snapshot_runs_tree(audit.DEFAULT_RUNS_ROOT, audit.DEFAULT_PROJECT)
+    report, all_pass = audit.run_audit(
+        store,
+        pointers,
+        project_id=audit.DEFAULT_PROJECT,
+        document_id=audit.DEFAULT_DOCUMENT,
+        consolidation_profile_id=audit.DEFAULT_CONSOLIDATION_PROFILE,
+    )
+    after = audit._snapshot_runs_tree(audit.DEFAULT_RUNS_ROOT, audit.DEFAULT_PROJECT)
+    assert before == after, "audit mutated the story runs tree (not zero-write)"
+    assert report["zero_write"] is True
+    assert report["result"] == "PASS"
+    assert all_pass
+
+
+def test_audit_refuses_report_inside_runs_tree(tmp_path: Path) -> None:
+    """BLOCK 3: a report path inside the story runs tree is refused (exit 2)."""
+    audit = _load_audit_module()
+    bad_report = audit.DEFAULT_RUNS_ROOT / audit.DEFAULT_PROJECT / "story" / "bad.json"
+    rc = audit.main(
+        [
+            "--report", str(bad_report),
+            "--runs-root", str(audit.DEFAULT_RUNS_ROOT),
+            "--project", audit.DEFAULT_PROJECT,
+        ]
+    )
+    assert rc == 2
+    assert not bad_report.exists()
+
+
+# --- BLOCK 4: corpus-derived candidate space + deterministic selection -------
+
+def test_window_candidate_space_is_corpus_derived() -> None:
+    """BLOCK 4: the candidate space is generated from the event universe."""
+    audit = _load_audit_module()
+    space = audit._window_candidate_space(166)
+    # owned target 1..166 (exhaustive) x context 0..max(1, 166 // 10) = 0..16.
+    assert len(space) == 166 * 17
+    assert {t for t, _ in space} == set(range(1, 167))
+    assert {c for _, c in space} == set(range(0, 17))
+    # A smaller corpus: owned 1..5 x context 0..max(1, 5 // 10) = 0..1.
+    space_small = audit._window_candidate_space(5)
+    assert len(space_small) == 5 * 2
+    assert {t for t, _ in space_small} == {1, 2, 3, 4, 5}
+    assert {c for _, c in space_small} == {0, 1}
+    # Empty corpus -> empty space.
+    assert audit._window_candidate_space(0) == []
+
+
+def test_window_policy_selection_is_deterministic() -> None:
+    """BLOCK 4: the selection objective is an explicit deterministic min."""
+    audit = _load_audit_module()
+    sweep = [
+        {"max_window_packet_estimated_tokens": 100, "window_count": 5, "overlap_cost_tokens": 10},
+        {"max_window_packet_estimated_tokens": 80, "window_count": 10, "overlap_cost_tokens": 5},
+        {"max_window_packet_estimated_tokens": 80, "window_count": 4, "overlap_cost_tokens": 5},
+        {"max_window_packet_estimated_tokens": 80, "window_count": 4, "overlap_cost_tokens": 3},
+    ]
+    selected = audit._select_frozen_window_policy(sweep)
+    # The lexicographic min of (max_packet, window_count, overlap) is the last.
+    assert selected == sweep[3]
+    # Deterministic: re-running gives the same result.
+    assert audit._select_frozen_window_policy(sweep) == selected
+    # Empty sweep fails closed.
+    with pytest.raises(ValueError):
+        audit._select_frozen_window_policy([])
+
+
+# --- BLOCK 5: exact typed-leaf serialization --------------------------------
+
+def test_leaf_bytes_measures_exact_typed_leaf(tmp_path: Path) -> None:
+    """BLOCK 5: the leaf measurement serializes the exact typed leaf's to_dict()."""
+    audit = _load_audit_module()
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    from short_drama.story.story_analysis_planning import _canonical_bytes
+
+    leaf = snap.canonical_fact_set
+    leaf_dict = leaf.to_dict()
+    assert "schema_version" in leaf_dict
+    # The measured leaf bytes == the canonical bytes of the typed leaf's to_dict().
+    assert audit._leaf_bytes(leaf) == len(_canonical_bytes(leaf_dict))
+    # It is NOT the raw array of children (which lacks the schema_version +
+    # the set-level fields such as state_transitions).
+    raw_array_bytes = len(_canonical_bytes([f.to_dict() for f in leaf.facts]))
+    assert audit._leaf_bytes(leaf) != raw_array_bytes
+
+
+# --- owned/context overlap invariant (additional) ---------------------------
+
+def test_validate_window_ownership_rejects_owned_context_overlap() -> None:
+    """The owned∩context overlap invariant fails closed (additional invariant).
+
+    A window that lists the same event in both ``owned_event_ids`` and
+    ``context_event_ids`` is a planning bug and must raise.
+    """
+    from short_drama.story.story_analysis_planning import PlotWindowPlan
+    windows = (
+        PlotWindowPlan(
+            window_id="win_a",
+            window_ordinal=1,
+            owned_event_ids=("evt_000001", "evt_000002"),
+            context_event_ids=("evt_000002",),
+        ),
+    )
+    all_ids = frozenset({"evt_000001", "evt_000002"})
+    with pytest.raises(StoryAnalysisPlanningError, match="both owned and context"):
+        validate_window_ownership(windows, all_ids)

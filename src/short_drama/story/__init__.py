@@ -43,6 +43,9 @@ from .errors import (
     StoryPersistenceError,
     StoryAnalysisModelError,
     StoryAnalysisPlanningError,
+    StoryAnalysisProvenanceError,
+    StoryAnalysisSemanticError,
+    StoryAnalysisSemanticGenerationError,
 )
 from .story_analysis import (
     A6SemanticIdentity, A6UpstreamIdentity, ArcAnalysis, CharacterAnalysis,
@@ -61,6 +64,15 @@ from .story_analysis_planning import (
     build_story_analysis_plan_from_profile, build_story_analysis_snapshot,
     build_window_packet, build_window_packets, compute_plan_hash, ordered_event_stream,
     plan_plot_windows, planning_policy_ids_from_profile, validate_window_ownership,
+)
+from .story_analysis_semantic import (
+    A6C_CHARACTER_OUTPUT_SCHEMA_ID, A6C_CHARACTER_OUTPUT_SCHEMA_VERSION,
+    A6C_CHARACTER_PROMPT_ID, A6C_CHARACTER_PROMPT_VERSION, A6C_MAX_GENERATION_ROUNDS,
+    A6C_SEMANTIC_PROFILE_ID, CharacterSemanticPreparation, CharacterSemanticResult,
+    build_character_semantic_preparation, character_request_identity_hash,
+    load_character_output_schema, load_character_semantic_assets,
+    load_character_semantic_profile, resolve_character_analysis,
+    validate_character_coverage, validate_character_evidence,
 )
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
@@ -985,6 +997,9 @@ __all__ = [
     "StoryAnalysisCoverageSummary",
     "StoryAnalysisManifest",
     "StoryAnalysisPlanningError",
+    "StoryAnalysisSemanticError",
+    "StoryAnalysisProvenanceError",
+    "StoryAnalysisSemanticGenerationError",
     "StoryAnalysisInputSnapshot",
     "CharacterEvidencePackage",
     "PlotWindowPlan",
@@ -1004,4 +1019,20 @@ __all__ = [
     "build_story_analysis_plan_from_profile",
     "compute_plan_hash",
     "planning_policy_ids_from_profile",
+    "A6C_CHARACTER_PROMPT_ID",
+    "A6C_CHARACTER_PROMPT_VERSION",
+    "A6C_CHARACTER_OUTPUT_SCHEMA_ID",
+    "A6C_CHARACTER_OUTPUT_SCHEMA_VERSION",
+    "A6C_SEMANTIC_PROFILE_ID",
+    "A6C_MAX_GENERATION_ROUNDS",
+    "CharacterSemanticPreparation",
+    "CharacterSemanticResult",
+    "build_character_semantic_preparation",
+    "character_request_identity_hash",
+    "load_character_semantic_profile",
+    "load_character_output_schema",
+    "load_character_semantic_assets",
+    "resolve_character_analysis",
+    "validate_character_coverage",
+    "validate_character_evidence",
 ]

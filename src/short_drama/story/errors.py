@@ -102,6 +102,71 @@ class StoryAnalysisPlanningError(StoryError):
     """
 
 
+class StoryAnalysisSemanticError(StoryError):
+    """Base error for A6C character analysis semantic-pass failures.
+
+    A6C executes the frozen A6C ``character_analysis`` semantic pass (prompt
+    ``a6.character-analysis`` v1, output schema
+    ``a6-character-analysis-output``, semantic profile ``story-analysis-llm-v1``)
+    over the complete ordered A6B planned character evidence universe, and
+    produces a complete in-memory :class:`~short_drama.story.CharacterAnalysisSet`.
+
+    These are the A6 semantic-layer failure boundaries: provenance mismatch
+    (fail closed, no semantic retry), semantic regeneration exhaustion (the
+    two bounded A6C rounds both produced a schema-valid but semantically
+    invalid result), and complete-character-coverage mismatch. Technical LLM
+    failures (transport/HTTP/timeout, malformed JSON, and schema-invalid
+    output) remain owned by A-I3 (``short_drama.llm``) and are never
+    translated into A6C semantic errors.
+    """
+
+
+class StoryAnalysisProvenanceError(StoryAnalysisSemanticError):
+    """A6C provenance verification failed; fail closed, no semantic retry.
+
+    The provider boundary returned a result whose backend-neutral
+    semantic/request identity does not match the exact character request
+    identity (semantic profile, prompt, rendered prompt, output schema, or
+    request hash). A6C must never accept such a result and must never route it
+    into a semantic regeneration round.
+    """
+
+
+class StoryAnalysisSemanticGenerationError(StoryAnalysisSemanticError):
+    """A6C semantic regeneration exhausted after max_generation_rounds (2).
+
+    All permitted A6C semantic generation rounds for a single character
+    produced schema-valid provider results that were rejected by typed load /
+    exact evidence-ref validation; a CharacterAnalysis for that character could
+    not be produced. A6C is in-memory only, so no partial character analysis is
+    published. This is a *semantic* failure, not a transport error: the
+    underlying A-I3 provider calls all succeeded.
+
+    Carries deterministic diagnostics for tests/review: the affected
+    ``character_ref``, the backend-neutral ``request_hash``, the number of
+    semantic rounds attempted, and the bounded failure details from the final
+    failed round.
+    """
+
+    def __init__(
+        self,
+        *,
+        character_ref: str,
+        request_hash: str,
+        rounds_attempted: int,
+        last_failure_details: tuple[str, ...],
+    ) -> None:
+        self.character_ref = character_ref
+        self.request_hash = request_hash
+        self.rounds_attempted = rounds_attempted
+        self.last_failure_details = last_failure_details
+        super().__init__(
+            f"A6C character analysis for {character_ref!r} failed after "
+            f"{rounds_attempted} semantic generation round(s): "
+            f"{'; '.join(last_failure_details)}"
+        )
+
+
 class ConsolidationSemanticError(StoryError):
     """A5C fact semantic ambiguity resolution failure.
 

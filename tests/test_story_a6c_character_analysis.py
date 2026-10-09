@@ -64,6 +64,7 @@ from short_drama.story import (
     StoryAnalysisProvenanceError,
     StoryAnalysisSemanticError,
     StoryAnalysisSemanticGenerationError,
+    StoryIntegrityError,
     a5_pointer_id,
     build_story_analysis_plan_from_profile,
     build_story_analysis_snapshot,
@@ -79,8 +80,59 @@ from short_drama.story import (
     A6C_CHARACTER_PROMPT_ID,
     A6C_SEMANTIC_PROFILE_ID,
 )
+import short_drama.story.story_analysis_semantic as a6c
 from short_drama.foundation import PointerKind
 from short_drama.paths import REPO_ROOT
+
+
+# ---------------------------------------------------------------------------
+# Asset-loading error boundary: missing/invalid schema raises the INTENDED
+# exception (StoryIntegrityError), not a NameError from an unbound name.
+# ---------------------------------------------------------------------------
+
+
+def test_schema_load_missing_file_raises_integrity_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A missing (or unreadable) schema file is an asset-integrity failure.
+    monkeypatch.setattr(a6c, "A6C_CHARACTER_OUTPUT_SCHEMA_PATH", Path("/nonexistent/a6c-schema.json"))
+    with pytest.raises(StoryIntegrityError) as exc_info:
+        load_character_output_schema()
+    # The intended exception is raised -- NOT a NameError from a missing import.
+    assert not isinstance(exc_info.value, NameError)
+    assert "failed to load character analysis output schema" in str(exc_info.value)
+
+
+def test_schema_load_non_object_json_raises_integrity_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A schema file whose top-level JSON is NOT an object is an asset-integrity
+    # failure (the A6C schema must be a JSON object).
+    bad = tmp_path / "a6c-schema-bad.json"
+    bad.write_text("[1, 2, 3]", encoding="utf-8")  # valid JSON, but a list
+    monkeypatch.setattr(a6c, "A6C_CHARACTER_OUTPUT_SCHEMA_PATH", bad)
+    with pytest.raises(StoryIntegrityError) as exc_info:
+        load_character_output_schema()
+    assert not isinstance(exc_info.value, NameError)
+    assert "must be a JSON object" in str(exc_info.value)
+
+
+def test_schema_load_invalid_json_raises_integrity_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A schema file containing malformed JSON is an asset-integrity failure.
+    bad = tmp_path / "a6c-schema-bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(a6c, "A6C_CHARACTER_OUTPUT_SCHEMA_PATH", bad)
+    with pytest.raises(StoryIntegrityError):
+        load_character_output_schema()
+
+
+def test_schema_load_valid_object_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A well-formed schema object still loads successfully (sanity: the new
+    # failure paths do not shadow the success path).
+    good = tmp_path / "a6c-schema-good.json"
+    # Reuse the real schema file's content as a known-valid object.
+    import short_drama.paths as _paths
+    real = (_paths.SCHEMAS_DIR / "a6-character-analysis-output.schema.json").read_text(encoding="utf-8")
+    good.write_text(real, encoding="utf-8")
+    monkeypatch.setattr(a6c, "A6C_CHARACTER_OUTPUT_SCHEMA_PATH", good)
+    schema = load_character_output_schema()
+    assert schema.schema_id == A6C_CHARACTER_OUTPUT_SCHEMA_ID
 
 
 # ---------------------------------------------------------------------------
@@ -879,10 +931,18 @@ def test_real_provider_smoke(tmp_path: Path) -> None:
     schema output + typed parsing + provenance verification + exact
     supporting-ref validation, end to end against a live local Qwen server.
 
-    A schema-valid-but-semantically-invalid output (refs outside the character's
-    own evidence universe) is a legitimate A6C semantic outcome: A6C fails
-    closed with ``StoryAnalysisSemanticGenerationError`` after two rounds. That
-    still proves the real provider path worked (no technical LLM failure).
+    PASS contract (strict): the smoke passes ONLY if
+      * the real provider returns valid structured output (no technical LLM
+        failure from request rendering / JSON parsing / schema validation);
+      * typed ``CharacterAnalysis`` parsing succeeds;
+      * every supporting ref passes exact local-universe validation; and
+      * every requested character is accounted for (one per canonical planned
+        character, in order).
+
+    Semantic generation exhaustion (a schema-valid but semantically-invalid
+    result on both bounded rounds) and any other failure must FAIL the smoke --
+    it is never a silent pass. (The independent fake-provider tests verify the
+    correct fail-closed behavior after two semantic rounds.)
     """
     from short_drama.llm import (
         OpenAICompatibleLLMClient,
@@ -898,28 +958,24 @@ def test_real_provider_smoke(tmp_path: Path) -> None:
     runtime_config = load_runtime_config(REPO_ROOT / "profiles" / "llm_local.yaml")
     client = OpenAICompatibleLLMClient(runtime_config)
 
-    try:
-        result = resolve_character_analysis(
-            plan, profile, semantic_profile, client, prompts=prompts
-        )
-    except StoryAnalysisSemanticGenerationError as exc:
-        # Semantic rejection (model refs outside the universe): the real
-        # provider path worked end to end; A6C failed closed correctly.
-        print(
-            f"\n[smoke] semantic rejection: character={exc.character_ref} "
-            f"rounds={exc.rounds_attempted} details={exc.last_failure_details}"
-        )
-        return
+    # PASS requires a full success: a complete, valid in-memory
+    # CharacterAnalysisSet. A technical LLM failure, typed-load failure, or
+    # semantic generation exhaustion propagates and FAILS the smoke.
+    result = resolve_character_analysis(
+        plan, profile, semantic_profile, client, prompts=prompts
+    )
 
-    # Success: complete in-memory set, every ref in the character's own evidence
-    # universe, and no persistence / CURRENT mutation.
-    assert len(result.character_analysis_set.analyses) == len(plan.character_packages)
-    assert [a.character_ref for a in result.analyses] == [
-        p.character_ref for p in plan.character_packages
-    ]
+    # Every requested character is accounted for, exactly once, in canonical
+    # order (100% coverage).
+    planned_refs = [p.character_ref for p in plan.character_packages]
+    assert [a.character_ref for a in result.analyses] == planned_refs
+    assert len(result.character_analysis_set.analyses) == len(planned_refs)
+    # Typed parsing succeeded (each is a typed CharacterAnalysis) and every
+    # supporting ref belongs to that character's own local evidence universe.
     for analysis, package in zip(result.analyses, plan.character_packages):
+        assert isinstance(analysis, CharacterAnalysis)
         assert validate_character_evidence(analysis, package) is None
     print(
-        f"\n[smoke] SUCCESS: {len(plan.character_packages)} characters, "
+        f"\n[smoke] PASS: {len(planned_refs)} characters, "
         f"rounds={dict(result.character_rounds)}"
     )

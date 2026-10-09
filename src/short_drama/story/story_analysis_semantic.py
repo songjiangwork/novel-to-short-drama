@@ -75,6 +75,7 @@ from .errors import (
     StoryAnalysisProvenanceError,
     StoryAnalysisSemanticError,
     StoryAnalysisSemanticGenerationError,
+    StoryIntegrityError,
 )
 from .story_analysis import (
     CharacterAnalysis,

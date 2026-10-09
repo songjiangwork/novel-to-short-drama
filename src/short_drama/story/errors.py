@@ -167,6 +167,42 @@ class StoryAnalysisSemanticGenerationError(StoryAnalysisSemanticError):
         )
 
 
+class StoryAnalysisWindowSemanticGenerationError(StoryAnalysisSemanticError):
+    """A6D plot-window semantic regeneration exhausted after max_generation_rounds (2).
+
+    All permitted A6D semantic generation rounds for a single plot window
+    produced schema-valid provider results that were rejected by typed load /
+    exact local-evidence-ref validation; a :class:`~short_drama.story.
+    PlotWindowAnalysis` for that window could not be produced. A6D is in-memory
+    only, so no partial plot-window result set is published. This is a
+    *semantic* failure, not a transport error: the underlying A-I3 provider
+    calls all succeeded.
+
+    Carries deterministic diagnostics for tests/review: the affected
+    ``window_id``, the backend-neutral ``request_hash``, the number of semantic
+    rounds attempted, and the bounded failure details from the final failed
+    round.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_id: str,
+        request_hash: str,
+        rounds_attempted: int,
+        last_failure_details: tuple[str, ...],
+    ) -> None:
+        self.window_id = window_id
+        self.request_hash = request_hash
+        self.rounds_attempted = rounds_attempted
+        self.last_failure_details = last_failure_details
+        super().__init__(
+            f"A6D plot-window analysis for {window_id!r} failed after "
+            f"{rounds_attempted} semantic generation round(s): "
+            f"{'; '.join(last_failure_details)}"
+        )
+
+
 class ConsolidationSemanticError(StoryError):
     """A5C fact semantic ambiguity resolution failure.
 

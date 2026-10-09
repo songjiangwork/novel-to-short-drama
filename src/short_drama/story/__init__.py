@@ -46,6 +46,7 @@ from .errors import (
     StoryAnalysisProvenanceError,
     StoryAnalysisSemanticError,
     StoryAnalysisSemanticGenerationError,
+    StoryAnalysisWindowSemanticGenerationError,
 )
 from .story_analysis import (
     A6SemanticIdentity, A6UpstreamIdentity, ArcAnalysis, CharacterAnalysis,
@@ -73,6 +74,16 @@ from .story_analysis_semantic import (
     load_character_output_schema, load_character_semantic_assets,
     load_character_semantic_profile, resolve_character_analysis,
     validate_character_coverage, validate_character_evidence,
+)
+from .story_analysis_window_semantic import (
+    A6D_MAX_GENERATION_ROUNDS, A6D_SEMANTIC_PROFILE_ID,
+    A6D_WINDOW_OUTPUT_SCHEMA_ID, A6D_WINDOW_OUTPUT_SCHEMA_VERSION,
+    A6D_WINDOW_PROMPT_ID, A6D_WINDOW_PROMPT_VERSION,
+    PlotWindowSemanticPreparation, PlotWindowSemanticResult,
+    build_plot_window_semantic_preparation, load_window_output_schema,
+    load_window_semantic_assets, load_window_semantic_profile,
+    resolve_plot_window_analysis, validate_plot_window_coverage,
+    validate_plot_window_evidence, window_request_identity_hash,
 )
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
@@ -1000,6 +1011,7 @@ __all__ = [
     "StoryAnalysisSemanticError",
     "StoryAnalysisProvenanceError",
     "StoryAnalysisSemanticGenerationError",
+    "StoryAnalysisWindowSemanticGenerationError",
     "StoryAnalysisInputSnapshot",
     "CharacterEvidencePackage",
     "PlotWindowPlan",
@@ -1035,4 +1047,21 @@ __all__ = [
     "resolve_character_analysis",
     "validate_character_coverage",
     "validate_character_evidence",
+    "A6D_WINDOW_PROMPT_ID",
+    "A6D_WINDOW_PROMPT_VERSION",
+    "A6D_WINDOW_OUTPUT_SCHEMA_ID",
+    "A6D_WINDOW_OUTPUT_SCHEMA_VERSION",
+    "A6D_SEMANTIC_PROFILE_ID",
+    "A6D_MAX_GENERATION_ROUNDS",
+    "PlotWindowSemanticPreparation",
+    "PlotWindowSemanticResult",
+    "build_plot_window_semantic_preparation",
+    "window_request_identity_hash",
+    "load_window_semantic_profile",
+    "load_window_output_schema",
+    "load_window_semantic_assets",
+    "resolve_plot_window_analysis",
+    "validate_plot_window_coverage",
+    "validate_plot_window_evidence",
+    "StoryAnalysisWindowSemanticGenerationError",
 ]

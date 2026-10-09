@@ -557,6 +557,43 @@ def test_frozen_a6d_identity_constants() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Robustness: snapshot / plan exact A5 manifest identity consistency.
+# ---------------------------------------------------------------------------
+
+
+def test_mismatched_snapshot_plan_manifest_ref_fails_closed() -> None:
+    """A snapshot and plan that name different exact A5 ConsolidationManifests
+    must fail closed before packet construction / provider execution, even when
+    their canonical event IDs are otherwise compatible.
+    """
+    snap = _build_snapshot()
+    plan = _plan(snap)
+    # Sanity: a consistent snapshot/plan pair prepares fine.
+    assert _prep(snap, plan).window_ids
+    # Otherwise-compatible event IDs, but a different exact A5 upstream ref.
+    base = plan.consolidation_manifest_ref
+    mismatched_ref = ArtifactRef(
+        artifact_type=base.artifact_type,
+        artifact_id=base.artifact_id,
+        revision=base.revision,
+        content_hash="f" * 64,
+    )
+    assert mismatched_ref != base
+    mismatched_snapshot = dataclasses.replace(
+        snap, consolidation_manifest_ref=mismatched_ref
+    )
+    # The preparation path fails closed before packet construction.
+    with pytest.raises(StoryAnalysisSemanticError, match="consolidation manifest"):
+        _prep(mismatched_snapshot, plan)
+    # The full path (preparation + execution) fails closed with zero provider
+    # calls: the mismatch is detected before any window is sent.
+    client = FakeLLMClient([])
+    with pytest.raises(StoryAnalysisSemanticError, match="consolidation manifest"):
+        _resolve(mismatched_snapshot, plan, client)
+    assert client.call_count == 0
+
+
+# ---------------------------------------------------------------------------
 # A. Deterministic same-input same-request
 # ---------------------------------------------------------------------------
 

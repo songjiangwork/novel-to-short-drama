@@ -274,6 +274,29 @@ def _verify_window_profile(
         )
 
 
+def _verify_snapshot_plan_manifest_identity(
+    snapshot: StoryAnalysisInputSnapshot, plan: StoryAnalysisPlan
+) -> None:
+    """Fail closed if the A5 snapshot and the A6B plan do not refer to the same
+    exact A5 ConsolidationManifest.
+
+    A6D joins evidence from the snapshot's canonical event stream while binding
+    the plan's consolidation manifest ref into the stable request identity. If
+    the two inputs name different exact A5 upstreams, the semantic requests
+    would claim one A5 identity while consuming evidence from another, so A6D
+    must fail closed before any packet construction or provider execution.
+    """
+    if snapshot.consolidation_manifest_ref != plan.consolidation_manifest_ref:
+        raise StoryAnalysisSemanticError(
+            "story-analysis input snapshot and plan disagree on the exact A5 "
+            "consolidation manifest identity (snapshot "
+            f"{snapshot.consolidation_manifest_ref!r} != plan "
+            f"{plan.consolidation_manifest_ref!r}); A6D plot-window semantic "
+            "analysis must consume one consistent exact A5 upstream and "
+            "refuses to join evidence from a mismatched pair"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Stable request identity (backend-neutral).
 # ---------------------------------------------------------------------------
@@ -365,6 +388,7 @@ def build_plot_window_semantic_preparation(
     packet budget.
     """
     _verify_window_profile(profile, semantic_profile)
+    _verify_snapshot_plan_manifest_identity(snapshot, plan)
 
     # Validate the complete window plan BEFORE any provider call (fail closed):
     # exact-one owned-event ownership over the complete canonical event

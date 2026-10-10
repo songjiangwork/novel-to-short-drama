@@ -166,14 +166,22 @@ def validate_global_skeleton_coverage(
 
     Invariants (frozen A6 sections 9 / 16 / 19 / 23):
       * every canonical planned character -> exactly one CharacterAnalysis, no
-        missing / duplicate / extra character refs;
+        missing / duplicate / extra character refs, AND in the exact ordered
+        ``plan.character_packages`` order;
       * every planned window -> exactly one PlotWindowAnalysis, in canonical
-        planned order, with matching window id / ordinal; no omission of later
-        windows and no extra / duplicate windows;
-      * the packet's character / window sets exactly match the authoritative A6B
-        plan (so the whole-story representation is complete and ordered).
+        planned order, with matching window id / ordinal AND exact
+        ``owned_event_refs`` / ``context_event_refs`` equality against the
+        corresponding ``PlotWindowPlan``; no omission of later windows and no
+        extra / duplicate windows;
+      * the packet's ``global_index`` is byte-identical to the authoritative
+        A6B ``plan.global_index`` (matching canonical content hash);
+      * the packet's character / window sets exactly match the authoritative
+        A6B plan (so the whole-story representation is complete, ordered, and
+        bound to the same deterministic global index).
     """
+    # --- characters: complete + exact ordered membership ------------------
     expected_chars = frozenset(p.character_ref for p in plan.character_packages)
+    expected_char_refs = [p.character_ref for p in plan.character_packages]
     char_refs = [a.character_ref for a in context.character_analyses]
     seen_chars: set[str] = set()
     for ref in char_refs:
@@ -193,7 +201,13 @@ def validate_global_skeleton_coverage(
             f"global-skeleton packet has extra/unknown character analyses: "
             f"{extra_chars!r}"
         )
+    if char_refs != expected_char_refs:
+        raise StoryAnalysisSemanticError(
+            "global-skeleton packet character analyses are not in the exact "
+            "ordered plan.character_packages order"
+        )
 
+    # --- windows: complete + exact ordered membership ---------------------
     expected_windows = list(plan.windows)
     window_analyses = list(context.plot_window_analyses)
     if len(window_analyses) != len(expected_windows):
@@ -213,6 +227,23 @@ def validate_global_skeleton_coverage(
                 f"{analysis.window_id!r}: {analysis.window_ordinal} != "
                 f"{window.window_ordinal}"
             )
+        if tuple(analysis.owned_event_refs) != tuple(window.owned_event_ids):
+            raise StoryAnalysisSemanticError(
+                f"global-skeleton packet owned_event_refs mismatch for "
+                f"{analysis.window_id!r}"
+            )
+        if tuple(analysis.context_event_refs) != tuple(window.context_event_ids):
+            raise StoryAnalysisSemanticError(
+                f"global-skeleton packet context_event_refs mismatch for "
+                f"{analysis.window_id!r}"
+            )
+
+    # --- global index: bound to the exact authoritative A6B index ---------
+    if context.global_index.content_hash() != plan.global_index.content_hash():
+        raise StoryAnalysisSemanticError(
+            "global-skeleton packet global_index content hash does not match "
+            "the authoritative A6B plan.global_index"
+        )
 
 
 def build_global_skeleton_rendered_request(

@@ -26,6 +26,7 @@ independent).
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -312,6 +313,68 @@ def test_coverage_rejects_window_order_mismatch():
     swapped = list(wins)
     swapped[0], swapped[1] = swapped[1], swapped[0]
     bad = build_global_skeleton_context(chars, swapped, gi)
+    with pytest.raises(StoryAnalysisSemanticError):
+        validate_global_skeleton_coverage(bad, plan)
+
+
+def test_coverage_rejects_character_order_mismatch(tmp_path):
+    # Same character SET, wrong order -> must fail closed (exact ordered
+    # plan.character_packages membership is required, not just set equality).
+    _, plan, gi = _plan_fixture(tmp_path)
+    context, chars, wins = _full_context(plan, gi)
+    if len(chars) < 2:
+        pytest.skip("need at least two characters")
+    reordered = list(chars)
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    bad = build_global_skeleton_context(reordered, wins, gi)
+    with pytest.raises(StoryAnalysisSemanticError):
+        validate_global_skeleton_coverage(bad, plan)
+
+
+def test_coverage_rejects_owned_event_refs_mismatch():
+    # Valid evt refs, but the wrong window's owned set -> must fail closed
+    # (exact owned_event_refs equality against the corresponding PlotWindowPlan).
+    plan, gi = _in_memory_plan_fixture()
+    chars = [_char_analysis(p.character_ref) for p in plan.character_packages]
+    wins = [_window_analysis(w) for w in plan.windows]
+    assert len(wins) >= 2
+    bad_win0 = dataclasses.replace(
+        wins[0], owned_event_refs=tuple(plan.windows[1].owned_event_ids)
+    )
+    bad_wins = [bad_win0] + list(wins[1:])
+    bad = build_global_skeleton_context(chars, bad_wins, gi)
+    with pytest.raises(StoryAnalysisSemanticError):
+        validate_global_skeleton_coverage(bad, plan)
+
+
+def test_coverage_rejects_context_event_refs_mismatch():
+    # Valid evt refs, but the wrong window's context set -> must fail closed
+    # (exact context_event_refs equality against the corresponding PlotWindowPlan).
+    plan, gi = _in_memory_plan_fixture()
+    chars = [_char_analysis(p.character_ref) for p in plan.character_packages]
+    wins = [_window_analysis(w) for w in plan.windows]
+    assert len(wins) >= 2
+    assert plan.windows[1].context_event_ids != plan.windows[0].context_event_ids
+    bad_win0 = dataclasses.replace(
+        wins[0], context_event_refs=tuple(plan.windows[1].context_event_ids)
+    )
+    bad_wins = [bad_win0] + list(wins[1:])
+    bad = build_global_skeleton_context(chars, bad_wins, gi)
+    with pytest.raises(StoryAnalysisSemanticError):
+        validate_global_skeleton_coverage(bad, plan)
+
+
+def test_coverage_rejects_global_index_hash_mismatch(tmp_path):
+    # A byte-different global_index (same plan) -> must fail closed (the packet
+    # must be bound to the exact authoritative A6B plan.global_index).
+    _, plan, gi = _plan_fixture(tmp_path)
+    chars = [_char_analysis(p.character_ref) for p in plan.character_packages]
+    wins = [_window_analysis(w) for w in plan.windows]
+    bad_gi = dataclasses.replace(
+        gi, character_descriptors=tuple(gi.character_descriptors) + ({"entity_id": "zzz_dummy"},)
+    )
+    assert bad_gi.content_hash() != plan.global_index.content_hash()
+    bad = build_global_skeleton_context(chars, wins, bad_gi)
     with pytest.raises(StoryAnalysisSemanticError):
         validate_global_skeleton_coverage(bad, plan)
 

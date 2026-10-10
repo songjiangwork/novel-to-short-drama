@@ -85,6 +85,12 @@ from .story_analysis_window_semantic import (
     resolve_plot_window_analysis, validate_plot_window_coverage,
     validate_plot_window_evidence, window_request_identity_hash,
 )
+from .story_analysis_global_skeleton import (
+    A6E_GLOBAL_SKELETON_PROMPT_ID, A6E_GLOBAL_SKELETON_PROMPT_VERSION,
+    GlobalSkeletonContext, build_global_skeleton_context,
+    build_global_skeleton_rendered_request, estimate_global_skeleton_request_tokens,
+    validate_global_skeleton_coverage,
+)
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
     CANONICAL_ENTITY_TYPES,
@@ -1064,4 +1070,11 @@ __all__ = [
     "validate_plot_window_coverage",
     "validate_plot_window_evidence",
     "StoryAnalysisWindowSemanticGenerationError",
+    "A6E_GLOBAL_SKELETON_PROMPT_ID",
+    "A6E_GLOBAL_SKELETON_PROMPT_VERSION",
+    "GlobalSkeletonContext",
+    "build_global_skeleton_context",
+    "build_global_skeleton_rendered_request",
+    "estimate_global_skeleton_request_tokens",
+    "validate_global_skeleton_coverage",
 ]

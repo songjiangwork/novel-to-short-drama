@@ -305,6 +305,86 @@ def enforce_global_skeleton_ceiling(
 
 
 # ---------------------------------------------------------------------------
+# Upstream binding enforcement (fail closed, before any provider call).
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_SHA256_HEX = _re.compile(r"^[0-9a-f]{64}$")
+
+
+def _verify_snapshot_plan_manifest_identity(
+    snapshot: StoryAnalysisInputSnapshot, plan: StoryAnalysisPlan
+) -> None:
+    """Fail closed if the A5 snapshot and the A6B plan do not refer to the same
+    exact A5 ConsolidationManifest.
+
+    Mirrors the A6D seam: if the two inputs name different exact A5 upstreams,
+    the semantic requests would claim one A5 identity while consuming evidence
+    from another, so A6E-2 must fail closed before any packet construction or
+    provider execution.
+    """
+    if snapshot.consolidation_manifest_ref != plan.consolidation_manifest_ref:
+        raise StoryAnalysisSemanticError(
+            "story-analysis input snapshot and plan disagree on the exact A5 "
+            "consolidation manifest identity (snapshot "
+            f"{snapshot.consolidation_manifest_ref!r} != plan "
+            f"{plan.consolidation_manifest_ref!r}); A6E-2 global-skeleton "
+            "semantic analysis must consume one consistent exact A5 upstream "
+            "and refuses to join evidence from a mismatched pair"
+        )
+
+
+def _verify_upstream_request_identities(
+    plan: StoryAnalysisPlan,
+    character_request_identity_hashes: Sequence[str],
+    window_request_identity_hashes: Sequence[str],
+) -> None:
+    """Enforce the frozen exact-upstream identity contract.
+
+    Verifies that the ordered A6C/A6D request identity sequences are:
+    * non-empty (the global skeleton requires actual upstream results);
+    * complete (one per canonical planned character / window);
+    * well-formed (each hash is a valid SHA-256 hex string);
+    * ordered (matching the canonical plan order).
+
+    Rejects empty, missing, mismatched, or malformed identities before any
+    provider execution. This prevents silently rebinding cached A6E-1
+    diagnostics from a stale (e.g. null-ceiling) profile.
+    """
+    expected_char_count = len(plan.character_packages)
+    expected_window_count = len(plan.windows)
+
+    if len(character_request_identity_hashes) != expected_char_count:
+        raise StoryAnalysisSemanticError(
+            f"character_request_identity_hashes count "
+            f"{len(character_request_identity_hashes)} does not match the "
+            f"planned character count {expected_char_count}; A6E-2 requires "
+            f"complete ordered upstream A6C request identities"
+        )
+    if len(window_request_identity_hashes) != expected_window_count:
+        raise StoryAnalysisSemanticError(
+            f"window_request_identity_hashes count "
+            f"{len(window_request_identity_hashes)} does not match the "
+            f"planned window count {expected_window_count}; A6E-2 requires "
+            f"complete ordered upstream A6D request identities"
+        )
+
+    for i, h in enumerate(character_request_identity_hashes):
+        if not isinstance(h, str) or not _SHA256_HEX.fullmatch(h):
+            raise StoryAnalysisSemanticError(
+                f"character_request_identity_hashes[{i}] is not a valid "
+                f"SHA-256 hex string: {h!r}"
+            )
+    for i, h in enumerate(window_request_identity_hashes):
+        if not isinstance(h, str) or not _SHA256_HEX.fullmatch(h):
+            raise StoryAnalysisSemanticError(
+                f"window_request_identity_hashes[{i}] is not a valid "
+                f"SHA-256 hex string: {h!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Stable request identity (backend-neutral).
 # ---------------------------------------------------------------------------
 
@@ -375,16 +455,21 @@ def build_global_skeleton_semantic_preparation(
     window_analyses: Sequence[PlotWindowAnalysis],
     *,
     prompts: PromptRegistry,
-    character_request_identity_hashes: Sequence[str] = (),
-    window_request_identity_hashes: Sequence[str] = (),
+    character_request_identity_hashes: Sequence[str],
+    window_request_identity_hashes: Sequence[str],
 ) -> GlobalSkeletonSemanticPreparation:
     """Deterministically build the complete A6E-2 global-skeleton request.
 
     Zero provider invocations. Validates the frozen A6E-2 identity, enforces
-    the frozen ceiling (fail closed), validates complete coverage, renders the
-    request, and computes the stable request identity hash.
+    the frozen ceiling (fail closed), validates complete coverage, verifies
+    the exact upstream binding, renders the request, and computes the stable
+    request identity hash.
     """
     _verify_global_skeleton_profile(profile, semantic_profile)
+    _verify_snapshot_plan_manifest_identity(snapshot, plan)
+    _verify_upstream_request_identities(
+        plan, character_request_identity_hashes, window_request_identity_hashes
+    )
 
     # Assemble the complete global packet from the A6C/A6D outputs + A5 index.
     context = build_global_skeleton_context(
@@ -980,29 +1065,44 @@ def _build_global_structure(payload: dict[str, Any]) -> GlobalStructure:
 
     The ``major_arc_refs``, ``major_turning_point_refs``, and
     ``major_reveal_refs`` fields are resolved from the provider's proposal
-    ordinals to the Python-assigned IDs.
+    ordinals to the Python-assigned IDs using explicit maps (the provider
+    schema allows non-negative proposal ordinals that are not necessarily
+    equal to array indices).
     """
     structure_raw = payload.get("global_structure", {})
 
-    # Resolve proposal ordinals to Python-assigned IDs.
+    # Build explicit maps: proposal_ordinal -> Python-assigned final ID.
+    # Python assigns IDs deterministically by array position (0-indexed);
+    # the cross-reference resolution uses the provider's proposal_ordinal.
     arc_proposals = payload.get("arc_proposals", [])
     arc_ids = _assign_arc_ids(arc_proposals)
+    arc_ordinal_to_id: dict[int, str] = {
+        arc["proposal_ordinal"]: arc_ids[i] for i, arc in enumerate(arc_proposals)
+    }
     major_arc_refs = tuple(
-        arc_ids[i] for i in structure_raw.get("major_arc_proposal_ordinals", [])
+        arc_ordinal_to_id[ordinal]
+        for ordinal in structure_raw.get("major_arc_proposal_ordinals", [])
     )
 
     tp_proposals = payload.get("turning_point_proposals", [])
     tp_ids = _assign_turning_point_ids(tp_proposals)
+    tp_ordinal_to_id: dict[int, str] = {
+        tp["proposal_ordinal"]: tp_ids[i] for i, tp in enumerate(tp_proposals)
+    }
     major_tp_refs = tuple(
-        tp_ids[i]
-        for i in structure_raw.get("major_turning_point_proposal_ordinals", [])
+        tp_ordinal_to_id[ordinal]
+        for ordinal in structure_raw.get("major_turning_point_proposal_ordinals", [])
     )
 
     reveal_proposals = payload.get("reveal_proposals", [])
     reveal_ids = _assign_reveal_ids(reveal_proposals)
+    reveal_ordinal_to_id: dict[int, str] = {
+        rv["proposal_ordinal"]: reveal_ids[i]
+        for i, rv in enumerate(reveal_proposals)
+    }
     major_reveal_refs = tuple(
-        reveal_ids[i]
-        for i in structure_raw.get("major_reveal_proposal_ordinals", [])
+        reveal_ordinal_to_id[ordinal]
+        for ordinal in structure_raw.get("major_reveal_proposal_ordinals", [])
     )
 
     # Global sections
@@ -1197,8 +1297,8 @@ def resolve_global_skeleton(
     llm_client: LLMClient,
     *,
     prompts: PromptRegistry,
-    character_request_identity_hashes: Sequence[str] = (),
-    window_request_identity_hashes: Sequence[str] = (),
+    character_request_identity_hashes: Sequence[str],
+    window_request_identity_hashes: Sequence[str],
 ) -> GlobalSkeletonSemanticResult:
     """Run the complete A6E-2 global-skeleton semantic pass.
 

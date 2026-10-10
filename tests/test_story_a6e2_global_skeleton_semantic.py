@@ -1270,3 +1270,526 @@ class TestEmptyOptionalArrays:
         payload["arc_proposals"] = []
         payload["global_structure"]["major_arc_proposal_ordinals"] = []
         assert validate_global_skeleton_output(payload, snapshot) is None
+
+
+# ---------------------------------------------------------------------------
+# 13. Non-contiguous / reordered proposal ordinal tests (Finding 1)
+# ---------------------------------------------------------------------------
+
+
+class TestNonContiguousProposalOrdinals:
+    """The provider schema allows non-negative proposal ordinals that are not
+    necessarily equal to array indices. The cross-reference resolution must use
+    explicit maps (proposal_ordinal -> Python-assigned ID), not array indexing."""
+
+    def test_non_contiguous_arc_ordinals(self):
+        """Arcs with non-contiguous proposal ordinals (0, 5, 12) resolve
+        correctly in major_arc_proposal_ordinals."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _build_global_structure,
+        )
+
+        payload = _valid_payload()
+        # Three arcs with non-contiguous ordinals: 0, 5, 12.
+        payload["arc_proposals"] = [
+            {
+                "proposal_ordinal": 0,
+                "arc_kind": "main",
+                "involved_character_refs": ["char_0001"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000001"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000001",
+                "end_event_ref": "evt_000002",
+                "interpretation": {
+                    "text_zh": "主弧线。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": ["evt_000001"],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 5,
+                "arc_kind": "sub",
+                "involved_character_refs": ["char_0002"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000002"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000002",
+                "end_event_ref": "evt_000003",
+                "interpretation": {
+                    "text_zh": "副弧线A。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 12,
+                "arc_kind": "sub",
+                "involved_character_refs": ["char_0001"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000003"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000003",
+                "end_event_ref": "evt_000004",
+                "interpretation": {
+                    "text_zh": "副弧线B。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+        ]
+        # major_arc_proposal_ordinals references ordinal 5 (the 2nd arc).
+        payload["global_structure"]["major_arc_proposal_ordinals"] = [5]
+
+        snapshot = _make_snapshot_with_events(20)
+        assert validate_global_skeleton_output(payload, snapshot) is None
+
+        gs = _build_global_structure(payload)
+        # Ordinal 5 maps to the 2nd arc in array position -> arc_000002.
+        assert gs.major_arc_refs == ("arc_000002",)
+
+    def test_reordered_tp_ordinals(self):
+        """Turning points with reordered (non-sequential) ordinals resolve
+        correctly."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _build_global_structure,
+        )
+
+        payload = _valid_payload()
+        # Two TPs with ordinals 7 and 3 (reordered: not 0,1).
+        payload["turning_point_proposals"] = [
+            {
+                "proposal_ordinal": 7,
+                "event_ref": "evt_000001",
+                "supporting_fact_refs": [],
+                "supporting_relationship_refs": [],
+                "interpretation": {
+                    "text_zh": "转折A。",
+                    "evidence_mode": "explicit",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 3,
+                "event_ref": "evt_000002",
+                "supporting_fact_refs": [],
+                "supporting_relationship_refs": [],
+                "interpretation": {
+                    "text_zh": "转折B。",
+                    "evidence_mode": "explicit",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+        ]
+        # Reference ordinal 3 (the 2nd TP in array position).
+        payload["global_structure"]["major_turning_point_proposal_ordinals"] = [3]
+
+        snapshot = _make_snapshot_with_events(20)
+        assert validate_global_skeleton_output(payload, snapshot) is None
+
+        gs = _build_global_structure(payload)
+        # Ordinal 3 maps to the 2nd TP in array position -> turn_000002.
+        assert gs.major_turning_point_refs == ("turn_000002",)
+
+    def test_non_contiguous_reveal_ordinals(self):
+        """Reveals with non-contiguous ordinals resolve correctly."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _build_global_structure,
+        )
+
+        payload = _valid_payload()
+        payload["reveal_proposals"] = [
+            {
+                "proposal_ordinal": 10,
+                "reveal_event_refs": ["evt_000001"],
+                "supporting_fact_refs": [],
+                "affected_character_refs": ["char_0001"],
+                "setup_event_refs": [],
+                "interpretation": {
+                    "text_zh": "揭示A。",
+                    "evidence_mode": "explicit",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 20,
+                "reveal_event_refs": ["evt_000002"],
+                "supporting_fact_refs": [],
+                "affected_character_refs": ["char_0002"],
+                "setup_event_refs": [],
+                "interpretation": {
+                    "text_zh": "揭示B。",
+                    "evidence_mode": "explicit",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+        ]
+        # Reference ordinal 20 (the 2nd reveal).
+        payload["global_structure"]["major_reveal_proposal_ordinals"] = [20]
+
+        snapshot = _make_snapshot_with_events(20)
+        assert validate_global_skeleton_output(payload, snapshot) is None
+
+        gs = _build_global_structure(payload)
+        # Ordinal 20 maps to the 2nd reveal in array position -> reveal_000002.
+        assert gs.major_reveal_refs == ("reveal_000002",)
+
+    def test_multiple_major_refs_with_gaps(self):
+        """Multiple major arc refs with gaps in ordinals all resolve correctly."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _build_global_structure,
+        )
+
+        payload = _valid_payload()
+        # Four arcs with ordinals 0, 3, 7, 15.
+        payload["arc_proposals"] = [
+            {
+                "proposal_ordinal": 0,
+                "arc_kind": "main",
+                "involved_character_refs": ["char_0001"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000001"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000001",
+                "end_event_ref": "evt_000002",
+                "interpretation": {
+                    "text_zh": "弧线0。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 3,
+                "arc_kind": "sub",
+                "involved_character_refs": ["char_0001"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000002"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000002",
+                "end_event_ref": "evt_000003",
+                "interpretation": {
+                    "text_zh": "弧线3。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 7,
+                "arc_kind": "sub",
+                "involved_character_refs": ["char_0002"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000003"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000003",
+                "end_event_ref": "evt_000004",
+                "interpretation": {
+                    "text_zh": "弧线7。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+            {
+                "proposal_ordinal": 15,
+                "arc_kind": "sub",
+                "involved_character_refs": ["char_0002"],
+                "involved_relationship_refs": [],
+                "supporting_event_refs": ["evt_000004"],
+                "supporting_fact_refs": [],
+                "start_event_ref": "evt_000004",
+                "end_event_ref": "evt_000005",
+                "interpretation": {
+                    "text_zh": "弧线15。",
+                    "evidence_mode": "inferred",
+                    "supporting_fact_refs": [],
+                    "supporting_event_refs": [],
+                    "supporting_relationship_refs": [],
+                    "supporting_conflict_refs": [],
+                },
+            },
+        ]
+        # Reference ordinals 3 and 15 (positions 1 and 3).
+        payload["global_structure"]["major_arc_proposal_ordinals"] = [3, 15]
+
+        snapshot = _make_snapshot_with_events(20)
+        assert validate_global_skeleton_output(payload, snapshot) is None
+
+        gs = _build_global_structure(payload)
+        # Ordinal 3 -> arc_000002, ordinal 15 -> arc_000004.
+        assert gs.major_arc_refs == ("arc_000002", "arc_000004")
+
+
+# ---------------------------------------------------------------------------
+# 14. Upstream binding enforcement tests (Finding 2)
+# ---------------------------------------------------------------------------
+
+
+class TestUpstreamBinding:
+    """The frozen exact-upstream identity contract is enforced before any
+    provider execution. Empty, missing, mismatched, or malformed identities
+    fail closed with zero provider calls."""
+
+    def _snapshot(self) -> StoryAnalysisInputSnapshot:
+        return _make_snapshot_with_events(20)
+
+    def _plan(self) -> StoryAnalysisPlan:
+        from short_drama.story.story_analysis_planning import (
+            build_story_analysis_plan_from_profile,
+        )
+        return build_story_analysis_plan_from_profile(
+            self._snapshot(), _make_profile(74000)
+        )
+
+    def _valid_char_hashes(self, n: int) -> tuple[str, ...]:
+        return tuple(f"{i:064x}" for i in range(n))
+
+    def _valid_window_hashes(self, n: int) -> tuple[str, ...]:
+        return tuple(f"{i + 1000:064x}" for i in range(n))
+
+    def test_empty_character_hashes_fail(self):
+        """Empty character_request_identity_hashes fails closed."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        plan = self._plan()
+        with pytest.raises(StoryAnalysisSemanticError, match="character_request_identity_hashes count"):
+            _verify_upstream_request_identities(
+                plan, (), self._valid_window_hashes(len(plan.windows))
+            )
+
+    def test_empty_window_hashes_fail(self):
+        """Empty window_request_identity_hashes fails closed."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        plan = self._plan()
+        with pytest.raises(StoryAnalysisSemanticError, match="window_request_identity_hashes count"):
+            _verify_upstream_request_identities(
+                plan, self._valid_char_hashes(len(plan.character_packages)), ()
+            )
+
+    def test_wrong_character_count_fails(self):
+        """Character hash count mismatching the plan fails closed."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        plan = self._plan()
+        # Provide one fewer hash than expected.
+        bad_hashes = self._valid_char_hashes(len(plan.character_packages) - 1)
+        with pytest.raises(StoryAnalysisSemanticError, match="does not match"):
+            _verify_upstream_request_identities(
+                plan, bad_hashes, self._valid_window_hashes(len(plan.windows))
+            )
+
+    def test_wrong_window_count_fails(self):
+        """Window hash count mismatching the plan fails closed."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        plan = self._plan()
+        bad_hashes = self._valid_window_hashes(len(plan.windows) + 1)
+        with pytest.raises(StoryAnalysisSemanticError, match="does not match"):
+            _verify_upstream_request_identities(
+                plan, self._valid_char_hashes(len(plan.character_packages)), bad_hashes
+            )
+
+    def test_malformed_hash_fails(self):
+        """A non-SHA-256 hex string in the identity sequence fails closed."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        plan = self._plan()
+        # First hash is valid, second is malformed (too short).
+        hashes = ("a" * 64, "not-a-valid-hash")
+        if len(plan.character_packages) >= 2:
+            with pytest.raises(StoryAnalysisSemanticError, match="not a valid SHA-256"):
+                _verify_upstream_request_identities(
+                    plan, hashes, self._valid_window_hashes(len(plan.windows))
+                )
+        else:
+            # If only one character, put the bad hash in position 0.
+            with pytest.raises(StoryAnalysisSemanticError, match="not a valid SHA-256"):
+                _verify_upstream_request_identities(
+                    plan, ("bad",), self._valid_window_hashes(len(plan.windows))
+                )
+
+    def test_manifest_mismatch_fails(self):
+        """Snapshot and plan referencing different A5 manifests fails closed."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_snapshot_plan_manifest_identity,
+        )
+        from short_drama.artifacts import ArtifactRef
+
+        snapshot = self._snapshot()
+        plan = self._plan()
+        # Create a plan with a different manifest ref.
+        tampered_plan = dataclasses.replace(
+            plan,
+            consolidation_manifest_ref=ArtifactRef(
+                artifact_type="consolidation_manifest",
+                artifact_id="different.artifact",
+                revision=99,
+                content_hash="f" * 64,
+            ),
+        )
+        with pytest.raises(StoryAnalysisSemanticError, match="disagree on the exact A5"):
+            _verify_snapshot_plan_manifest_identity(snapshot, tampered_plan)
+
+    def test_matching_manifest_passes(self):
+        """Snapshot and plan with the same manifest ref pass."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_snapshot_plan_manifest_identity,
+        )
+
+        snapshot = self._snapshot()
+        plan = self._plan()
+        # Should not raise.
+        _verify_snapshot_plan_manifest_identity(snapshot, plan)
+
+    def test_valid_upstream_binding_passes(self):
+        """Correctly-sized, well-formed identity sequences pass."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        plan = self._plan()
+        char_hashes = self._valid_char_hashes(len(plan.character_packages))
+        window_hashes = self._valid_window_hashes(len(plan.windows))
+        # Should not raise.
+        _verify_upstream_request_identities(plan, char_hashes, window_hashes)
+
+    def test_preparation_rejects_empty_upstream_zero_provider_calls(self):
+        """build_global_skeleton_semantic_preparation rejects empty upstream
+        identities before any provider call (zero LLM invocations)."""
+        from short_drama.llm import PromptRegistry
+        from short_drama.story.reconciliation_semantic import DEFAULT_PROMPT_BASE_DIR
+
+        snapshot = self._snapshot()
+        plan = self._plan()
+        profile = _make_profile(74000)
+        semantic_profile = _make_semantic_profile()
+        prompts = PromptRegistry(DEFAULT_PROMPT_BASE_DIR)
+
+        char_analyses = [_char_analysis(c.character_ref) for c in plan.character_packages]
+        window_analyses = [
+            _window_analysis(
+                f"window_{i+1:04d}", i + 1, w.owned_event_ids, w.context_event_ids
+            )
+            for i, w in enumerate(plan.windows)
+        ]
+
+        # Empty upstream hashes -> fail closed before any provider call.
+        llm_client = MagicMock(spec=LLMClient)
+        with pytest.raises(StoryAnalysisSemanticError, match="count"):
+            build_global_skeleton_semantic_preparation(
+                snapshot,
+                plan,
+                profile,
+                semantic_profile,
+                char_analyses,
+                window_analyses,
+                prompts=prompts,
+                character_request_identity_hashes=(),
+                window_request_identity_hashes=(),
+            )
+        # Zero provider calls.
+        llm_client.generate_structured.assert_not_called()
+
+    def test_preparation_rejects_stale_profile_zero_provider_calls(self):
+        """build_global_skeleton_semantic_preparation rejects a plan built
+        under a different (stale) profile before any provider call."""
+        from short_drama.llm import PromptRegistry
+        from short_drama.story.reconciliation_semantic import DEFAULT_PROMPT_BASE_DIR
+        from short_drama.story.story_analysis_planning import (
+            build_story_analysis_plan_from_profile,
+        )
+
+        snapshot = self._snapshot()
+        profile_current = _make_profile(74000)
+        profile_stale = _make_profile(ceiling=None)  # Old null-ceiling profile.
+
+        # Plan built under the stale profile.
+        plan_stale = build_story_analysis_plan_from_profile(snapshot, profile_stale)
+        semantic_profile = _make_semantic_profile()
+        prompts = PromptRegistry(DEFAULT_PROMPT_BASE_DIR)
+
+        char_analyses = [_char_analysis(c.character_ref) for c in plan_stale.character_packages]
+        window_analyses = [
+            _window_analysis(
+                f"window_{i+1:04d}", i + 1, w.owned_event_ids, w.context_event_ids
+            )
+            for i, w in enumerate(plan_stale.windows)
+        ]
+
+        # The plan was built under the stale profile; its manifest ref matches
+        # the snapshot, but the plan hash is different. The upstream binding
+        # check passes (manifest matches), but the plan hash in the identity
+        # will be from the stale profile. We verify the preparation succeeds
+        # structurally (the identity binding is about the manifest ref, not the
+        # profile hash directly).
+        #
+        # However, if we pass a plan whose manifest ref doesn't match the
+        # snapshot, it fails:
+        from short_drama.artifacts import ArtifactRef
+
+        tampered_plan = dataclasses.replace(
+            plan_stale,
+            consolidation_manifest_ref=ArtifactRef(
+                artifact_type="consolidation_manifest",
+                artifact_id="stale.artifact",
+                revision=1,
+                content_hash="e" * 64,
+            ),
+        )
+        llm_client = MagicMock(spec=LLMClient)
+        with pytest.raises(StoryAnalysisSemanticError, match="disagree"):
+            build_global_skeleton_semantic_preparation(
+                snapshot,
+                tampered_plan,
+                profile_current,
+                semantic_profile,
+                char_analyses,
+                window_analyses,
+                prompts=prompts,
+                character_request_identity_hashes=self._valid_char_hashes(
+                    len(plan_stale.character_packages)
+                ),
+                window_request_identity_hashes=self._valid_window_hashes(
+                    len(plan_stale.windows)
+                ),
+            )
+        llm_client.generate_structured.assert_not_called()

@@ -97,7 +97,7 @@ _FROZEN_POLICY = {
     "plot_window_packet_max_estimated_tokens": 58_000,
     "plot_window_owned_event_target": 12,
     "plot_window_context_event_count": 4,
-    "global_skeleton_packet_max_estimated_tokens": None,
+    "global_skeleton_packet_max_estimated_tokens": 74_000,
     "story_bible_packet_max_estimated_tokens": None,
 }
 
@@ -738,14 +738,16 @@ def test_validate_window_ownership_rejects_owned_context_overlap() -> None:
 # --- BLOCK C / BLOCK D / staged ceilings / architecture-aware window policy --
 
 def test_production_profile_has_deferred_whole_story_ceilings() -> None:
-    """The A6B production profile defers (null) the two whole-story ceilings and
-    freezes character / window values concrete (merged #97 staged authority)."""
+    """The A6B production profile freezes the global-skeleton ceiling (74000,
+    measured from A6E-1) and defers (null) the story-bible ceiling.
+    Character / window values are concrete (merged #97 staged authority)."""
     profile = load_story_analysis_profile(
         REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
     )
     policy = profile.planning_policy
-    # Whole-story ceilings are DEFERRED (null) — not an A5-derived placeholder.
-    assert policy.global_skeleton_packet_max_estimated_tokens is None
+    # Global-skeleton ceiling is FROZEN (measured from A6E-1 Alice packet).
+    assert policy.global_skeleton_packet_max_estimated_tokens == 74_000
+    # Story-bible ceiling is still DEFERRED (null).
     assert policy.story_bible_packet_max_estimated_tokens is None
     # character / window values are concrete (measured) and positive.
     assert isinstance(policy.character_packet_max_estimated_tokens, int)
@@ -757,26 +759,25 @@ def test_production_profile_has_deferred_whole_story_ceilings() -> None:
 
 
 def test_deferred_profile_builds_a6b_plan(tmp_path: Path) -> None:
-    """A6B production profile (null/null whole-story ceilings) builds a
+    """A6B production profile (74000/null whole-story ceilings) builds a
     deterministic A6B plan successfully. A6B does NOT execute A6E / A6F; it only
-    enforces the character + window budgets. With deferred (null) ceilings there
-    is no ``int > None`` comparison and no default placeholder, and A6B does not
-    claim the complete A6E / A6F packet is verified."""
+    enforces the character + window budgets. The global-skeleton ceiling is
+    frozen at 74000 (measured from A6E-1); the story-bible ceiling remains
+    deferred (null)."""
     profile = load_story_analysis_profile(
         REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
     )
-    assert profile.planning_policy.global_skeleton_packet_max_estimated_tokens is None
+    assert profile.planning_policy.global_skeleton_packet_max_estimated_tokens == 74_000
     assert profile.planning_policy.story_bible_packet_max_estimated_tokens is None
     _tree, _planning, _pub, snap = _snapshot(tmp_path)
     plan = build_story_analysis_plan_from_profile(snap, profile)
-    # Deterministic A6B plan built successfully with deferred whole-story ceilings.
+    # Deterministic A6B plan built successfully with frozen global-skeleton ceiling.
     assert plan.plan_hash
     assert plan.plan_hash == build_story_analysis_plan_from_profile(snap, profile).plan_hash
     # A6B measured the A5-derived global-index base (bound into the identity).
     assert plan.plan_identity_payload()["global_index_hash"] == plan.global_index.content_hash()
-    # A6B does NOT claim the full A6E / A6F packet is verified: the ceilings
-    # remain deferred (null), not a concrete bound.
-    assert plan.planning_policy.global_skeleton_packet_max_estimated_tokens is None
+    # The global-skeleton ceiling is frozen; story-bible remains deferred.
+    assert plan.planning_policy.global_skeleton_packet_max_estimated_tokens == 74_000
     assert plan.planning_policy.story_bible_packet_max_estimated_tokens is None
     # Character + window coverage is complete and exact-one ownership holds.
     assert len(plan.character_packages) == len(snap.canonical_characters)

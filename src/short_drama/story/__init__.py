@@ -47,6 +47,7 @@ from .errors import (
     StoryAnalysisSemanticError,
     StoryAnalysisSemanticGenerationError,
     StoryAnalysisWindowSemanticGenerationError,
+    StoryAnalysisGlobalSkeletonSemanticGenerationError,
 )
 from .story_analysis import (
     A6SemanticIdentity, A6UpstreamIdentity, ArcAnalysis, CharacterAnalysis,
@@ -90,6 +91,18 @@ from .story_analysis_global_skeleton import (
     GlobalSkeletonContext, build_global_skeleton_context,
     build_global_skeleton_rendered_request, estimate_global_skeleton_request_tokens,
     validate_global_skeleton_coverage,
+)
+from .story_analysis_global_skeleton_semantic import (
+    A6E_GLOBAL_SKELETON_OUTPUT_SCHEMA_ID, A6E_GLOBAL_SKELETON_OUTPUT_SCHEMA_VERSION,
+    A6E_SEMANTIC_PROFILE_ID, A6E_MAX_GENERATION_ROUNDS,
+    GlobalSkeletonSemanticPreparation, GlobalSkeletonSemanticResult,
+    build_global_skeleton_semantic_preparation,
+    enforce_global_skeleton_ceiling,
+    global_skeleton_request_identity_hash,
+    load_global_skeleton_output_schema, load_global_skeleton_semantic_assets,
+    load_global_skeleton_semantic_profile,
+    resolve_global_skeleton,
+    validate_global_skeleton_output,
 )
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
@@ -1018,6 +1031,7 @@ __all__ = [
     "StoryAnalysisProvenanceError",
     "StoryAnalysisSemanticGenerationError",
     "StoryAnalysisWindowSemanticGenerationError",
+    "StoryAnalysisGlobalSkeletonSemanticGenerationError",
     "StoryAnalysisInputSnapshot",
     "CharacterEvidencePackage",
     "PlotWindowPlan",
@@ -1077,4 +1091,18 @@ __all__ = [
     "build_global_skeleton_rendered_request",
     "estimate_global_skeleton_request_tokens",
     "validate_global_skeleton_coverage",
+    "A6E_GLOBAL_SKELETON_OUTPUT_SCHEMA_ID",
+    "A6E_GLOBAL_SKELETON_OUTPUT_SCHEMA_VERSION",
+    "A6E_SEMANTIC_PROFILE_ID",
+    "A6E_MAX_GENERATION_ROUNDS",
+    "GlobalSkeletonSemanticPreparation",
+    "GlobalSkeletonSemanticResult",
+    "build_global_skeleton_semantic_preparation",
+    "enforce_global_skeleton_ceiling",
+    "global_skeleton_request_identity_hash",
+    "load_global_skeleton_output_schema",
+    "load_global_skeleton_semantic_assets",
+    "load_global_skeleton_semantic_profile",
+    "resolve_global_skeleton",
+    "validate_global_skeleton_output",
 ]

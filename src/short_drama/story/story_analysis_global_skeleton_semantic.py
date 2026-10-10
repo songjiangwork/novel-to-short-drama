@@ -336,22 +336,35 @@ def _verify_snapshot_plan_manifest_identity(
 
 
 def _verify_upstream_request_identities(
+    snapshot: StoryAnalysisInputSnapshot,
     plan: StoryAnalysisPlan,
+    profile: StoryAnalysisProfile,
+    semantic_profile: SemanticLLMProfile,
     character_request_identity_hashes: Sequence[str],
     window_request_identity_hashes: Sequence[str],
+    *,
+    prompts: PromptRegistry,
 ) -> None:
     """Enforce the frozen exact-upstream identity contract.
 
-    Verifies that the ordered A6C/A6D request identity sequences are:
-    * non-empty (the global skeleton requires actual upstream results);
-    * complete (one per canonical planned character / window);
-    * well-formed (each hash is a valid SHA-256 hex string);
-    * ordered (matching the canonical plan order).
+    Recomputes the deterministic A6C/A6D request identity hashes using the
+    existing preparation functions under the current exact profile and A6B
+    plan, then compares them against the provided sequences. This is NOT a
+    format check -- it is an actual identity verification that catches:
+    * stale-profile identities (e.g. from a null-ceiling profile);
+    * swapped or reordered sequences;
+    * fabricated or placeholder hashes;
+    * any mismatch between the claimed upstream and the actual current
+      profile/plan.
 
-    Rejects empty, missing, mismatched, or malformed identities before any
-    provider execution. This prevents silently rebinding cached A6E-1
-    diagnostics from a stale (e.g. null-ceiling) profile.
+    Rejects empty, missing, mismatched, or stale identities before any
+    provider execution.
     """
+    from .story_analysis_semantic import build_character_semantic_preparation
+    from .story_analysis_window_semantic import (
+        build_plot_window_semantic_preparation,
+    )
+
     expected_char_count = len(plan.character_packages)
     expected_window_count = len(plan.windows)
 
@@ -370,17 +383,42 @@ def _verify_upstream_request_identities(
             f"complete ordered upstream A6D request identities"
         )
 
-    for i, h in enumerate(character_request_identity_hashes):
-        if not isinstance(h, str) or not _SHA256_HEX.fullmatch(h):
+    # Recompute the expected A6C identity hashes under the current exact
+    # profile and plan (zero provider calls).
+    a6c_prep = build_character_semantic_preparation(
+        plan, profile, semantic_profile, prompts=prompts
+    )
+    expected_char_hashes = a6c_prep.character_request_identity_hashes
+
+    # Recompute the expected A6D identity hashes under the current exact
+    # profile and plan (zero provider calls).
+    a6d_prep = build_plot_window_semantic_preparation(
+        snapshot, plan, profile, semantic_profile, prompts=prompts
+    )
+    expected_window_hashes = a6d_prep.window_request_identity_hashes
+
+    # Compare each provided hash against the recomputed expected hash.
+    for i, (got, want) in enumerate(
+        zip(character_request_identity_hashes, expected_char_hashes)
+    ):
+        if got != want:
             raise StoryAnalysisSemanticError(
-                f"character_request_identity_hashes[{i}] is not a valid "
-                f"SHA-256 hex string: {h!r}"
+                f"character_request_identity_hashes[{i}] mismatch: provided "
+                f"{got!r} does not match the deterministically recomputed "
+                f"A6C identity {want!r} under the current profile/plan; "
+                f"the upstream A6C result is stale, fabricated, or from a "
+                f"different profile"
             )
-    for i, h in enumerate(window_request_identity_hashes):
-        if not isinstance(h, str) or not _SHA256_HEX.fullmatch(h):
+    for i, (got, want) in enumerate(
+        zip(window_request_identity_hashes, expected_window_hashes)
+    ):
+        if got != want:
             raise StoryAnalysisSemanticError(
-                f"window_request_identity_hashes[{i}] is not a valid "
-                f"SHA-256 hex string: {h!r}"
+                f"window_request_identity_hashes[{i}] mismatch: provided "
+                f"{got!r} does not match the deterministically recomputed "
+                f"A6D identity {want!r} under the current profile/plan; "
+                f"the upstream A6D result is stale, fabricated, or from a "
+                f"different profile"
             )
 
 
@@ -468,7 +506,13 @@ def build_global_skeleton_semantic_preparation(
     _verify_global_skeleton_profile(profile, semantic_profile)
     _verify_snapshot_plan_manifest_identity(snapshot, plan)
     _verify_upstream_request_identities(
-        plan, character_request_identity_hashes, window_request_identity_hashes
+        snapshot,
+        plan,
+        profile,
+        semantic_profile,
+        character_request_identity_hashes,
+        window_request_identity_hashes,
+        prompts=prompts,
     )
 
     # Assemble the complete global packet from the A6C/A6D outputs + A5 index.

@@ -1555,97 +1555,163 @@ class TestNonContiguousProposalOrdinals:
 
 class TestUpstreamBinding:
     """The frozen exact-upstream identity contract is enforced before any
-    provider execution. Empty, missing, mismatched, or malformed identities
-    fail closed with zero provider calls."""
+    provider execution. The verification recomputes the deterministic A6C/A6D
+    request identity hashes using the existing preparation functions under the
+    current exact profile and A6B plan, then compares them against the provided
+    sequences. This catches stale-profile, swapped, fabricated, or placeholder
+    identities with zero provider calls."""
 
     def _snapshot(self) -> StoryAnalysisInputSnapshot:
         return _make_snapshot_with_events(20)
+
+    def _profile(self) -> StoryAnalysisProfile:
+        return _make_profile(74000)
 
     def _plan(self) -> StoryAnalysisPlan:
         from short_drama.story.story_analysis_planning import (
             build_story_analysis_plan_from_profile,
         )
         return build_story_analysis_plan_from_profile(
-            self._snapshot(), _make_profile(74000)
+            self._snapshot(), self._profile()
         )
 
-    def _valid_char_hashes(self, n: int) -> tuple[str, ...]:
-        return tuple(f"{i:064x}" for i in range(n))
+    def _prompts(self):
+        from short_drama.llm import PromptRegistry
+        from short_drama.story.reconciliation_semantic import DEFAULT_PROMPT_BASE_DIR
+        return PromptRegistry(DEFAULT_PROMPT_BASE_DIR)
 
-    def _valid_window_hashes(self, n: int) -> tuple[str, ...]:
-        return tuple(f"{i + 1000:064x}" for i in range(n))
+    def _expected_char_hashes(self) -> tuple[str, ...]:
+        """Recompute the expected A6C identity hashes using the existing
+        preparation function (zero provider calls)."""
+        from short_drama.story.story_analysis_semantic import (
+            build_character_semantic_preparation,
+        )
+        prep = build_character_semantic_preparation(
+            self._plan(), self._profile(), _make_semantic_profile(),
+            prompts=self._prompts(),
+        )
+        return prep.character_request_identity_hashes
+
+    def _expected_window_hashes(self) -> tuple[str, ...]:
+        """Recompute the expected A6D identity hashes using the existing
+        preparation function (zero provider calls)."""
+        from short_drama.story.story_analysis_window_semantic import (
+            build_plot_window_semantic_preparation,
+        )
+        prep = build_plot_window_semantic_preparation(
+            self._snapshot(), self._plan(), self._profile(),
+            _make_semantic_profile(), prompts=self._prompts(),
+        )
+        return prep.window_request_identity_hashes
+
+    def _verify(self, char_hashes: Sequence[str], window_hashes: Sequence[str]) -> None:
+        """Call the verification function with the current snapshot/plan/profile."""
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+        _verify_upstream_request_identities(
+            self._snapshot(),
+            self._plan(),
+            self._profile(),
+            _make_semantic_profile(),
+            char_hashes,
+            window_hashes,
+            prompts=self._prompts(),
+        )
+
+    def test_valid_identities_pass(self):
+        """Identity hashes recomputed from the same profile/plan pass."""
+        self._verify(self._expected_char_hashes(), self._expected_window_hashes())
+
+    def test_all_a_hashes_rejected(self):
+        """All-'a'*64 character hashes and all-'b'*64 window hashes are
+        rejected (they are valid SHA-256 format but NOT the actual identities).
+        This is the key regression test: a format-only check would accept these."""
+        plan = self._plan()
+        fake_char = tuple("a" * 64 for _ in range(len(plan.character_packages)))
+        fake_window = tuple("b" * 64 for _ in range(len(plan.windows)))
+        with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
+            self._verify(fake_char, fake_window)
+
+    def test_stale_null_ceiling_profile_identities_rejected(self):
+        """Identity hashes computed under a null-ceiling (stale) profile are
+        rejected when the current profile has ceiling=74000."""
+        from short_drama.story.story_analysis_planning import (
+            build_story_analysis_plan_from_profile,
+        )
+        from short_drama.story.story_analysis_semantic import (
+            build_character_semantic_preparation,
+        )
+        from short_drama.story.story_analysis_window_semantic import (
+            build_plot_window_semantic_preparation,
+        )
+
+        snapshot = self._snapshot()
+        profile_stale = _make_profile(ceiling=None)  # Old null-ceiling profile.
+        profile_current = self._profile()  # Current 74000 ceiling.
+        semantic_profile = _make_semantic_profile()
+        prompts = self._prompts()
+
+        # Plan and identities computed under the STALE profile.
+        plan_stale = build_story_analysis_plan_from_profile(snapshot, profile_stale)
+        a6c_stale = build_character_semantic_preparation(
+            plan_stale, profile_stale, semantic_profile, prompts=prompts
+        )
+        a6d_stale = build_plot_window_semantic_preparation(
+            snapshot, plan_stale, profile_stale, semantic_profile, prompts=prompts
+        )
+
+        # Now verify using the CURRENT profile/plan but the STALE identities.
+        # The plan must be the current one (matching the snapshot), but the
+        # identity hashes are from the stale profile.
+        plan_current = build_story_analysis_plan_from_profile(snapshot, profile_current)
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+        with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
+            _verify_upstream_request_identities(
+                snapshot,
+                plan_current,
+                profile_current,
+                semantic_profile,
+                a6c_stale.character_request_identity_hashes,
+                a6d_stale.window_request_identity_hashes,
+                prompts=prompts,
+            )
+
+    def test_swapped_character_ordering_rejected(self):
+        """Swapped character identity hash ordering is rejected."""
+        expected = self._expected_char_hashes()
+        if len(expected) < 2:
+            pytest.skip("need at least 2 characters for swap test")
+        # Swap the first two.
+        swapped = list(expected)
+        swapped[0], swapped[1] = swapped[1], swapped[0]
+        with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
+            self._verify(tuple(swapped), self._expected_window_hashes())
+
+    def test_swapped_window_ordering_rejected(self):
+        """Swapped window identity hash ordering is rejected."""
+        expected = self._expected_window_hashes()
+        if len(expected) < 2:
+            pytest.skip("need at least 2 windows for swap test")
+        # Swap the first two.
+        swapped = list(expected)
+        swapped[0], swapped[1] = swapped[1], swapped[0]
+        with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
+            self._verify(self._expected_char_hashes(), tuple(swapped))
 
     def test_empty_character_hashes_fail(self):
         """Empty character_request_identity_hashes fails closed."""
-        from short_drama.story.story_analysis_global_skeleton_semantic import (
-            _verify_upstream_request_identities,
-        )
-
         plan = self._plan()
-        with pytest.raises(StoryAnalysisSemanticError, match="character_request_identity_hashes count"):
-            _verify_upstream_request_identities(
-                plan, (), self._valid_window_hashes(len(plan.windows))
-            )
+        with pytest.raises(StoryAnalysisSemanticError, match="count"):
+            self._verify((), self._expected_window_hashes())
 
     def test_empty_window_hashes_fail(self):
         """Empty window_request_identity_hashes fails closed."""
-        from short_drama.story.story_analysis_global_skeleton_semantic import (
-            _verify_upstream_request_identities,
-        )
-
         plan = self._plan()
-        with pytest.raises(StoryAnalysisSemanticError, match="window_request_identity_hashes count"):
-            _verify_upstream_request_identities(
-                plan, self._valid_char_hashes(len(plan.character_packages)), ()
-            )
-
-    def test_wrong_character_count_fails(self):
-        """Character hash count mismatching the plan fails closed."""
-        from short_drama.story.story_analysis_global_skeleton_semantic import (
-            _verify_upstream_request_identities,
-        )
-
-        plan = self._plan()
-        # Provide one fewer hash than expected.
-        bad_hashes = self._valid_char_hashes(len(plan.character_packages) - 1)
-        with pytest.raises(StoryAnalysisSemanticError, match="does not match"):
-            _verify_upstream_request_identities(
-                plan, bad_hashes, self._valid_window_hashes(len(plan.windows))
-            )
-
-    def test_wrong_window_count_fails(self):
-        """Window hash count mismatching the plan fails closed."""
-        from short_drama.story.story_analysis_global_skeleton_semantic import (
-            _verify_upstream_request_identities,
-        )
-
-        plan = self._plan()
-        bad_hashes = self._valid_window_hashes(len(plan.windows) + 1)
-        with pytest.raises(StoryAnalysisSemanticError, match="does not match"):
-            _verify_upstream_request_identities(
-                plan, self._valid_char_hashes(len(plan.character_packages)), bad_hashes
-            )
-
-    def test_malformed_hash_fails(self):
-        """A non-SHA-256 hex string in the identity sequence fails closed."""
-        from short_drama.story.story_analysis_global_skeleton_semantic import (
-            _verify_upstream_request_identities,
-        )
-
-        plan = self._plan()
-        # First hash is valid, second is malformed (too short).
-        hashes = ("a" * 64, "not-a-valid-hash")
-        if len(plan.character_packages) >= 2:
-            with pytest.raises(StoryAnalysisSemanticError, match="not a valid SHA-256"):
-                _verify_upstream_request_identities(
-                    plan, hashes, self._valid_window_hashes(len(plan.windows))
-                )
-        else:
-            # If only one character, put the bad hash in position 0.
-            with pytest.raises(StoryAnalysisSemanticError, match="not a valid SHA-256"):
-                _verify_upstream_request_identities(
-                    plan, ("bad",), self._valid_window_hashes(len(plan.windows))
-                )
+        with pytest.raises(StoryAnalysisSemanticError, match="count"):
+            self._verify(self._expected_char_hashes(), ())
 
     def test_manifest_mismatch_fails(self):
         """Snapshot and plan referencing different A5 manifests fails closed."""
@@ -1656,7 +1722,6 @@ class TestUpstreamBinding:
 
         snapshot = self._snapshot()
         plan = self._plan()
-        # Create a plan with a different manifest ref.
         tampered_plan = dataclasses.replace(
             plan,
             consolidation_manifest_ref=ArtifactRef(
@@ -1677,30 +1742,17 @@ class TestUpstreamBinding:
 
         snapshot = self._snapshot()
         plan = self._plan()
-        # Should not raise.
         _verify_snapshot_plan_manifest_identity(snapshot, plan)
 
-    def test_valid_upstream_binding_passes(self):
-        """Correctly-sized, well-formed identity sequences pass."""
-        from short_drama.story.story_analysis_global_skeleton_semantic import (
-            _verify_upstream_request_identities,
-        )
-
-        plan = self._plan()
-        char_hashes = self._valid_char_hashes(len(plan.character_packages))
-        window_hashes = self._valid_window_hashes(len(plan.windows))
-        # Should not raise.
-        _verify_upstream_request_identities(plan, char_hashes, window_hashes)
-
-    def test_preparation_rejects_empty_upstream_zero_provider_calls(self):
-        """build_global_skeleton_semantic_preparation rejects empty upstream
-        identities before any provider call (zero LLM invocations)."""
+    def test_preparation_rejects_fabricated_identities_zero_provider_calls(self):
+        """build_global_skeleton_semantic_preparation rejects fabricated
+        (all-'a'*64) upstream identities before any provider call."""
         from short_drama.llm import PromptRegistry
         from short_drama.story.reconciliation_semantic import DEFAULT_PROMPT_BASE_DIR
 
         snapshot = self._snapshot()
         plan = self._plan()
-        profile = _make_profile(74000)
+        profile = self._profile()
         semantic_profile = _make_semantic_profile()
         prompts = PromptRegistry(DEFAULT_PROMPT_BASE_DIR)
 
@@ -1712,9 +1764,11 @@ class TestUpstreamBinding:
             for i, w in enumerate(plan.windows)
         ]
 
-        # Empty upstream hashes -> fail closed before any provider call.
-        llm_client = MagicMock(spec=LLMClient)
-        with pytest.raises(StoryAnalysisSemanticError, match="count"):
+        # Fabricated identities (valid SHA-256 format, wrong values).
+        fake_char = tuple("a" * 64 for _ in range(len(plan.character_packages)))
+        fake_window = tuple("b" * 64 for _ in range(len(plan.windows)))
+
+        with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
             build_global_skeleton_semantic_preparation(
                 snapshot,
                 plan,
@@ -1723,73 +1777,42 @@ class TestUpstreamBinding:
                 char_analyses,
                 window_analyses,
                 prompts=prompts,
-                character_request_identity_hashes=(),
-                window_request_identity_hashes=(),
+                character_request_identity_hashes=fake_char,
+                window_request_identity_hashes=fake_window,
             )
-        # Zero provider calls.
-        llm_client.generate_structured.assert_not_called()
 
-    def test_preparation_rejects_stale_profile_zero_provider_calls(self):
-        """build_global_skeleton_semantic_preparation rejects a plan built
-        under a different (stale) profile before any provider call."""
+    def test_preparation_accepts_correct_identities(self):
+        """build_global_skeleton_semantic_preparation accepts identity hashes
+        that were recomputed from the same profile/plan."""
         from short_drama.llm import PromptRegistry
         from short_drama.story.reconciliation_semantic import DEFAULT_PROMPT_BASE_DIR
-        from short_drama.story.story_analysis_planning import (
-            build_story_analysis_plan_from_profile,
-        )
 
         snapshot = self._snapshot()
-        profile_current = _make_profile(74000)
-        profile_stale = _make_profile(ceiling=None)  # Old null-ceiling profile.
-
-        # Plan built under the stale profile.
-        plan_stale = build_story_analysis_plan_from_profile(snapshot, profile_stale)
+        plan = self._plan()
+        profile = self._profile()
         semantic_profile = _make_semantic_profile()
         prompts = PromptRegistry(DEFAULT_PROMPT_BASE_DIR)
 
-        char_analyses = [_char_analysis(c.character_ref) for c in plan_stale.character_packages]
+        char_analyses = [_char_analysis(c.character_ref) for c in plan.character_packages]
         window_analyses = [
             _window_analysis(
                 f"window_{i+1:04d}", i + 1, w.owned_event_ids, w.context_event_ids
             )
-            for i, w in enumerate(plan_stale.windows)
+            for i, w in enumerate(plan.windows)
         ]
 
-        # The plan was built under the stale profile; its manifest ref matches
-        # the snapshot, but the plan hash is different. The upstream binding
-        # check passes (manifest matches), but the plan hash in the identity
-        # will be from the stale profile. We verify the preparation succeeds
-        # structurally (the identity binding is about the manifest ref, not the
-        # profile hash directly).
-        #
-        # However, if we pass a plan whose manifest ref doesn't match the
-        # snapshot, it fails:
-        from short_drama.artifacts import ArtifactRef
-
-        tampered_plan = dataclasses.replace(
-            plan_stale,
-            consolidation_manifest_ref=ArtifactRef(
-                artifact_type="consolidation_manifest",
-                artifact_id="stale.artifact",
-                revision=1,
-                content_hash="e" * 64,
-            ),
+        # Correct identities recomputed from the same profile/plan.
+        prep = build_global_skeleton_semantic_preparation(
+            snapshot,
+            plan,
+            profile,
+            semantic_profile,
+            char_analyses,
+            window_analyses,
+            prompts=prompts,
+            character_request_identity_hashes=self._expected_char_hashes(),
+            window_request_identity_hashes=self._expected_window_hashes(),
         )
-        llm_client = MagicMock(spec=LLMClient)
-        with pytest.raises(StoryAnalysisSemanticError, match="disagree"):
-            build_global_skeleton_semantic_preparation(
-                snapshot,
-                tampered_plan,
-                profile_current,
-                semantic_profile,
-                char_analyses,
-                window_analyses,
-                prompts=prompts,
-                character_request_identity_hashes=self._valid_char_hashes(
-                    len(plan_stale.character_packages)
-                ),
-                window_request_identity_hashes=self._valid_window_hashes(
-                    len(plan_stale.windows)
-                ),
-            )
-        llm_client.generate_structured.assert_not_called()
+        # Should succeed and produce a valid preparation.
+        assert prep.request_identity_hash
+        assert len(prep.request_identity_hash) == 64

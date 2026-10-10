@@ -90,7 +90,7 @@ planning_policy:
   plot_window_packet_max_estimated_tokens: 58000
   plot_window_owned_event_target: 12
   plot_window_context_event_count: 4
-  global_skeleton_packet_max_estimated_tokens: null
+  global_skeleton_packet_max_estimated_tokens: 74000
   story_bible_packet_max_estimated_tokens: null
 
 # A6 character-analysis semantic pass.

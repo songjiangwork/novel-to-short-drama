@@ -203,6 +203,38 @@ class StoryAnalysisWindowSemanticGenerationError(StoryAnalysisSemanticError):
         )
 
 
+class StoryAnalysisGlobalSkeletonSemanticGenerationError(StoryAnalysisSemanticError):
+    """A6E global-skeleton semantic regeneration exhausted after max_generation_rounds (2).
+
+    All permitted A6E semantic generation rounds produced schema-valid provider
+    results that were rejected by typed load / canonical ref validation /
+    structural validation; the global-skeleton result could not be produced.
+    A6E is in-memory only, so no partial result is published. This is a
+    *semantic* failure, not a transport error: the underlying A-I3 provider
+    calls all succeeded.
+
+    Carries deterministic diagnostics for tests/review: the backend-neutral
+    ``request_hash``, the number of semantic rounds attempted, and the bounded
+    failure details from the final failed round.
+    """
+
+    def __init__(
+        self,
+        *,
+        request_hash: str,
+        rounds_attempted: int,
+        last_failure_details: tuple[str, ...],
+    ) -> None:
+        self.request_hash = request_hash
+        self.rounds_attempted = rounds_attempted
+        self.last_failure_details = last_failure_details
+        super().__init__(
+            f"A6E global-skeleton analysis failed after "
+            f"{rounds_attempted} semantic generation round(s): "
+            f"{'; '.join(last_failure_details)}"
+        )
+
+
 class ConsolidationSemanticError(StoryError):
     """A5C fact semantic ambiguity resolution failure.
 

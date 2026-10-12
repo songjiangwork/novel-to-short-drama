@@ -18,19 +18,35 @@
 # Alice source word count, the 262K theoretical context, or the operator's
 # current llama.cpp slots.
 #
-# STAGED CEILING AUTHORITY (merged #97 contract): A6B freezes only the values
-# it can actually measure. The character / window values below are MEASURED and
-# CONCRETE. The two whole-story ceilings (global-skeleton / story-bible) are
-# DEFERRED = null because the complete A6E / A6F whole-story packet joins the
-# A6C character dossiers + A6D window analyses (+ the A6E global-skeleton
-# output for the story bible), which are future semantic outputs that do not
-# exist yet and carry no frozen size bound in the authoritative architecture.
-# A6B measures the A5-derived base as a MEASUREMENT but does NOT freeze it as a
-# whole-story ceiling (that would be an A5-only placeholder). ``null`` =
-# DEFERRED (not unlimited, not zero); the corresponding pass fails closed (zero
-# provider calls) while the ceiling is ``null``. The complete fail-closed gate
-# belongs to pre-A6E (global-skeleton) and pre-A6F (story-bible), and the
-# recursive-global-compression decision is DEFERRED TO A6E MEASUREMENT.
+# STAGED CEILING AUTHORITY (merged #97 contract, revised at the A6E gate):
+# A6B freezes only the values it can actually measure. The character / window
+# values below are MEASURED and CONCRETE. A whole-story ceiling is frozen only
+# at the gate where its exact complete semantic input first exists (the
+# complete A6E / A6F packet joins the A6C character dossiers + A6D window
+# analyses, and the A6E global-skeleton output for the story bible), and is
+# DEFERRED = null before that gate -- never an A5-only placeholder.
+#
+#   * global_skeleton_packet_max_estimated_tokens is now FROZEN (100000),
+#     measured at the pre-A6E gate on the real Alice exact validated A5
+#     CURRENT: the exact complete global-skeleton input packet (A5-derived
+#     global index + every A6C CharacterAnalysis + every A6D
+#     PlotWindowAnalysis) measured 73929 (A6E-1) and 74404 (A6E-2
+#     real-provider), observed variation 475. The frozen 100000 is a
+#     deliberately selected v1 operational envelope -- a bounded,
+#     intentionally conservative margin above the measured baseline for
+#     nondeterministic LLM outputs (NOT a statistically established worst-case
+#     bound, NOT an unlimited or universal budget, and NOT set from the 262K
+#     context). It is an upper bound (not a target input length), authorizes
+#     NO truncation / sampling, and is enforced fail-closed (a null ceiling or
+#     an oversized packet refuses to run with zero provider calls).
+#   * story_bible_packet_max_estimated_tokens remains DEFERRED = null
+#     (measured / frozen at the pre-A6F gate, when the A6E output exists).
+#
+# ``null`` = DEFERRED (not unlimited, not zero); the corresponding pass fails
+# closed (zero provider calls) while the ceiling is ``null``. The
+# recursive-global-compression decision is DEFERRED TO A6E MEASUREMENT (and
+# resolved: the whole-story compressed representation fits in one complete
+# global request, so NO recursive compression is required).
 #
 #   * character_packet_max_estimated_tokens = 70000
 #       Measured max character evidence package is 69550 tokens
@@ -50,15 +66,17 @@
 #       degenerate one-event / zero-context policy and defeat hierarchical
 #       compression. The corpus-derived sweep is retained in the audit as
 #       measurement evidence only.
-#   * global_skeleton_packet_max_estimated_tokens = null  (DEFERRED)
+#   * global_skeleton_packet_max_estimated_tokens = 100000  (FROZEN at A6E)
+#       Measured at the pre-A6E gate from the exact complete A6E input on the
+#       real Alice A5 CURRENT (baseline 73929 / 74404; see
+#       docs/v1.2-A6E-1-global-skeleton-measurement-report.md). This is a
+#       bounded operational envelope above the measured baseline, not an
+#       A5-derived placeholder and not from the 262K theoretical context.
 #   * story_bible_packet_max_estimated_tokens = null      (DEFERRED)
-#       The complete A6E / A6F whole-story packet cannot be measured in A6B.
-#       A6B measures the A5-derived base (serialized A5/A4 exact typed-leaf
+#       A6B still measures the A5-derived base (serialized A5/A4 exact typed-leaf
 #       total 113735 tokens; compact A5-derived global-index base 21940 tokens)
-#       as a MEASUREMENT ONLY; the full semantic ceiling is DEFERRED (null) and
-#       is measured at the pre-A6E / pre-A6F gate. This is NOT a fabricated
-#       semantic-output size, NOT an A5-derived placeholder, and NOT set from
-#       the 262K theoretical context.
+#       as a MEASUREMENT ONLY; the story-bible ceiling is DEFERRED (null) until
+#       the complete A6F packet (which joins the A6E output) exists at A6F.
 #
 # The audit is zero-write: it proves (before/after SHA-256 equality of the
 # story runs tree) that it mutates nothing, and it refuses to write any report
@@ -82,15 +100,16 @@ story_bible_policy_id: a6-bible-v1
 # Frozen A6 v1 bounded semantic generation rounds (contract requires 2).
 max_generation_rounds: 2
 
-# Post-audit numeric planning / token policy (A6B Alice zero-provider audit).
-# character / window values are MEASURED + CONCRETE; the two whole-story
-# ceilings are DEFERRED (null) per the merged #97 staged ceiling authority.
+# Post-audit numeric planning / token policy.
+# character / window values are MEASURED + CONCRETE (A6B Alice zero-provider
+# audit); the global-skeleton ceiling is FROZEN at 100000 (A6E gate); the
+# story-bible ceiling remains DEFERRED (null) per the #97 staged authority.
 planning_policy:
   character_packet_max_estimated_tokens: 70000
   plot_window_packet_max_estimated_tokens: 58000
   plot_window_owned_event_target: 12
   plot_window_context_event_count: 4
-  global_skeleton_packet_max_estimated_tokens: 74000
+  global_skeleton_packet_max_estimated_tokens: 100000
   story_bible_packet_max_estimated_tokens: null
 
 # A6 character-analysis semantic pass.

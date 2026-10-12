@@ -3,7 +3,7 @@
 Covers the A6E-2 semantic execution module
 ``short_drama.story.story_analysis_global_skeleton_semantic``:
 
-* identity transition: the ceiling change (null -> 74000) changes both the
+* identity transition: the ceiling change (null -> 100000) changes both the
   StoryAnalysisProfile hash and the A6B plan hash, which in turn changes the
   A6C/A6D stable request identities;
 * ceiling enforcement: null ceiling fails closed, exceeded ceiling fails
@@ -124,7 +124,7 @@ def _window_analysis(
     )
 
 
-def _make_profile(ceiling: int | None = 74000) -> StoryAnalysisProfile:
+def _make_profile(ceiling: int | None = 100000) -> StoryAnalysisProfile:
     """Build a minimal valid StoryAnalysisProfile with the given ceiling."""
     policy = StoryAnalysisPlanningPolicy(
         character_packet_max_estimated_tokens=70000,
@@ -322,15 +322,15 @@ def _make_snapshot_with_events(n_events: int = 20) -> StoryAnalysisInputSnapshot
 
 
 class TestIdentityTransition:
-    """The ceiling change (null -> 74000) changes both the StoryAnalysisProfile
+    """The ceiling change (null -> 100000) changes both the StoryAnalysisProfile
     hash and the A6B plan hash, which in turn changes the A6C/A6D stable
     request identities."""
 
     def test_profile_hash_changes_with_ceiling(self):
-        """Changing the ceiling from null to 74000 changes the profile hash."""
+        """Changing the ceiling from null to 100000 changes the profile hash."""
         profile_null = _make_profile(ceiling=None)
-        profile_74k = _make_profile(ceiling=74000)
-        assert profile_null.content_hash() != profile_74k.content_hash()
+        profile_100k = _make_profile(ceiling=100000)
+        assert profile_null.content_hash() != profile_100k.content_hash()
 
     def test_plan_hash_changes_with_ceiling(self):
         """The A6B plan hash changes when the planning policy ceiling changes."""
@@ -340,18 +340,18 @@ class TestIdentityTransition:
 
         snapshot = _make_snapshot_with_events(20)
         profile_null = _make_profile(ceiling=None)
-        profile_74k = _make_profile(ceiling=74000)
+        profile_100k = _make_profile(ceiling=100000)
 
         plan_null = build_story_analysis_plan_from_profile(snapshot, profile_null)
-        plan_74k = build_story_analysis_plan_from_profile(snapshot, profile_74k)
+        plan_100k = build_story_analysis_plan_from_profile(snapshot, profile_100k)
 
-        assert plan_null.plan_hash != plan_74k.plan_hash
+        assert plan_null.plan_hash != plan_100k.plan_hash
 
     def test_request_identity_changes_with_profile(self):
         """The A6E-2 request identity changes when the profile hash changes."""
         snapshot = _make_snapshot_with_events(20)
         profile_null = _make_profile(ceiling=None)
-        profile_74k = _make_profile(ceiling=74000)
+        profile_100k = _make_profile(ceiling=100000)
         semantic_profile = _make_semantic_profile()
 
         # Build contexts for both profiles.
@@ -380,10 +380,10 @@ class TestIdentityTransition:
             character_request_identity_hashes=("f" * 64,),
             window_request_identity_hashes=("g" * 64,),
         )
-        h_74k = global_skeleton_request_identity_hash(
+        h_100k = global_skeleton_request_identity_hash(
             consolidation_manifest_ref=snapshot.consolidation_manifest_ref,
             plan_hash="c" * 64,
-            profile=profile_74k,
+            profile=profile_100k,
             semantic_profile=semantic_profile,
             prompt_identity=prompt_id,
             output_schema_identity=schema_id,
@@ -392,7 +392,37 @@ class TestIdentityTransition:
             character_request_identity_hashes=("f" * 64,),
             window_request_identity_hashes=("g" * 64,),
         )
-        assert h_null != h_74k
+        assert h_null != h_100k
+
+    def test_production_profile_freezes_100000_and_hash_is_deterministic(self):
+        """The tracked production profile freezes the global-skeleton ceiling at
+        100000 and its StoryAnalysisProfile hash is deterministic (and equals the
+        frozen identity)."""
+        path = REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
+        profile_a = load_story_analysis_profile(path)
+        profile_b = load_story_analysis_profile(path)
+        # Global-skeleton ceiling is FROZEN at 100000; story-bible stays null.
+        assert profile_a.planning_policy.global_skeleton_packet_max_estimated_tokens == 100000
+        assert profile_a.planning_policy.story_bible_packet_max_estimated_tokens is None
+        # Deterministic: two independent loads give the identical hash.
+        assert profile_a.content_hash() == profile_b.content_hash()
+        # The frozen 100000 profile has the expected stable identity.
+        assert profile_a.content_hash() == (
+            "0fa7bb93fcc7c4e2e09c6075efc528bdb835b6dde398c64cb7bf5495ed9df4a7"
+        )
+
+    def test_revised_plan_hash_is_deterministic(self):
+        """The A6B plan hash under the frozen 100000 ceiling is deterministic."""
+        from short_drama.story.story_analysis_planning import (
+            build_story_analysis_plan_from_profile,
+        )
+
+        snapshot = _make_snapshot_with_events(20)
+        profile = _make_profile(ceiling=100000)
+        plan_a = build_story_analysis_plan_from_profile(snapshot, profile)
+        plan_b = build_story_analysis_plan_from_profile(snapshot, profile)
+        assert plan_a.plan_hash == plan_b.plan_hash
+        assert len(plan_a.plan_hash) == 64
 
 
 def _make_global_index() -> GlobalIndexBase:
@@ -441,7 +471,7 @@ class TestCeilingEnforcement:
 
     def test_valid_ceiling_passes(self):
         """A packet within the ceiling passes."""
-        profile = _make_profile(ceiling=74000)
+        profile = _make_profile(ceiling=100000)
         context = build_global_skeleton_context(
             [_char_analysis("char_0001")],
             [_window_analysis("window_0001", 1, ("evt_000001",), ())],
@@ -756,7 +786,7 @@ class TestDeterministicRequestHash:
         )
 
         snapshot = _make_snapshot_with_events(20)
-        profile = _make_profile(74000)
+        profile = _make_profile(100000)
         semantic_profile = _make_semantic_profile()
         prompt_id = PromptAssetIdentity("a6.global-skeleton", 1, "a" * 64)
         schema_id = OutputSchemaAssetIdentity("a6-global-skeleton-output", 1, "b" * 64)
@@ -786,7 +816,7 @@ class TestDeterministicRequestHash:
         )
 
         snapshot = _make_snapshot_with_events(20)
-        profile = _make_profile(74000)
+        profile = _make_profile(100000)
         semantic_profile = _make_semantic_profile()
         prompt_id = PromptAssetIdentity("a6.global-skeleton", 1, "a" * 64)
         schema_id = OutputSchemaAssetIdentity("a6-global-skeleton-output", 1, "b" * 64)
@@ -1565,7 +1595,7 @@ class TestUpstreamBinding:
         return _make_snapshot_with_events(20)
 
     def _profile(self) -> StoryAnalysisProfile:
-        return _make_profile(74000)
+        return _make_profile(100000)
 
     def _plan(self) -> StoryAnalysisPlan:
         from short_drama.story.story_analysis_planning import (
@@ -1635,7 +1665,7 @@ class TestUpstreamBinding:
 
     def test_stale_null_ceiling_profile_identities_rejected(self):
         """Identity hashes computed under a null-ceiling (stale) profile are
-        rejected when the current profile has ceiling=74000."""
+        rejected when the current profile has ceiling=100000."""
         from short_drama.story.story_analysis_planning import (
             build_story_analysis_plan_from_profile,
         )
@@ -1648,7 +1678,7 @@ class TestUpstreamBinding:
 
         snapshot = self._snapshot()
         profile_stale = _make_profile(ceiling=None)  # Old null-ceiling profile.
-        profile_current = self._profile()  # Current 74000 ceiling.
+        profile_current = self._profile()  # Current 100000 ceiling.
         semantic_profile = _make_semantic_profile()
         prompts = self._prompts()
 
@@ -1668,6 +1698,52 @@ class TestUpstreamBinding:
         from short_drama.story.story_analysis_global_skeleton_semantic import (
             _verify_upstream_request_identities,
         )
+        with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
+            _verify_upstream_request_identities(
+                snapshot,
+                plan_current,
+                profile_current,
+                semantic_profile,
+                a6c_stale.character_request_identity_hashes,
+                a6d_stale.window_request_identity_hashes,
+                prompts=prompts,
+            )
+
+    def test_stale_74k_ceiling_profile_identities_rejected(self):
+        """Identity hashes computed under the old 74000-ceiling profile are
+        rejected when the current profile has the revised 100000 ceiling. This
+        guarantees the 61 upstream A6C/A6D analyses produced under the 74000
+        identity are NOT silently rebound to the new identity."""
+        from short_drama.story.story_analysis_planning import (
+            build_story_analysis_plan_from_profile,
+        )
+        from short_drama.story.story_analysis_semantic import (
+            build_character_semantic_preparation,
+        )
+        from short_drama.story.story_analysis_window_semantic import (
+            build_plot_window_semantic_preparation,
+        )
+        from short_drama.story.story_analysis_global_skeleton_semantic import (
+            _verify_upstream_request_identities,
+        )
+
+        snapshot = self._snapshot()
+        profile_stale = _make_profile(ceiling=74000)  # Old frozen-ceiling profile.
+        profile_current = self._profile()  # Current 100000 ceiling.
+        semantic_profile = _make_semantic_profile()
+        prompts = self._prompts()
+
+        # Plan and identities computed under the STALE 74000 profile.
+        plan_stale = build_story_analysis_plan_from_profile(snapshot, profile_stale)
+        a6c_stale = build_character_semantic_preparation(
+            plan_stale, profile_stale, semantic_profile, prompts=prompts
+        )
+        a6d_stale = build_plot_window_semantic_preparation(
+            snapshot, plan_stale, profile_stale, semantic_profile, prompts=prompts
+        )
+
+        # Verify using the CURRENT 100000 profile/plan but the STALE identities.
+        plan_current = build_story_analysis_plan_from_profile(snapshot, profile_current)
         with pytest.raises(StoryAnalysisSemanticError, match="mismatch"):
             _verify_upstream_request_identities(
                 snapshot,

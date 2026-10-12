@@ -221,6 +221,36 @@ A6E semantic output complete
 
 这也意味着是否需要 recursive compression 必须基于 actual complete compressed representation 的 measured size 决定，而不能仅根据 A6B 的 A5-derived base 推断。
 
+### 修订：global-skeleton ceiling 已在 A6E gate 冻结为 100000
+
+在 A6E-1 / A6E-2 测量后，global-skeleton ceiling 已按 staged authority 在 pre-A6E
+gate 冻结；story-bible ceiling 仍为 DEFERRED = null（在 A6E output 存在后于
+pre-A6F gate 冻结）。修订规则区分五层：
+
+```text
+1. 实测完整 semantic-input 基线
+   73929 (A6E-1) 与 74404 (A6E-2 真实 provider)，观测变异 475。
+   对 exact Alice A5 CURRENT 上的完整 A6E 输入包（A5-derived global index
+   + 全部 A6C CharacterAnalysis + 全部 A6D PlotWindowAnalysis）。
+2. 有界变异余量（针对非确定性 LLM 输出）
+   不是一次测量向上取整到 1000 步，而是刻意选择的保守运行包络。
+3. 冻结的最大 packet ceiling
+   global_skeleton_packet_max_estimated_tokens = 100000。
+   是上限（upper bound），不是目标输入长度；不授权截断 / 采样。
+4. 实际 model-context 可行性（估算器口径，非权威 tokenizer 计数）
+   n_ctx = 163840；冻结输出保留 max_output_tokens = 16384；
+   约 83 estimated tokens 的 prompt framing：
+   100000 + 83 + 16384 = 116467；context 余量 163840 - 116467 = 47373。
+5. Fail-closed 强制
+   ceiling 为 null 或 packet 超限 → 零 provider calls、拒绝运行（不截断）。
+```
+
+这是刻意保守的运行余量：headroom 25596 estimated tokens（100000 - 74404），
+约 34.4% 的 margin。它不是统计意义上建立的 worst-case 上界，也不代表任意小说的
+通用 100K 预算，也不引入通用自适应运行 ceiling。物理 GPU / slots / NP /
+endpoint / provider model 不进入 semantic identity。完整测量依据见
+docs/v1.2-A6E-1-global-skeleton-measurement-report.md。
+
 ---
 ## 如果 262K 足够怎么办？
 

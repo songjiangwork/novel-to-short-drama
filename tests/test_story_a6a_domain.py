@@ -107,7 +107,7 @@ def test_interpretation_closed_evidence_mode_and_namespace_round_trip():
 
 def test_semantic_profile_and_four_prompts_are_tracked_and_backend_neutral():
     profile = load_semantic_profile(REPO_ROOT / "profiles/story_analysis_llm_v1.yaml")
-    assert (profile.profile_id, profile.temperature, profile.max_output_tokens, profile.structured_output_mode) == ("story-analysis-llm-v1", 0.0, 16384, "json_schema")
+    assert (profile.profile_id, profile.temperature, profile.max_output_tokens, profile.structured_output_mode) == ("story-analysis-llm-v1", 0.0, 32768, "json_schema")
     registry = PromptRegistry(REPO_ROOT / "prompts/story")
     expected = {
         "a6.character-analysis": ("character_context_json", "3e8b1ed4a1b5981c31a4e4caadcb482dde4af8ed32f045ad918c5af4878c0e0d"),

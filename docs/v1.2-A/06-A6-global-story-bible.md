@@ -238,9 +238,9 @@ pre-A6F gate 冻结）。修订规则区分五层：
    global_skeleton_packet_max_estimated_tokens = 100000。
    是上限（upper bound），不是目标输入长度；不授权截断 / 采样。
 4. 实际 model-context 可行性（估算器口径，非权威 tokenizer 计数）
-   n_ctx = 163840；冻结输出保留 max_output_tokens = 16384；
+   n_ctx = 163840；冻结输出保留 max_output_tokens = 32768；
    约 83 estimated tokens 的 prompt framing：
-   100000 + 83 + 16384 = 116467；context 余量 163840 - 116467 = 47373。
+   100000 + 83 + 32768 = 132851；context 余量 163840 - 132851 = 30989。
 5. Fail-closed 强制
    ceiling 为 null 或 packet 超限 → 零 provider calls、拒绝运行（不截断）。
 ```
@@ -250,6 +250,12 @@ pre-A6F gate 冻结）。修订规则区分五层：
 通用 100K 预算，也不引入通用自适应运行 ceiling。物理 GPU / slots / NP /
 endpoint / provider model 不进入 semantic identity。完整测量依据见
 docs/v1.2-A6E-1-global-skeleton-measurement-report.md。
+
+另：首次真实 A6E 运行（100000 ceiling）在 `max_output_tokens = 16384` 处
+`finish_reason = length` 截断（3 次技术重试后失败），因此共享 A6 semantic
+profile 的输出上限由 16384 提升到 32768（temperature / reasoning / schema mode
+不变）。这会改变 `SemanticLLMProfile` hash 以及全部 A6C / A6D / A6E request
+identity（见 A6E-1 报告 section 12）；global 输入 ceiling 100000 不变。
 
 ---
 ## 如果 262K 足够怎么办？

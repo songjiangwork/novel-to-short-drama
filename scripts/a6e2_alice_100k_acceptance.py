@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Read-only, checkpointable real-provider Alice A6C -> A6D -> A6E acceptance.
 
-Versioned 100k-ceiling successor to the operator-side ``a6e2_alice_resume.py``
-(Issue #102). It runs the exact same acceptance as the original but is pinned
-to the REVISDED frozen global-skeleton ceiling (100000) and its resulting
-StoryAnalysisProfile / A6B-plan / A6C / A6D identity transition:
+Versioned 100k-ceiling / 32k-output successor to the operator-side
+``a6e2_alice_resume.py`` (Issue #102). It runs the exact same acceptance as the
+original but is pinned to the REVISDED frozen global-skeleton ceiling (100000)
+and the RAISED shared A6 semantic-profile output limit (32768) and their
+resulting StoryAnalysisProfile / SemanticLLMProfile / A6B-plan / A6C / A6D
+identity transition:
 
 * the tracked profile ``profiles/global_story_analysis_v1.yaml`` now freezes
   ``global_skeleton_packet_max_estimated_tokens = 100000`` (was 74000);
+* the tracked profile ``profiles/story_analysis_llm_v1.yaml`` now freezes
+  ``max_output_tokens = 32768`` (was 16384); the first A6E run truncated the
+  whole-story output at 16384 (``finish_reason = length``);
 * the new identity is deterministic and pinned below (a mismatched profile /
-  plan / request identity fails closed);
+  semantic profile / plan / request identity fails closed);
 * all 61 upstream A6C/A6D analyses are regenerated fresh under the new
   identity (the old 74000 checkpoints are NOT reused);
 * diagnostics are written OUTSIDE the story runs tree; no A5/A6 persistence or
@@ -60,16 +65,19 @@ from short_drama.story.story_analysis_global_skeleton_semantic import (
 )
 
 ALICE_A5_HASH = "02973505f6a499e075d003120ad83305a42f315e5fe1b313a786e8182581903a"
-# Revised 100000-ceiling identity (deterministic; see
-# docs/v1.2-A6E-1-global-skeleton-measurement-report.md section 11).
+# Revised 100000-ceiling / 32768-output identity (deterministic; see
+# docs/v1.2-A6E-1-global-skeleton-measurement-report.md sections 11 + 12).
 FROZEN_PROFILE_HASH = (
     "0fa7bb93fcc7c4e2e09c6075efc528bdb835b6dde398c64cb7bf5495ed9df4a7"
 )
 FROZEN_PLAN_HASH = (
     "a427e1cfdde2faa9be77fad55594ae4247ca5440d45a1dbf3073fb0e6e6cf34b"
 )
+FROZEN_SEMANTIC_PROFILE_HASH = (
+    "38d8ff6d047b54d37e77c6cbbe3d25d895cdc4af3402ea129d56ac4893f5e4b8"
+)
 FROZEN_CEILING = 100000
-DEFAULT_WORK = Path("/tmp/a6e2_alice_uncensored_100k_resume")
+DEFAULT_WORK = Path("/tmp/a6e2_alice_uncensored_100k_out32k_resume")
 STORY_ROOT = REPO_ROOT / "runs" / "a4e_real_novel" / "a3e-real-novel" / "story"
 POINTER_FILE = STORY_ROOT / "pointers" / "heads" / "a3e-real-novel.a5.src_001.consolidation-v1.json"
 
@@ -209,15 +217,24 @@ def main() -> int:
             raise RuntimeError(f"Global ceiling is not exactly the frozen {FROZEN_CEILING} (got {ceiling})")
         report.update({"a5_manifest_hash": manifest_hash, "a6_plan_hash": plan.plan_hash,
                        "story_analysis_profile_hash": profile_hash,
+                       "semantic_profile_hash": FROZEN_SEMANTIC_PROFILE_HASH,
                        "ceiling": FROZEN_CEILING})
         prompts = PromptRegistry(DEFAULT_PROMPT_BASE_DIR)
         sem = load_character_semantic_profile()
+        wsem = load_window_semantic_profile()
+        # The shared A6 semantic-profile output limit was raised 16384 -> 32768;
+        # pin its hash so a stale (16384) profile is rejected before any call.
+        if sem.semantic_profile_hash != FROZEN_SEMANTIC_PROFILE_HASH or \
+                wsem.semantic_profile_hash != FROZEN_SEMANTIC_PROFILE_HASH:
+            raise RuntimeError(
+                f"Unexpected SemanticLLMProfile hash: {sem.semantic_profile_hash} "
+                f"(expected {FROZEN_SEMANTIC_PROFILE_HASH})")
         client = OpenAICompatibleLLMClient(
             load_runtime_config(REPO_ROOT / "profiles" / "llm_local.yaml"))
         cprep = build_character_semantic_preparation(plan, profile, sem, prompts=prompts)
-        wsem = load_window_semantic_profile()
         wprep = build_plot_window_semantic_preparation(snapshot, plan, profile, wsem, prompts=prompts)
         log(f"Pinned A5: {manifest_hash}; profile: {profile_hash}; plan: {plan.plan_hash}; "
+            f"semantic: {FROZEN_SEMANTIC_PROFILE_HASH}; "
             f"ceiling={FROZEN_CEILING}; characters={len(cprep.character_refs)}, "
             f"windows={len(wprep.window_ids)}")
         report["a6c_request_identities"] = list(cprep.character_request_identity_hashes)

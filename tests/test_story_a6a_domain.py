@@ -112,7 +112,7 @@ def test_semantic_profile_and_four_prompts_are_tracked_and_backend_neutral():
     expected = {
         "a6.character-analysis": ("character_context_json", "3e8b1ed4a1b5981c31a4e4caadcb482dde4af8ed32f045ad918c5af4878c0e0d"),
         "a6.plot-window-analysis": ("window_context_json", "41a4b489a3745ae3f8bc96f478bbc4a3d97a9a05665b3ea930c31ae0d7c1c22a"),
-        "a6.global-skeleton": ("global_context_json", "256f94a61c08bfca6ddb11aff13c123eb7d6ecffef03b858433fa777b240cc7b"),
+        "a6.global-skeleton": ("global_context_json", "e88fff8c0586f0b45fcd381425478a0661480ddff8fa1bfd34f5f3703303cf38"),
         "a6.story-bible-synthesis": ("story_context_json", "bdeb964ac8408b95de5946677cedb6a97f607685c2afe002a3ab1a8d34972bc9"),
     }
     for prompt_id, (variable, expected_hash) in expected.items():

@@ -257,6 +257,17 @@ profile 的输出上限由 16384 提升到 32768（temperature / reasoning / sch
 不变）。这会改变 `SemanticLLMProfile` hash 以及全部 A6C / A6D / A6E request
 identity（见 A6E-1 报告 section 12）；global 输入 ceiling 100000 不变。
 
+另：首次真实 A6E 运行（100000 / 32768）仍在 `max_output_tokens = 32768` 处
+`finish_reason = length` 截断——根因是模型对六个 A6E 集合做无界枚举（schema
+未设 `maxItems`，每条 `text_zh` 无长度上限）。因此仅修订 A6E 提示词（
+`a6.global-skeleton` v1，prompt-only）：要求产出"精炼且完整的全局综合"，每条
+`interpretation.text_zh` 用 1–3 句简明概括并指向证据、不逐条复述上游 A6C/A6D
+分析；六个集合只保留 salient / major / meaningful 的少数项并给出克制的篇幅指引
+（不引入硬 `maxItems` 约束、不省略 frozen A6 架构要求的字段或合法引用）。
+该修订只改变 A6E prompt content hash 与 A6E request identity；A6C / A6D
+request identity 及其 61 个 checkpoint 保持不变、可复用（见 A6E-1 报告
+section 13）。
+
 ---
 ## 如果 262K 足够怎么办？
 

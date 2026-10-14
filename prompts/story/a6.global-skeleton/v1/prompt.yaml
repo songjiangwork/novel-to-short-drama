@@ -2,4 +2,4 @@ schema_version: 1
 prompt_id: a6.global-skeleton
 version: 1
 required_variables: [global_context_json]
-content_hash: e88fff8c0586f0b45fcd381425478a0661480ddff8fa1bfd34f5f3703303cf38
+content_hash: 1abb2c676cf4d4f70e0a2ce6e26175ab880d794ec6d827a1b8f2088ed94dd65e

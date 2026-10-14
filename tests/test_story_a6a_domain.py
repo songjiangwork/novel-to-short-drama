@@ -107,12 +107,12 @@ def test_interpretation_closed_evidence_mode_and_namespace_round_trip():
 
 def test_semantic_profile_and_four_prompts_are_tracked_and_backend_neutral():
     profile = load_semantic_profile(REPO_ROOT / "profiles/story_analysis_llm_v1.yaml")
-    assert (profile.profile_id, profile.temperature, profile.max_output_tokens, profile.structured_output_mode) == ("story-analysis-llm-v1", 0.0, 16384, "json_schema")
+    assert (profile.profile_id, profile.temperature, profile.max_output_tokens, profile.structured_output_mode) == ("story-analysis-llm-v1", 0.0, 32768, "json_schema")
     registry = PromptRegistry(REPO_ROOT / "prompts/story")
     expected = {
         "a6.character-analysis": ("character_context_json", "3e8b1ed4a1b5981c31a4e4caadcb482dde4af8ed32f045ad918c5af4878c0e0d"),
         "a6.plot-window-analysis": ("window_context_json", "41a4b489a3745ae3f8bc96f478bbc4a3d97a9a05665b3ea930c31ae0d7c1c22a"),
-        "a6.global-skeleton": ("global_context_json", "256f94a61c08bfca6ddb11aff13c123eb7d6ecffef03b858433fa777b240cc7b"),
+        "a6.global-skeleton": ("global_context_json", "b4f89fbd52e57bd4102cdaa40ffca9d1acfb62452c1e0133a8891985c51cf218"),
         "a6.story-bible-synthesis": ("story_context_json", "bdeb964ac8408b95de5946677cedb6a97f607685c2afe002a3ab1a8d34972bc9"),
     }
     for prompt_id, (variable, expected_hash) in expected.items():

@@ -221,6 +221,53 @@ A6E semantic output complete
 
 这也意味着是否需要 recursive compression 必须基于 actual complete compressed representation 的 measured size 决定，而不能仅根据 A6B 的 A5-derived base 推断。
 
+### 修订：global-skeleton ceiling 已在 A6E gate 冻结为 100000
+
+在 A6E-1 / A6E-2 测量后，global-skeleton ceiling 已按 staged authority 在 pre-A6E
+gate 冻结；story-bible ceiling 仍为 DEFERRED = null（在 A6E output 存在后于
+pre-A6F gate 冻结）。修订规则区分五层：
+
+```text
+1. 实测完整 semantic-input 基线
+   73929 (A6E-1) 与 74404 (A6E-2 真实 provider)，观测变异 475。
+   对 exact Alice A5 CURRENT 上的完整 A6E 输入包（A5-derived global index
+   + 全部 A6C CharacterAnalysis + 全部 A6D PlotWindowAnalysis）。
+2. 有界变异余量（针对非确定性 LLM 输出）
+   不是一次测量向上取整到 1000 步，而是刻意选择的保守运行包络。
+3. 冻结的最大 packet ceiling
+   global_skeleton_packet_max_estimated_tokens = 100000。
+   是上限（upper bound），不是目标输入长度；不授权截断 / 采样。
+4. 实际 model-context 可行性（估算器口径，非权威 tokenizer 计数）
+   n_ctx = 163840；冻结输出保留 max_output_tokens = 32768；
+   约 83 estimated tokens 的 prompt framing：
+   100000 + 83 + 32768 = 132851；context 余量 163840 - 132851 = 30989。
+5. Fail-closed 强制
+   ceiling 为 null 或 packet 超限 → 零 provider calls、拒绝运行（不截断）。
+```
+
+这是刻意保守的运行余量：headroom 25596 estimated tokens（100000 - 74404），
+约 34.4% 的 margin。它不是统计意义上建立的 worst-case 上界，也不代表任意小说的
+通用 100K 预算，也不引入通用自适应运行 ceiling。物理 GPU / slots / NP /
+endpoint / provider model 不进入 semantic identity。完整测量依据见
+docs/v1.2-A6E-1-global-skeleton-measurement-report.md。
+
+另：首次真实 A6E 运行（100000 ceiling）在 `max_output_tokens = 16384` 处
+`finish_reason = length` 截断（3 次技术重试后失败），因此共享 A6 semantic
+profile 的输出上限由 16384 提升到 32768（temperature / reasoning / schema mode
+不变）。这会改变 `SemanticLLMProfile` hash 以及全部 A6C / A6D / A6E request
+identity（见 A6E-1 报告 section 12）；global 输入 ceiling 100000 不变。
+
+另：首次真实 A6E 运行（100000 / 32768）仍在 `max_output_tokens = 32768` 处
+`finish_reason = length` 截断——根因是模型对六个 A6E 集合做无界枚举（schema
+未设 `maxItems`，每条 `text_zh` 无长度上限）。因此仅修订 A6E 提示词（
+`a6.global-skeleton` v1，prompt-only）：要求产出"精炼且完整的全局综合"，每条
+`interpretation.text_zh` 用 1–3 句简明概括并指向证据、不逐条复述上游 A6C/A6D
+分析；六个集合只保留 salient / major / meaningful 的少数项并给出克制的篇幅指引
+（不引入硬 `maxItems` 约束、不省略 frozen A6 架构要求的字段或合法引用）。
+该修订只改变 A6E prompt content hash 与 A6E request identity；A6C / A6D
+request identity 及其 61 个 checkpoint 保持不变、可复用（见 A6E-1 报告
+section 13）。
+
 ---
 ## 如果 262K 足够怎么办？
 

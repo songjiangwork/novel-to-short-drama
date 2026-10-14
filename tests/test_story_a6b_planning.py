@@ -86,18 +86,19 @@ _POLICY = StoryAnalysisPlanningPolicy(
     story_bible_packet_max_estimated_tokens=100_000,
 )
 
-# The exact frozen planning policy measured by the A6B Alice audit.
-# character / window values are MEASURED + CONCRETE; the two whole-story
-# ceilings are DEFERRED (null) per the merged #97 staged ceiling authority
-# (the complete A6E / A6F whole-story packet joins future semantic outputs that
-# do not exist yet; A6B measures the A5-derived base but does NOT freeze it as
-# a whole-story ceiling).
+# The exact frozen planning policy measured by the A6B Alice audit (character /
+# window) and the A6E gate (global-skeleton ceiling). character / window values
+# are MEASURED + CONCRETE; the global-skeleton ceiling is FROZEN at 100000 at the
+# A6E gate (a bounded operational envelope above the measured complete A6E input
+# baseline); the story-bible ceiling remains DEFERRED (null) per the #97 staged
+# ceiling authority (the complete A6F packet joins the A6E output that does not
+# exist yet).
 _FROZEN_POLICY = {
     "character_packet_max_estimated_tokens": 70_000,
     "plot_window_packet_max_estimated_tokens": 58_000,
     "plot_window_owned_event_target": 12,
     "plot_window_context_event_count": 4,
-    "global_skeleton_packet_max_estimated_tokens": None,
+    "global_skeleton_packet_max_estimated_tokens": 100_000,
     "story_bible_packet_max_estimated_tokens": None,
 }
 
@@ -737,15 +738,19 @@ def test_validate_window_ownership_rejects_owned_context_overlap() -> None:
 
 # --- BLOCK C / BLOCK D / staged ceilings / architecture-aware window policy --
 
-def test_production_profile_has_deferred_whole_story_ceilings() -> None:
-    """The A6B production profile defers (null) the two whole-story ceilings and
-    freezes character / window values concrete (merged #97 staged authority)."""
+def test_production_profile_has_frozen_global_skeleton_ceiling() -> None:
+    """The production profile freezes the global-skeleton ceiling (100000,
+    a bounded operational envelope measured at the A6E gate from the A6E-1 /
+    A6E-2 Alice packets) and defers (null) the story-bible ceiling.
+    Character / window values are concrete (merged #97 staged authority)."""
     profile = load_story_analysis_profile(
         REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
     )
     policy = profile.planning_policy
-    # Whole-story ceilings are DEFERRED (null) — not an A5-derived placeholder.
-    assert policy.global_skeleton_packet_max_estimated_tokens is None
+    # Global-skeleton ceiling is FROZEN (measured at the A6E gate; see
+    # docs/v1.2-A6E-1-global-skeleton-measurement-report.md).
+    assert policy.global_skeleton_packet_max_estimated_tokens == 100_000
+    # Story-bible ceiling is still DEFERRED (null).
     assert policy.story_bible_packet_max_estimated_tokens is None
     # character / window values are concrete (measured) and positive.
     assert isinstance(policy.character_packet_max_estimated_tokens, int)
@@ -757,26 +762,25 @@ def test_production_profile_has_deferred_whole_story_ceilings() -> None:
 
 
 def test_deferred_profile_builds_a6b_plan(tmp_path: Path) -> None:
-    """A6B production profile (null/null whole-story ceilings) builds a
+    """A6B production profile (100000/null whole-story ceilings) builds a
     deterministic A6B plan successfully. A6B does NOT execute A6E / A6F; it only
-    enforces the character + window budgets. With deferred (null) ceilings there
-    is no ``int > None`` comparison and no default placeholder, and A6B does not
-    claim the complete A6E / A6F packet is verified."""
+    enforces the character + window budgets. The global-skeleton ceiling is
+    frozen at 100000 (measured at the A6E gate); the story-bible ceiling remains
+    deferred (null)."""
     profile = load_story_analysis_profile(
         REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
     )
-    assert profile.planning_policy.global_skeleton_packet_max_estimated_tokens is None
+    assert profile.planning_policy.global_skeleton_packet_max_estimated_tokens == 100_000
     assert profile.planning_policy.story_bible_packet_max_estimated_tokens is None
     _tree, _planning, _pub, snap = _snapshot(tmp_path)
     plan = build_story_analysis_plan_from_profile(snap, profile)
-    # Deterministic A6B plan built successfully with deferred whole-story ceilings.
+    # Deterministic A6B plan built successfully with frozen global-skeleton ceiling.
     assert plan.plan_hash
     assert plan.plan_hash == build_story_analysis_plan_from_profile(snap, profile).plan_hash
     # A6B measured the A5-derived global-index base (bound into the identity).
     assert plan.plan_identity_payload()["global_index_hash"] == plan.global_index.content_hash()
-    # A6B does NOT claim the full A6E / A6F packet is verified: the ceilings
-    # remain deferred (null), not a concrete bound.
-    assert plan.planning_policy.global_skeleton_packet_max_estimated_tokens is None
+    # The global-skeleton ceiling is frozen; story-bible remains deferred.
+    assert plan.planning_policy.global_skeleton_packet_max_estimated_tokens == 100_000
     assert plan.planning_policy.story_bible_packet_max_estimated_tokens is None
     # Character + window coverage is complete and exact-one ownership holds.
     assert len(plan.character_packages) == len(snap.canonical_characters)

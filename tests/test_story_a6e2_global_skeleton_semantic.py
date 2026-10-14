@@ -1934,7 +1934,7 @@ class TestPromptRefinement:
         # reaching here means the hash is correct. Additionally verify the
         # hash against the frozen expected value for this refinement.
         assert spec.content_hash == (
-            "1abb2c676cf4d4f70e0a2ce6e26175ab880d794ec6d827a1b8f2088ed94dd65e"
+            "b4f89fbd52e57bd4102cdaa40ffca9d1acfb62452c1e0133a8891985c51cf218"
         )
 
     def test_prompt_version_unchanged(self):
@@ -2116,12 +2116,12 @@ class TestPromptRefinement:
         profile = _make_profile(100000)
         semantic_profile = _make_semantic_profile()
 
-        # Old prompt hash (pre-refinement) vs new (post-refinement).
+        # Old prompt hash (pre-V3 refinement) vs new (V3 refinement).
         old_prompt_hash = (
-            "e88fff8c0586f0b45fcd381425478a0661480ddff8fa1bfd34f5f3703303cf38"
+            "1abb2c676cf4d4f70e0a2ce6e26175ab880d794ec6d827a1b8f2088ed94dd65e"
         )
         new_prompt_hash = (
-            "1abb2c676cf4d4f70e0a2ce6e26175ab880d794ec6d827a1b8f2088ed94dd65e"
+            "b4f89fbd52e57bd4102cdaa40ffca9d1acfb62452c1e0133a8891985c51cf218"
         )
 
         schema_id = OutputSchemaAssetIdentity(
@@ -2171,6 +2171,72 @@ class TestPromptRefinement:
         detail = validate_global_skeleton_output(payload, snapshot)
         assert detail is not None
         assert "evt_999999" in detail
+
+    # ------------------------------------------------------------------
+    # 12. V3 prompt refinement: whole-story conflict guidance
+    # ------------------------------------------------------------------
+
+    def test_prompt_main_conflict_whole_story_tension(self):
+        """The V3 prompt guides main_conflict toward whole-story dominant
+        tension and distinguishes sustained conflict from localized
+        antagonist encounters."""
+        spec = self._prompt_spec()
+        sys_text = spec.system_template
+        # The prompt must mention identifying the dominant whole-story tension.
+        assert "main_conflict" in sys_text
+        assert "\u7a81\u51fa" in sys_text or "\u5c40\u90e8" in sys_text  # 局部 (local)
+        # Non-antagonistic conflict types are mentioned.
+        assert "\u8eab\u4efd" in sys_text  # 身份 (identity)
+        # Late antagonist conflicts are directed to secondary.
+        assert "secondary_conflicts" in sys_text
+
+    # ------------------------------------------------------------------
+    # 13. V3 prompt refinement: epistemic boundary guidance
+    # ------------------------------------------------------------------
+
+    def test_prompt_epistemic_boundary_distinction(self):
+        """The V3 prompt distinguishes reader inference from character
+        cognition and forbids attributing reader-level conclusions to
+        character consciousness without explicit source support."""
+        spec = self._prompt_spec()
+        sys_text = spec.system_template
+        # The prompt must state that reader inference != character cognition.
+        assert "\u8bfb\u8005" in sys_text  # 读者 (reader)
+        assert "\u5185\u5728\u8ba4\u77e5" in sys_text  # 内在认知 (inner cognition)
+
+    # ------------------------------------------------------------------
+    # 14. V3 prompt refinement: climax vs resolution distinction
+    # ------------------------------------------------------------------
+
+    def test_prompt_climax_resolution_distinction(self):
+        """The V3 prompt distinguishes climax (decisive confrontation) from
+        resolution (aftermath) and forbids the ending event from
+        automatically being the climax."""
+        spec = self._prompt_spec()
+        sys_text = spec.system_template
+        # The prompt must state that climax and resolution are different
+        # narrative functions.
+        assert "\u9ad8\u6f6e" in sys_text  # 高潮 (climax)
+        assert "\u6536\u675f" in sys_text  # 收束 (resolution)
+        assert "\u540c\u4e00\u4e8b\u4ef6" in sys_text  # 同一事件 (same event)
+        # The restraint section must forbid ending=climax conflation.
+        assert "\u7ed3\u5c40" in sys_text  # 结局 (ending)
+
+    # ------------------------------------------------------------------
+    # 15. V3 prompt refinement: evidence-mode consistency across types
+    # ------------------------------------------------------------------
+
+    def test_prompt_evidence_mode_consistency(self):
+        """The V3 prompt clarifies that a directly observed event being
+        explicit does not make its narrative-function interpretation
+        (climax, structural boundary, main conflict) also explicit."""
+        spec = self._prompt_spec()
+        sys_text = spec.system_template
+        # The evidence-mode section must contain the clarification.
+        assert "\u53d9\u4e8b\u529f\u80fd\u5224\u65ad" in sys_text  # 叙事功能判断
+        # The clarification must reference explicit/inferred distinction.
+        assert "explicit" in sys_text
+        assert "inferred" in sys_text
 
 
 # ---------------------------------------------------------------------------

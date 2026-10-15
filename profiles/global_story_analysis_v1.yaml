@@ -103,14 +103,15 @@ max_generation_rounds: 2
 # Post-audit numeric planning / token policy.
 # character / window values are MEASURED + CONCRETE (A6B Alice zero-provider
 # audit); the global-skeleton ceiling is FROZEN at 100000 (A6E gate); the
-# story-bible ceiling remains DEFERRED (null) per the #97 staged authority.
+# story-bible ceiling was measured at the pre-A6F gate on the exact A6E V3
+# acceptance outputs; it is a bounded upper limit, never truncation authority.
 planning_policy:
   character_packet_max_estimated_tokens: 70000
   plot_window_packet_max_estimated_tokens: 58000
   plot_window_owned_event_target: 12
   plot_window_context_event_count: 4
   global_skeleton_packet_max_estimated_tokens: 100000
-  story_bible_packet_max_estimated_tokens: null
+  story_bible_packet_max_estimated_tokens: 105000
 
 # A6 character-analysis semantic pass.
 character_analysis:

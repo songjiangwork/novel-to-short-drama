@@ -26,6 +26,14 @@ A6F_STORY_BIBLE_OUTPUT_SCHEMA_ID = "a6-story-bible-output"
 A6F_STORY_BIBLE_OUTPUT_SCHEMA_VERSION = 1
 A6F_SEMANTIC_PROFILE_ID = "story-analysis-llm-v1"
 
+# These are exactly the top-level fields in the tracked provider output schema.
+# The four reference collections on GlobalStoryBible are deliberately absent:
+# their authoritative source is the already-validated A6E GlobalStructure.
+_PROVIDER_STORY_BIBLE_KEYS = frozenset((
+    "premise_zh", "synopsis_zh", "genre", "tone", "setting", "themes",
+    "unresolved_summary", "source_conflict_summary",
+))
+
 
 @dataclass(frozen=True, slots=True)
 class StoryBibleSemanticPreparation:
@@ -111,10 +119,45 @@ def _refs_ok(interp: EvidenceBackedInterpretation, universe: dict[str, frozenset
     return all(ref in universe[k] for k, refs in (("fact", interp.supporting_fact_refs), ("evt", interp.supporting_event_refs), ("rel", interp.supporting_relationship_refs), ("conf", interp.supporting_conflict_refs)) for ref in refs)
 
 
+def build_story_bible_from_provider_output(payload: dict[str, Any], snapshot: StoryAnalysisInputSnapshot,
+    global_event_analysis: GlobalEventAnalysis, arc_analysis: ArcAnalysis,
+    global_structure: GlobalStructure) -> GlobalStoryBible:
+    """Build the typed StoryBible from model fields plus Python-owned A6E refs.
+
+    Keeping this as the sole construction path prevents semantic validation from
+    accepting a payload that the final typed construction would later reject.
+    """
+    keys = set(payload)
+    if keys != _PROVIDER_STORY_BIBLE_KEYS:
+        missing_keys = sorted(_PROVIDER_STORY_BIBLE_KEYS - keys)
+        unexpected_keys = sorted(keys - _PROVIDER_STORY_BIBLE_KEYS)
+        raise StoryAnalysisSemanticError(
+            "provider StoryBible keys mismatch: "
+            f"missing_keys={missing_keys!r}, unexpected_keys={unexpected_keys!r}"
+        )
+    return GlobalStoryBible.from_dict({
+        "schema_version": 1,
+        **payload,
+        "main_character_refs": list(global_structure.main_character_refs),
+        "major_arc_refs": list(global_structure.major_arc_refs),
+        "major_turning_point_refs": list(global_structure.major_turning_point_refs),
+        "major_reveal_refs": list(global_structure.major_reveal_refs),
+        "coverage_metadata": {
+            "canonical_character_count": len(snapshot.canonical_characters),
+            "canonical_event_count": len(snapshot.events),
+            "plot_window_count": len(global_event_analysis.windows),
+            "arc_count": len(arc_analysis.arcs),
+        },
+    })
+
+
 def validate_story_bible_output(payload: dict[str, Any], snapshot: StoryAnalysisInputSnapshot,
-    arc_analysis: ArcAnalysis, global_structure: GlobalStructure) -> str | None:
+    global_event_analysis: GlobalEventAnalysis, arc_analysis: ArcAnalysis,
+    global_structure: GlobalStructure) -> str | None:
     try:
-        bible = GlobalStoryBible.from_dict({"schema_version": 1, **payload, "coverage_metadata": {"canonical_character_count": len(snapshot.canonical_characters), "canonical_event_count": len(snapshot.events)}})
+        bible = build_story_bible_from_provider_output(
+            payload, snapshot, global_event_analysis, arc_analysis, global_structure,
+        )
     except Exception as exc: return f"typed StoryBible load failed: {exc}"
     universe = _global_evidence_universe(snapshot)
     interpretations = (bible.premise_zh, bible.synopsis_zh, bible.setting, bible.unresolved_summary, bible.source_conflict_summary, *bible.themes)
@@ -142,10 +185,15 @@ def resolve_story_bible(snapshot: StoryAnalysisInputSnapshot, plan: StoryAnalysi
         result = llm_client.generate_structured(prep.request.rendered_prompt, prep.request.output_schema, semantic_profile, execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled") if round_number == 2 else None)
         _verify_provenance(result.provenance, prep.request)
         if not isinstance(result.parsed_json, dict): detail = "provider output must be a JSON object"
-        else: detail = validate_story_bible_output(result.parsed_json, snapshot, arc_analysis, global_structure)
+        else: detail = validate_story_bible_output(
+            result.parsed_json, snapshot, global_event_analysis, arc_analysis,
+            global_structure,
+        )
         if detail is None:
-            payload = result.parsed_json
-            bible = GlobalStoryBible.from_dict({"schema_version": 1, **payload, "coverage_metadata": {"canonical_character_count": len(snapshot.canonical_characters), "canonical_event_count": len(snapshot.events), "plot_window_count": len(global_event_analysis.windows), "arc_count": len(arc_analysis.arcs)}})
+            bible = build_story_bible_from_provider_output(
+                result.parsed_json, snapshot, global_event_analysis, arc_analysis,
+                global_structure,
+            )
             return StoryBibleSemanticResult(prep, bible, round_number)
         failures.append(detail)
     raise StoryAnalysisStoryBibleSemanticGenerationError(

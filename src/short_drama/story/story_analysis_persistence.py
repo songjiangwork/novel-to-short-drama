@@ -160,8 +160,7 @@ class StoryAnalysisPersistenceService:
         if profile.planning_policy != plan.planning_policy: raise StoryIntegrityError("A6 profile and deterministic plan disagree")
         semantic_identity=build_a6_semantic_identity(snapshot=snapshot,plan=plan,profile=profile,semantic_profile=semantic_profile,characters=characters,events=events,arcs=arcs,structure=structure,prompts=prompts)
         base=a6_base_artifact_id(project_id,document_id,profile.profile_id); pointer=a6_pointer_id(project_id,document_id,profile.profile_id)
-        try: old_ptr=self._pointers.resolve_current_pointer_ref(pointer); old_manifest=self._pointers.resolve_current(pointer).target_ref
-        except PointerNotFoundError: old_ptr=old_manifest=None
+        old_ptr, old_manifest = self._current_a6_pointer(pointer)
         if old_manifest is not None:
             self._load_current_integrity(base, old_manifest)
         revision=next_a6_revision(self._store,base=base,current_manifest_ref=old_manifest)
@@ -186,10 +185,8 @@ class StoryAnalysisPersistenceService:
         an integrity failure; this deliberately never scans historical revisions.
         """
         base=a6_base_artifact_id(project_id,document_id,profile.profile_id); pointer=a6_pointer_id(project_id,document_id,profile.profile_id)
-        try:
-            pointer_ref=self._pointers.resolve_current_pointer_ref(pointer)
-            manifest_ref=self._pointers.resolve_current(pointer).target_ref
-        except PointerNotFoundError: return None
+        pointer_ref, manifest_ref = self._current_a6_pointer(pointer)
+        if manifest_ref is None: return None
         manifest, chars, events, arcs, structure, bible, report_ref = self._load_current_integrity(base, manifest_ref)
         if manifest.project_id!=project_id or manifest.document_id!=document_id: raise StoryIntegrityError("A6 CURRENT manifest project/document mismatch")
         # A different A5 authority or deterministic plan is a normal miss only
@@ -209,6 +206,17 @@ class StoryAnalysisPersistenceService:
         if manifest.semantic_identity != identity: return None
         if snapshot.a5_current_pointer_ref != self._pointers.resolve_current_pointer_ref(snapshot.a5_current_pointer_ref.artifact_id): raise StoryPersistenceError("A5 CURRENT pointer changed during reuse eligibility check")
         return StoryAnalysisPublication(*refs,manifest_ref,report_ref,pointer_ref,reused=True)
+
+    def _current_a6_pointer(self, pointer_id: str) -> tuple[ArtifactRef | None, ArtifactRef | None]:
+        """Resolve only an ordinary A6 CURRENT pointer; wrong kinds fail closed."""
+        try:
+            pointer_ref = self._pointers.resolve_current_pointer_ref(pointer_id)
+            pointer = self._pointers.resolve_current(pointer_id)
+        except PointerNotFoundError:
+            return None, None
+        if pointer.pointer_kind is not PointerKind.CURRENT:
+            raise StoryIntegrityError("A6 CURRENT pointer must use PointerKind.CURRENT")
+        return pointer_ref, pointer.target_ref
 
     def _load_current_integrity(self, base: str, manifest_ref: ArtifactRef):
         manifest=_load(self._store,manifest_ref,STORY_ANALYSIS_MANIFEST_ARTIFACT_TYPE,story_analysis_manifest_artifact_id(base),StoryAnalysisManifest)

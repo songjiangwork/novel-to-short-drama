@@ -123,6 +123,13 @@ from .story_analysis_persistence import (
     a6_base_artifact_id, a6_pointer_id, next_a6_revision,
     validate_whole_a6, build_a6_validation_report, build_a6_semantic_identity,
 )
+from .story_analysis_service import (
+    DEFAULT_STORY_ANALYSIS_PROMPT_BASE_DIR,
+    StoryAnalysisService,
+    StoryAnalysisStageResult,
+    build_story_bible_project,
+)
+from .phase_a_service import PhaseAAnalysisResult, analyze_story_project
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,
     CANONICAL_ENTITY_TYPES,
@@ -1124,4 +1131,10 @@ __all__ = [
     "load_global_skeleton_semantic_profile",
     "resolve_global_skeleton",
     "validate_global_skeleton_output",
+    "DEFAULT_STORY_ANALYSIS_PROMPT_BASE_DIR",
+    "StoryAnalysisService",
+    "StoryAnalysisStageResult",
+    "build_story_bible_project",
+    "PhaseAAnalysisResult",
+    "analyze_story_project",
 ]

@@ -18,6 +18,8 @@ from .story import (
     ingest_source_project,
     plan_chunks_project,
     reconcile_entities_project,
+    analyze_story_project,
+    build_story_bible_project,
 )
 from .validation import validate_file, validate_shot
 from .workflows.request import build_generation_request
@@ -65,6 +67,29 @@ DEFAULT_CONSOLIDATE_PROFILES = {
     "llm_profile": REPO_ROOT / "profiles" / "consolidation_llm_v1.yaml",
 }
 
+# A6G: the A5 profile id selects the exact A5 CURRENT namespace; the A6
+# orchestration and semantic profiles are tracked semantic authorities.
+DEFAULT_STORY_BIBLE_PROFILES = {
+    "consolidation_profile_id": "consolidation-v1",
+    "story_analysis_profile": REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml",
+    "runtime_config": REPO_ROOT / "profiles" / "llm_local.yaml",
+    "llm_profile": REPO_ROOT / "profiles" / "story_analysis_llm_v1.yaml",
+}
+
+DEFAULT_ANALYZE_PROFILES = {
+    "extraction_profile": DEFAULT_EXTRACT_PROFILES["extraction_profile"],
+    "extraction_llm_profile": DEFAULT_EXTRACT_PROFILES["llm_profile"],
+    "reconciliation_profile": DEFAULT_RECONCILE_PROFILES["reconciliation_profile"],
+    "reconciliation_llm_profile": DEFAULT_RECONCILE_PROFILES["llm_profile"],
+    "reconciliation_profile_id": DEFAULT_CONSOLIDATE_PROFILES["reconciliation_profile_id"],
+    "consolidation_profile": DEFAULT_CONSOLIDATE_PROFILES["consolidation_profile"],
+    "consolidation_profile_id": DEFAULT_STORY_BIBLE_PROFILES["consolidation_profile_id"],
+    "consolidation_llm_profile": DEFAULT_CONSOLIDATE_PROFILES["llm_profile"],
+    "story_analysis_profile": DEFAULT_STORY_BIBLE_PROFILES["story_analysis_profile"],
+    "story_analysis_llm_profile": DEFAULT_STORY_BIBLE_PROFILES["llm_profile"],
+    "runtime_config": DEFAULT_STORY_BIBLE_PROFILES["runtime_config"],
+}
+
 def main():
     p=argparse.ArgumentParser(prog="short-drama"); s=p.add_subparsers(dest="cmd",required=True)
     a=s.add_parser("validate"); a.add_argument("path"); a.add_argument("--kind",choices=["project","character","location","shot","qc"])
@@ -82,6 +107,8 @@ def main():
     a=s.add_parser("extract-chunks"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_EXTRACT_PROFILES["extraction_profile"]); a.add_argument("--runtime-config",default=DEFAULT_EXTRACT_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_EXTRACT_PROFILES["llm_profile"])
     a=s.add_parser("reconcile-entities"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_RECONCILE_PROFILES["extraction_profile"]); a.add_argument("--reconciliation-profile",default=DEFAULT_RECONCILE_PROFILES["reconciliation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_RECONCILE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_RECONCILE_PROFILES["llm_profile"])
     a=s.add_parser("consolidate-evidence"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--reconciliation-profile-id",default=DEFAULT_CONSOLIDATE_PROFILES["reconciliation_profile_id"]); a.add_argument("--consolidation-profile",default=DEFAULT_CONSOLIDATE_PROFILES["consolidation_profile"]); a.add_argument("--runtime-config",default=DEFAULT_CONSOLIDATE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_CONSOLIDATE_PROFILES["llm_profile"]); a.add_argument("--max-concurrency",type=lambda value: _positive_int(value, "--max-concurrency"),default=1)
+    a=s.add_parser("build-story-bible"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--consolidation-profile-id",default=DEFAULT_STORY_BIBLE_PROFILES["consolidation_profile_id"]); a.add_argument("--story-analysis-profile",default=DEFAULT_STORY_BIBLE_PROFILES["story_analysis_profile"]); a.add_argument("--runtime-config",default=DEFAULT_STORY_BIBLE_PROFILES["runtime_config"]); a.add_argument("--llm-profile",default=DEFAULT_STORY_BIBLE_PROFILES["llm_profile"])
+    a=s.add_parser("analyze-story"); a.add_argument("project"); a.add_argument("--runs-root",default="runs"); a.add_argument("--chunk-profile",required=True); a.add_argument("--extraction-profile",default=DEFAULT_ANALYZE_PROFILES["extraction_profile"]); a.add_argument("--extraction-llm-profile",default=DEFAULT_ANALYZE_PROFILES["extraction_llm_profile"]); a.add_argument("--reconciliation-profile",default=DEFAULT_ANALYZE_PROFILES["reconciliation_profile"]); a.add_argument("--reconciliation-llm-profile",default=DEFAULT_ANALYZE_PROFILES["reconciliation_llm_profile"]); a.add_argument("--reconciliation-profile-id",default=DEFAULT_ANALYZE_PROFILES["reconciliation_profile_id"]); a.add_argument("--consolidation-profile",default=DEFAULT_ANALYZE_PROFILES["consolidation_profile"]); a.add_argument("--consolidation-profile-id",default=DEFAULT_ANALYZE_PROFILES["consolidation_profile_id"]); a.add_argument("--consolidation-llm-profile",default=DEFAULT_ANALYZE_PROFILES["consolidation_llm_profile"]); a.add_argument("--story-analysis-profile",default=DEFAULT_ANALYZE_PROFILES["story_analysis_profile"]); a.add_argument("--story-analysis-llm-profile",default=DEFAULT_ANALYZE_PROFILES["story_analysis_llm_profile"]); a.add_argument("--runtime-config",default=DEFAULT_ANALYZE_PROFILES["runtime_config"])
     x=p.parse_args()
     if x.cmd=="validate":
         e=validate_shot(x.path) if x.kind=="shot" else validate_file(x.path,x.kind); out({"valid":not e,"errors":e}); return 0 if not e else 2
@@ -154,6 +181,44 @@ def main():
                 semantic_profile_path=x.llm_profile,
                 llm_client=llm_client,
                 max_concurrency=x.max_concurrency,
+            )
+        except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
+        except LLMError as exc: out({"valid":False,"error":str(exc)}); return 2
+        out(summary.to_dict()); return 0
+    if x.cmd=="build-story-bible":
+        try:
+            runtime_config=load_runtime_config(x.runtime_config)
+            llm_client=OpenAICompatibleLLMClient(runtime_config)
+            summary=build_story_bible_project(
+                x.project,
+                runs_root=x.runs_root,
+                consolidation_profile_id=x.consolidation_profile_id,
+                story_analysis_profile_path=x.story_analysis_profile,
+                semantic_profile_path=x.llm_profile,
+                llm_client=llm_client,
+            )
+        except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
+        except LLMError as exc: out({"valid":False,"error":str(exc)}); return 2
+        out(summary.to_dict()); return 0
+    if x.cmd=="analyze-story":
+        try:
+            runtime_config=load_runtime_config(x.runtime_config)
+            llm_client=OpenAICompatibleLLMClient(runtime_config)
+            summary=analyze_story_project(
+                x.project,
+                runs_root=x.runs_root,
+                chunk_profile_path=x.chunk_profile,
+                extraction_profile_path=x.extraction_profile,
+                extraction_semantic_profile_path=x.extraction_llm_profile,
+                reconciliation_profile_path=x.reconciliation_profile,
+                reconciliation_semantic_profile_path=x.reconciliation_llm_profile,
+                reconciliation_profile_id=x.reconciliation_profile_id,
+                consolidation_profile_path=x.consolidation_profile,
+                consolidation_profile_id=x.consolidation_profile_id,
+                consolidation_semantic_profile_path=x.consolidation_llm_profile,
+                story_analysis_profile_path=x.story_analysis_profile,
+                story_analysis_semantic_profile_path=x.story_analysis_llm_profile,
+                llm_client=llm_client,
             )
         except StoryError as exc: out({"valid":False,"error":str(exc)}); return 2
         except LLMError as exc: out({"valid":False,"error":str(exc)}); return 2

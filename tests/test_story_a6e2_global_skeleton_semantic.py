@@ -401,14 +401,14 @@ class TestIdentityTransition:
         path = REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml"
         profile_a = load_story_analysis_profile(path)
         profile_b = load_story_analysis_profile(path)
-        # Global-skeleton ceiling is FROZEN at 100000; story-bible stays null.
+        # Both global-skeleton and post-A6F story-bible ceilings are frozen.
         assert profile_a.planning_policy.global_skeleton_packet_max_estimated_tokens == 100000
-        assert profile_a.planning_policy.story_bible_packet_max_estimated_tokens is None
+        assert profile_a.planning_policy.story_bible_packet_max_estimated_tokens == 105000
         # Deterministic: two independent loads give the identical hash.
         assert profile_a.content_hash() == profile_b.content_hash()
         # The frozen 100000 profile has the expected stable identity.
         assert profile_a.content_hash() == (
-            "0fa7bb93fcc7c4e2e09c6075efc528bdb835b6dde398c64cb7bf5495ed9df4a7"
+            "bd29fb893b21f790f324e5f6f76fe99498e202c8f73256ab010b370b0450d4eb"
         )
 
     def test_revised_plan_hash_is_deterministic(self):

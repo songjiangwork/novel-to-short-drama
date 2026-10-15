@@ -235,6 +235,22 @@ class StoryAnalysisGlobalSkeletonSemanticGenerationError(StoryAnalysisSemanticEr
         )
 
 
+class StoryAnalysisStoryBibleSemanticGenerationError(StoryAnalysisSemanticError):
+    """A6F exhausted its two schema-valid but semantically-invalid rounds."""
+
+    def __init__(
+        self, *, request_hash: str, rounds_attempted: int,
+        last_failure_details: tuple[str, ...],
+    ) -> None:
+        self.request_hash = request_hash
+        self.rounds_attempted = rounds_attempted
+        self.last_failure_details = last_failure_details
+        super().__init__(
+            f"A6F story bible failed after {rounds_attempted} semantic generation "
+            f"round(s): {'; '.join(last_failure_details)}"
+        )
+
+
 class ConsolidationSemanticError(StoryError):
     """A5C fact semantic ambiguity resolution failure.
 

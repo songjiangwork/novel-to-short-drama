@@ -121,7 +121,7 @@ from .story_analysis_story_bible_semantic import (
 from .story_analysis_persistence import (
     StoryAnalysisPersistenceService, StoryAnalysisPublication,
     a6_base_artifact_id, a6_pointer_id, next_a6_revision,
-    validate_whole_a6, build_a6_validation_report,
+    validate_whole_a6, build_a6_validation_report, build_a6_semantic_identity,
 )
 from .reconciliation import (
     CANONICAL_ENTITY_REGISTRY_SCHEMA_VERSION,

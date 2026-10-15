@@ -154,6 +154,9 @@ class StoryAnalysisPersistenceService:
         plan: StoryAnalysisPlan, characters: CharacterAnalysisSet, events: GlobalEventAnalysis,
         arcs: ArcAnalysis, structure: GlobalStructure, bible: GlobalStoryBible) -> StoryAnalysisPublication:
         validate_whole_a6(snapshot,plan,characters,events,arcs,structure,bible)
+        if (snapshot.consolidation_manifest.project_id != project_id or
+                snapshot.consolidation_manifest.document_id != document_id):
+            raise StoryIntegrityError("publication project/document disagree with authoritative A5 snapshot")
         if profile.planning_policy != plan.planning_policy: raise StoryIntegrityError("A6 profile and deterministic plan disagree")
         semantic_identity=build_a6_semantic_identity(snapshot=snapshot,plan=plan,profile=profile,semantic_profile=semantic_profile,characters=characters,events=events,arcs=arcs,structure=structure,prompts=prompts)
         base=a6_base_artifact_id(project_id,document_id,profile.profile_id); pointer=a6_pointer_id(project_id,document_id,profile.profile_id)
@@ -191,7 +194,17 @@ class StoryAnalysisPersistenceService:
         if manifest.project_id!=project_id or manifest.document_id!=document_id: raise StoryIntegrityError("A6 CURRENT manifest project/document mismatch")
         revision=manifest_ref.revision
         refs=(manifest.character_analysis_ref,manifest.global_event_analysis_ref,manifest.arc_analysis_ref,manifest.global_structure_ref,manifest.global_story_bible_ref)
+        # A different A5 authority or deterministic plan is a normal miss only
+        # after the persisted tree/report have passed intrinsic integrity checks.
+        # Do not validate old leaves against the new plan: that would turn a
+        # legitimate profile/plan change into a false corruption finding.
         if manifest.consolidation_manifest_ref != snapshot.consolidation_manifest_ref: return None
+        if manifest.semantic_identity.plan_hash != plan.plan_hash: return None
+        if (manifest.semantic_identity.story_analysis_profile_id != profile.profile_id or
+                manifest.semantic_identity.story_analysis_profile_hash != profile.content_hash() or
+                manifest.semantic_identity.semantic_profile_id != semantic_profile.profile_id or
+                manifest.semantic_identity.semantic_profile_hash != semantic_profile.semantic_profile_hash):
+            return None
         validate_whole_a6(snapshot,plan,chars,events,arcs,structure,bible)
         identity=build_a6_semantic_identity(snapshot=snapshot,plan=plan,profile=profile,semantic_profile=semantic_profile,characters=chars,events=events,arcs=arcs,structure=structure,prompts=prompts)
         if manifest.semantic_identity != identity: return None

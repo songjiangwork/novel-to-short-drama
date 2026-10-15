@@ -192,8 +192,6 @@ class StoryAnalysisPersistenceService:
         except PointerNotFoundError: return None
         manifest, chars, events, arcs, structure, bible, report_ref = self._load_current_integrity(base, manifest_ref)
         if manifest.project_id!=project_id or manifest.document_id!=document_id: raise StoryIntegrityError("A6 CURRENT manifest project/document mismatch")
-        revision=manifest_ref.revision
-        refs=(manifest.character_analysis_ref,manifest.global_event_analysis_ref,manifest.arc_analysis_ref,manifest.global_structure_ref,manifest.global_story_bible_ref)
         # A different A5 authority or deterministic plan is a normal miss only
         # after the persisted tree/report have passed intrinsic integrity checks.
         # Do not validate old leaves against the new plan: that would turn a
@@ -205,6 +203,7 @@ class StoryAnalysisPersistenceService:
                 manifest.semantic_identity.semantic_profile_id != semantic_profile.profile_id or
                 manifest.semantic_identity.semantic_profile_hash != semantic_profile.semantic_profile_hash):
             return None
+        refs=(manifest.character_analysis_ref,manifest.global_event_analysis_ref,manifest.arc_analysis_ref,manifest.global_structure_ref,manifest.global_story_bible_ref)
         validate_whole_a6(snapshot,plan,chars,events,arcs,structure,bible)
         identity=build_a6_semantic_identity(snapshot=snapshot,plan=plan,profile=profile,semantic_profile=semantic_profile,characters=chars,events=events,arcs=arcs,structure=structure,prompts=prompts)
         if manifest.semantic_identity != identity: return None

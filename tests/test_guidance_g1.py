@@ -289,6 +289,22 @@ def test_revision_request_pins_exact_resolvable_artifact_ref(tmp_path) -> None:
     camera_ref = persist_user_direction(store, _direction("camera-route", category=DirectionCategory.CAMERA, key="camera"))
     with pytest.raises(GuidanceError, match="requested_category"):
         persist_revision_request(store, RevisionRequest("rr-008", b4_target, DirectionStage.B1_ADAPTATION, "镜头改近", (), (camera_ref,), "reviewer:user-01", requested_category=DirectionCategory.CAMERA), catalog)
+    foreign_b1_ref = persist_user_direction(store, _direction(
+        "foreign-b1", category=DirectionCategory.CHARACTER_NARRATIVE, key="cheshire", project_id="project-002",
+    ))
+    with pytest.raises(GuidanceError, match="current target catalog project"):
+        persist_revision_request(store, RevisionRequest(
+            "rr-009", target, DirectionStage.B1_ADAPTATION, "让角色回归", (), (foreign_b1_ref,),
+            "reviewer:user-01", requested_category=DirectionCategory.CHARACTER_NARRATIVE,
+        ), catalog)
+    foreign_b2_ref = persist_user_direction(store, _direction(
+        "foreign-b2", category=DirectionCategory.DIALOGUE, key="dialogue", project_id="project-002",
+    ))
+    with pytest.raises(GuidanceError, match="current target catalog project"):
+        persist_revision_request(store, RevisionRequest(
+            "rr-010", target, DirectionStage.B2_SCREENPLAY, "缩短台词", (), (foreign_b2_ref,),
+            "reviewer:user-01",
+        ), catalog)
 
 
 def test_project_binding_and_unmaterialized_future_targets_are_rejected(tmp_path) -> None:

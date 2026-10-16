@@ -121,6 +121,10 @@ def validate_revision_request(store: FileArtifactStore, request: RevisionRequest
         validate_target_ref(store, catalog, target)
     for ref in request.resulting_direction_refs:
         direction = load_user_direction(store, ref)
+        if direction.project_id != catalog.project_id:
+            raise GuidanceError(
+                "resulting_direction_refs must belong to the current target catalog project"
+            )
         if direction.stage_scope is not request.requested_stage:
             raise GuidanceError("resulting_direction_refs must belong to RevisionRequest requested_stage")
         if request.requested_category is not None and direction.category is not request.requested_category:

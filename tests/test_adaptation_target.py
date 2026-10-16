@@ -1,12 +1,15 @@
 import json
+from dataclasses import replace
 
 import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore
+from short_drama.foundation import FilePointerStore
 from short_drama.io import load_json
 from short_drama.paths import SCHEMAS_DIR
+from short_drama.adaptation.target import _canonical_references_from_a4
 
 from short_drama.adaptation import (
     AdaptationTarget,
@@ -46,6 +49,8 @@ def source_snapshot(*references, revision=1):
         story_analysis_manifest_ref=artifact_ref("story_analysis_manifest", "project.a6.manifest", revision),
         consolidation_manifest_ref=artifact_ref("consolidation_manifest", "project.a5.manifest", revision),
         entity_map_ref=artifact_ref("entity_map", "project.a4.entity-map", revision),
+        canonical_character_registry_ref=artifact_ref("canonical_character_registry", "project.a4.characters", revision),
+        canonical_location_registry_ref=artifact_ref("canonical_location_registry", "project.a4.locations", revision),
         canonical_fact_set_ref=artifact_ref("canonical_fact_set", "project.a5.facts", revision),
         canonical_event_set_ref=artifact_ref("canonical_event_set", "project.a5.events", revision),
         canonical_relationship_set_ref=artifact_ref("canonical_relationship_set", "project.a5.relationships", revision),
@@ -252,13 +257,36 @@ def test_fixed_seconds_reject_non_integral_count_feasibility_and_float_precision
         per_episode_duration_constraints=value((constraint("fixed", "hard", value=60),)),
         episode_count_constraints=value((constraint("range", "hard", minimum=2, maximum=3),)),
     )
-    with pytest.raises(AdaptationTargetError, match="integral episode-count"):
+    with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
         resolve_adaptation_target(raw, source_snapshot=source_snapshot())
     with pytest.raises(AdaptationTargetError, match="positive integer"):
         AdaptationTarget(
             "float-seconds",
             total_duration_constraints=value((constraint("fixed", "hard", value=90.5),)),
         )
+
+
+@pytest.mark.parametrize(
+    "total,per_episode,count",
+    [
+        (("fixed", 121), ("range", 60, 61), ("fixed", 2)),
+        (("range", 125, 130), ("fixed", 60), ("range", 2, 3)),
+    ],
+)
+def test_discrete_hard_ranges_reject_continuous_hull_false_passes(total, per_episode, count):
+    def build(spec):
+        if spec[0] == "fixed":
+            return constraint("fixed", "hard", value=spec[1])
+        return constraint("range", "hard", minimum=spec[1], maximum=spec[2])
+
+    raw = AdaptationTarget(
+        "discrete-range",
+        total_duration_constraints=value((build(total),)),
+        per_episode_duration_constraints=value((build(per_episode),)),
+        episode_count_constraints=value((build(count),)),
+    )
+    with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
+        resolve_adaptation_target(raw, source_snapshot=source_snapshot())
 
 
 def test_raw_and_overrides_cannot_elevate_profile_or_model_values_over_user():
@@ -275,7 +303,7 @@ def test_missing_store_snapshot_input_fails_closed_without_writes(tmp_path):
     store = FileArtifactStore(tmp_path / "artifacts")
     with pytest.raises(AdaptationTargetError, match="cannot resolve exact"):
         AdaptationSourceSnapshot.from_store(
-            store, artifact_ref("story_analysis_manifest", "project.a6.manifest")
+            store, FilePointerStore(tmp_path / "pointers", store), artifact_ref("story_analysis_manifest", "project.a6.manifest")
         )
     assert not any((tmp_path / "artifacts").iterdir())
 
@@ -324,9 +352,43 @@ def test_store_snapshot_binds_exact_a5_a6_members_without_writes(tmp_path):
         structure=GlobalStructure(1, interp(), (), interp(), (), interp(), (), (), (), (), ()), bible=bible,
     )
     before = sorted(path.relative_to(tree.store.root) for path in tree.store.root.rglob("*"))
-    bound = AdaptationSourceSnapshot.from_store(tree.store, publication.story_analysis_manifest_ref)
+    bound = AdaptationSourceSnapshot.from_store(tree.store, tree.pointers, publication.story_analysis_manifest_ref)
     after = sorted(path.relative_to(tree.store.root) for path in tree.store.root.rglob("*"))
 
     assert before == after
     assert bound.story_analysis_manifest_ref == publication.story_analysis_manifest_ref
     assert CanonicalTargetReference("event", "evt_000001") in bound.canonical_references
+    report_path = tree.store._path(
+        publication.validation_report_ref.artifact_type,
+        publication.validation_report_ref.artifact_id,
+        publication.validation_report_ref.revision,
+    )
+    report_path.unlink()
+    with pytest.raises(AdaptationTargetError, match="exact validated A6"):
+        AdaptationSourceSnapshot.from_store(tree.store, tree.pointers, publication.story_analysis_manifest_ref)
+
+
+def test_a4_registry_universe_allows_many_candidates_per_canonical_entity(tmp_path):
+    from test_story_a6b_planning import _snapshot
+
+    _tree, _planning, _publication, a5_snapshot = _snapshot(tmp_path)
+    duplicated_candidate_map = replace(
+        a5_snapshot.entity_map,
+        entries=(*a5_snapshot.entity_map.entries, a5_snapshot.entity_map.entries[0]),
+    )
+    refs = _canonical_references_from_a4(
+        duplicated_candidate_map,
+        a5_snapshot.canonical_characters,
+        a5_snapshot.canonical_locations,
+    )
+    assert [ref.canonical_id for ref in refs if ref.kind == "character"] == [
+        entity.canonical_id for entity in a5_snapshot.canonical_characters
+    ]
+    invalid_map = replace(
+        a5_snapshot.entity_map,
+        entries=(replace(a5_snapshot.entity_map.entries[0], canonical_id="char_9999"), *a5_snapshot.entity_map.entries[1:]),
+    )
+    with pytest.raises(AdaptationTargetError, match="disagree"):
+        _canonical_references_from_a4(
+            invalid_map, a5_snapshot.canonical_characters, a5_snapshot.canonical_locations
+        )

@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any, Iterable, Mapping
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore, content_hash
+from short_drama.foundation import FilePointerStore
 
 
 ADAPTATION_TARGET_SCHEMA_VERSION = 1
@@ -142,6 +143,8 @@ class AdaptationSourceSnapshot:
     story_analysis_manifest_ref: ArtifactRef
     consolidation_manifest_ref: ArtifactRef
     entity_map_ref: ArtifactRef
+    canonical_character_registry_ref: ArtifactRef
+    canonical_location_registry_ref: ArtifactRef
     canonical_fact_set_ref: ArtifactRef
     canonical_event_set_ref: ArtifactRef
     canonical_relationship_set_ref: ArtifactRef
@@ -153,6 +156,8 @@ class AdaptationSourceSnapshot:
             "story_analysis_manifest_ref": "story_analysis_manifest",
             "consolidation_manifest_ref": "consolidation_manifest",
             "entity_map_ref": "entity_map",
+            "canonical_character_registry_ref": "canonical_character_registry",
+            "canonical_location_registry_ref": "canonical_location_registry",
             "canonical_fact_set_ref": "canonical_fact_set",
             "canonical_event_set_ref": "canonical_event_set",
             "canonical_relationship_set_ref": "canonical_relationship_set",
@@ -177,6 +182,8 @@ class AdaptationSourceSnapshot:
             "story_analysis_manifest_ref": self.story_analysis_manifest_ref.to_dict(),
             "consolidation_manifest_ref": self.consolidation_manifest_ref.to_dict(),
             "entity_map_ref": self.entity_map_ref.to_dict(),
+            "canonical_character_registry_ref": self.canonical_character_registry_ref.to_dict(),
+            "canonical_location_registry_ref": self.canonical_location_registry_ref.to_dict(),
             "canonical_fact_set_ref": self.canonical_fact_set_ref.to_dict(),
             "canonical_event_set_ref": self.canonical_event_set_ref.to_dict(),
             "canonical_relationship_set_ref": self.canonical_relationship_set_ref.to_dict(),
@@ -188,6 +195,7 @@ class AdaptationSourceSnapshot:
     def from_dict(cls, value: dict[str, Any]) -> "AdaptationSourceSnapshot":
         fields = {
             "story_analysis_manifest_ref", "consolidation_manifest_ref", "entity_map_ref",
+            "canonical_character_registry_ref", "canonical_location_registry_ref",
             "canonical_fact_set_ref", "canonical_event_set_ref", "canonical_relationship_set_ref",
             "arc_analysis_ref", "canonical_references",
         }
@@ -204,22 +212,29 @@ class AdaptationSourceSnapshot:
 
     @classmethod
     def from_store(
-        cls, store: FileArtifactStore, story_analysis_manifest_ref: ArtifactRef
+        cls, store: FileArtifactStore, pointers: FilePointerStore,
+        story_analysis_manifest_ref: ArtifactRef,
     ) -> "AdaptationSourceSnapshot":
         """Read and verify the exact A5/A6 member artifacts without writing.
 
         ``ArtifactRef`` hash verification is delegated to the existing
-        FileArtifactStore.  A6 pins A5's manifest; A5 in turn pins its exact
-        entity/fact/event/relationship leaves.  No CURRENT pointer is followed
-        and no historical/latest lookup is performed.
+        FileArtifactStore.  Existing A6/A5 CURRENT verification seams establish
+        the validated authority before this adapter reads the pinned A4
+        registries.  It performs no writes or history/latest scan.
         """
-        if not isinstance(store, FileArtifactStore):
-            raise AdaptationTargetError("store must be FileArtifactStore")
+        if not isinstance(store, FileArtifactStore) or not isinstance(pointers, FilePointerStore):
+            raise AdaptationTargetError("store/pointers must be Foundation file stores")
         from short_drama.story.consolidation import (
             CanonicalEventSet, CanonicalFactSet, CanonicalRelationshipSet, ConsolidationManifest,
         )
-        from short_drama.story.reconciliation import EntityMap
+        from short_drama.story.consolidation_persistence import ConsolidationPersistenceService
+        from short_drama.story.reconciliation import (
+            CanonicalCharacterRegistry, CanonicalLocationRegistry, EntityMap,
+        )
         from short_drama.story.story_analysis import ArcAnalysis, StoryAnalysisManifest
+        from short_drama.story.story_analysis_persistence import (
+            StoryAnalysisPersistenceService, a6_base_artifact_id, a6_pointer_id,
+        )
 
         def load(ref: ArtifactRef, artifact_type: str, model: Any) -> Any:
             if not isinstance(ref, ArtifactRef) or ref.artifact_type != artifact_type:
@@ -237,10 +252,42 @@ class AdaptationSourceSnapshot:
             except Exception as exc:  # Existing store verifies ref/hash before this point.
                 raise AdaptationTargetError(f"cannot resolve exact {artifact_type} snapshot input") from exc
 
-        a6 = load(story_analysis_manifest_ref, "story_analysis_manifest", StoryAnalysisManifest)
+        untrusted_a6 = load(story_analysis_manifest_ref, "story_analysis_manifest", StoryAnalysisManifest)
+        a6_base = a6_base_artifact_id(
+            untrusted_a6.project_id, untrusted_a6.document_id,
+            untrusted_a6.semantic_identity.story_analysis_profile_id,
+        )
+        a6_service = StoryAnalysisPersistenceService(store, pointers)
+        pointer_id = a6_pointer_id(
+            untrusted_a6.project_id, untrusted_a6.document_id,
+            untrusted_a6.semantic_identity.story_analysis_profile_id,
+        )
+        try:
+            _pointer_ref, current_a6_ref = a6_service._current_a6_pointer(pointer_id)
+            if current_a6_ref != story_analysis_manifest_ref:
+                raise AdaptationTargetError("bound A6 manifest is not the exact validated A6 CURRENT")
+            a6, _chars, _events, arcs, _structure, _bible, _report_ref = a6_service._load_current_integrity(
+                a6_base, story_analysis_manifest_ref
+            )
+        except AdaptationTargetError:
+            raise
+        except Exception as exc:
+            raise AdaptationTargetError("cannot verify exact validated A6 snapshot") from exc
         if a6.consolidation_manifest_ref != a6.upstream_identity.consolidation_manifest_ref:
             raise AdaptationTargetError("A6 manifest has a mismatched A5 upstream binding")
         a5 = load(a6.consolidation_manifest_ref, "consolidation_manifest", ConsolidationManifest)
+        try:
+            validated_a5 = ConsolidationPersistenceService(store, pointers).require_current_validated(
+                project_id=a5.project_id,
+                document_id=a5.document_id,
+                consolidation_profile_id=a5.semantic_identity.consolidation_profile_id,
+            )
+            if validated_a5.manifest_ref != a6.consolidation_manifest_ref:
+                raise AdaptationTargetError("A6 binds a non-current or unvalidated A5 manifest")
+        except AdaptationTargetError:
+            raise
+        except Exception as exc:
+            raise AdaptationTargetError("cannot verify exact validated A5 snapshot") from exc
         if (a5.project_id, a5.document_id) != (a6.project_id, a6.document_id):
             raise AdaptationTargetError("A5/A6 snapshot project or document binding differs")
         leaf_refs = (
@@ -250,16 +297,21 @@ class AdaptationSourceSnapshot:
         if any(ref.revision != a6.consolidation_manifest_ref.revision for ref in leaf_refs):
             raise AdaptationTargetError("A5 canonical leaves cross revisions within the bound snapshot")
         entity_map = load(a5.entity_map_ref, "entity_map", EntityMap)
+        characters = load(
+            entity_map.canonical_character_registry_ref,
+            "canonical_character_registry", CanonicalCharacterRegistry,
+        )
+        locations = load(
+            entity_map.canonical_location_registry_ref,
+            "canonical_location_registry", CanonicalLocationRegistry,
+        )
         facts = load(a5.canonical_fact_set_ref, "canonical_fact_set", CanonicalFactSet)
         events = load(a5.canonical_event_set_ref, "canonical_event_set", CanonicalEventSet)
         relationships = load(a5.canonical_relationship_set_ref, "canonical_relationship_set", CanonicalRelationshipSet)
         arcs = load(a6.arc_analysis_ref, "arc_analysis", ArcAnalysis)
-        refs: list[CanonicalTargetReference] = []
-        for item in entity_map.entries:
-            if item.canonical_id is not None:
-                refs.append(CanonicalTargetReference(
-                    "character" if item.canonical_id.startswith("char_") else "location", item.canonical_id
-                ))
+        refs = list(_canonical_references_from_a4(
+            entity_map, characters.entities, locations.entities,
+        ))
         refs.extend(CanonicalTargetReference("fact", item.fact_id) for item in facts.facts)
         refs.extend(CanonicalTargetReference("event", item.event_id) for item in events.events)
         refs.extend(CanonicalTargetReference("relationship", item.relationship_id) for item in relationships.relationships)
@@ -271,12 +323,33 @@ class AdaptationSourceSnapshot:
             story_analysis_manifest_ref=story_analysis_manifest_ref,
             consolidation_manifest_ref=a6.consolidation_manifest_ref,
             entity_map_ref=a5.entity_map_ref,
+            canonical_character_registry_ref=entity_map.canonical_character_registry_ref,
+            canonical_location_registry_ref=entity_map.canonical_location_registry_ref,
             canonical_fact_set_ref=a5.canonical_fact_set_ref,
             canonical_event_set_ref=a5.canonical_event_set_ref,
             canonical_relationship_set_ref=a5.canonical_relationship_set_ref,
             arc_analysis_ref=a6.arc_analysis_ref,
             canonical_references=tuple(refs),
         )
+
+
+def _canonical_references_from_a4(
+    entity_map: Any, canonical_characters: Iterable[Any], canonical_locations: Iterable[Any],
+) -> tuple[CanonicalTargetReference, ...]:
+    """Use A4 registries, not candidate-to-canonical map entries, as the universe."""
+    characters = tuple(canonical_characters)
+    locations = tuple(canonical_locations)
+    character_ids = {item.canonical_id for item in characters}
+    location_ids = {item.canonical_id for item in locations}
+    if len(character_ids) != len(characters) or len(location_ids) != len(locations):
+        raise AdaptationTargetError("pinned A4 canonical registries contain duplicate canonical IDs")
+    mapped_ids = {item.canonical_id for item in entity_map.entries if item.canonical_id is not None}
+    if not mapped_ids <= character_ids | location_ids:
+        raise AdaptationTargetError("A4 EntityMap canonical mappings disagree with its pinned registries")
+    return (
+        *(CanonicalTargetReference("character", item.canonical_id) for item in characters),
+        *(CanonicalTargetReference("location", item.canonical_id) for item in locations),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,39 +814,66 @@ def _constraint_values(target: ResolvedAdaptationTarget, field: str) -> tuple[Nu
 
 
 def _validate_hard_numeric_feasibility(target: ResolvedAdaptationTarget) -> None:
-    total = _combined_hard_interval(_constraint_values(target, "total_duration_constraints"), lower_default=0.0, label="total duration")
-    per_episode = _combined_hard_interval(_constraint_values(target, "per_episode_duration_constraints"), lower_default=0.0, label="per-episode duration")
+    total = _combined_hard_interval(_constraint_values(target, "total_duration_constraints"), lower_default=1.0, label="total duration")
+    per_episode = _combined_hard_interval(_constraint_values(target, "per_episode_duration_constraints"), lower_default=1.0, label="per-episode duration")
     episode_count = _combined_hard_interval(_constraint_values(target, "episode_count_constraints"), lower_default=1.0, label="episode count")
-    # A positive duration is fundamental even if it has no explicit range.
-    per_lower = max(per_episode[0], 0.0)
+    per_lower = max(per_episode[0], 1.0)
     product_lower, product_upper = per_lower * episode_count[0], per_episode[1] * episode_count[1]
     if product_upper < total[0] or product_lower > total[1]:
         raise AdaptationTargetError(
             "hard total/per-episode/count duration constraints are contradictory"
         )
-    _validate_fixed_integer_duration_count(total, per_episode, episode_count)
+    _validate_discrete_integer_duration_count(total, per_episode, episode_count)
 
 
-def _validate_fixed_integer_duration_count(
+def _validate_discrete_integer_duration_count(
     total: tuple[float, float], per_episode: tuple[float, float], episode_count: tuple[float, float]
 ) -> None:
-    """Reject a continuous-looking interval that has no integral episode count.
+    """Check bounded integer-second feasibility without choosing a B1.5 count.
 
-    Values are normalized integer seconds.  This exact check covers the
-    fixed-duration case without selecting a count (which remains B1.5's job).
+    The continuous product hull is only a necessary condition.  These exact
+    branches cover fixed count, fixed per-episode duration, and fixed total
+    duration (via divisors), plus small explicitly bounded ranges.  They never
+    enumerate an unbounded or enormous count range.
     """
-    if total[0] != total[1] or per_episode[0] != per_episode[1]:
+    count_low, count_high = int(episode_count[0]), episode_count[1]
+    total_low = int(total[0])
+    total_high = math.inf if not math.isfinite(total[1]) else int(total[1])
+    per_low = int(per_episode[0])
+    per_high = math.inf if not math.isfinite(per_episode[1]) else int(per_episode[1])
+
+    def exists_for_count(count: int) -> bool:
+        duration_low = max(per_low, _ceil_div(total_low, count))
+        duration_high = per_high if not math.isfinite(total_high) else min(per_high, math.floor(total_high / count))
+        return duration_low <= duration_high
+
+    if count_low == count_high:
+        if not exists_for_count(count_low):
+            raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
         return
-    total_seconds, per_episode_seconds = int(total[0]), int(per_episode[0])
-    if total_seconds % per_episode_seconds:
-        raise AdaptationTargetError(
-            "hard fixed total/per-episode duration has no integral episode-count solution"
-        )
-    count = total_seconds // per_episode_seconds
-    if not episode_count[0] <= count <= episode_count[1]:
-        raise AdaptationTargetError(
-            "hard fixed duration solution conflicts with hard episode-count constraints"
-        )
+    if per_low == per_high:
+        low = max(count_low, _ceil_div(total_low, per_low))
+        high = count_high if not math.isfinite(total_high) else min(count_high, math.floor(total_high / per_low))
+        if low > high:
+            raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
+        return
+    if total_low == total_high:
+        total_seconds = total_low
+        for divisor in range(1, math.isqrt(total_seconds) + 1):
+            if total_seconds % divisor:
+                continue
+            for count in (divisor, total_seconds // divisor):
+                if count_low <= count <= count_high and per_low <= total_seconds // count <= per_high:
+                    return
+        raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
+    if math.isfinite(count_high) and count_high - count_low <= 4096:
+        if any(exists_for_count(count) for count in range(count_low, int(count_high) + 1)):
+            return
+        raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    return (numerator + denominator - 1) // denominator
 
 
 def resolve_adaptation_target(

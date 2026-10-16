@@ -1,0 +1,116 @@
+"""Persistence adapters for G1 contracts using Foundation immutable artifacts."""
+from __future__ import annotations
+
+from short_drama.artifacts import ArtifactError, ArtifactRef, FileArtifactStore, ImmutableArtifactEnvelope
+
+from .models import (
+    GUIDANCE_SCHEMA_VERSION,
+    REVISION_REQUEST_ARTIFACT_TYPE,
+    USER_DIRECTION_ARTIFACT_TYPE,
+    USER_DIRECTION_SET_ARTIFACT_TYPE,
+    GuidanceError,
+    RevisionRequest,
+    UserDirection,
+    UserDirectionSet,
+)
+from .projection import TargetCatalog, load_user_direction, resolve_direction_set, validate_target_ref
+
+
+def _envelope(artifact_type: str, artifact_id: str, revision: int, payload: dict[str, object]) -> ImmutableArtifactEnvelope:
+    return ImmutableArtifactEnvelope.create(
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        revision=revision,
+        schema_version=GUIDANCE_SCHEMA_VERSION,
+        payload=payload,  # type: ignore[arg-type]
+    )
+
+
+def persist_user_direction(store: FileArtifactStore, direction: UserDirection) -> ArtifactRef:
+    if not isinstance(store, FileArtifactStore) or not isinstance(direction, UserDirection):
+        raise GuidanceError("persist_user_direction requires FileArtifactStore and UserDirection")
+    ref = store.put(_envelope(USER_DIRECTION_ARTIFACT_TYPE, direction.direction_id, direction.direction_revision, direction.to_dict()))
+    if ref != direction.artifact_ref:
+        raise GuidanceError("persisted UserDirection does not match its deterministic exact ref")
+    return ref
+
+
+def persist_user_direction_set(
+    store: FileArtifactStore,
+    direction_set: UserDirectionSet,
+    catalog: TargetCatalog,
+) -> ArtifactRef:
+    if not isinstance(store, FileArtifactStore) or not isinstance(direction_set, UserDirectionSet):
+        raise GuidanceError("persist_user_direction_set requires FileArtifactStore and UserDirectionSet")
+    # This rejects missing/tampered members before publishing a set that claims
+    # them as exact immutable history.
+    resolve_direction_set(store, direction_set, catalog)
+    ref = store.put(_envelope(USER_DIRECTION_SET_ARTIFACT_TYPE, direction_set.set_id, direction_set.revision, direction_set.to_dict()))
+    if ref != direction_set.artifact_ref:
+        raise GuidanceError("persisted UserDirectionSet does not match its deterministic exact ref")
+    return ref
+
+
+def load_user_direction_set(store: FileArtifactStore, ref: ArtifactRef) -> UserDirectionSet:
+    if not isinstance(store, FileArtifactStore) or not isinstance(ref, ArtifactRef) or ref.artifact_type != USER_DIRECTION_SET_ARTIFACT_TYPE:
+        raise GuidanceError("ref must be an exact user_direction_set ArtifactRef")
+    try:
+        envelope = store.get_ref(ref)
+    except ArtifactError as exc:
+        raise GuidanceError(f"user direction set ref cannot be resolved exactly: {ref!r}") from exc
+    try:
+        direction_set = UserDirectionSet.from_dict(envelope.payload)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise GuidanceError("persisted user direction set payload is invalid") from exc
+    if direction_set.artifact_ref != ref:
+        raise GuidanceError("user direction set payload identity does not match its exact ArtifactRef")
+    for direction_ref in direction_set.direction_refs:
+        load_user_direction(store, direction_ref)
+    return direction_set
+
+
+def validate_revision_request(store: FileArtifactStore, request: RevisionRequest, catalog: TargetCatalog) -> None:
+    if not isinstance(store, FileArtifactStore) or not isinstance(request, RevisionRequest):
+        raise GuidanceError("validate_revision_request requires FileArtifactStore and RevisionRequest")
+    try:
+        store.get_ref(request.target_artifact_ref)
+    except ArtifactError as exc:
+        raise GuidanceError("RevisionRequest target_artifact_ref cannot be resolved exactly") from exc
+    for target in request.target_refs:
+        validate_target_ref(store, catalog, target)
+    for ref in request.resulting_direction_refs:
+        load_user_direction(store, ref)
+
+
+def persist_revision_request(
+    store: FileArtifactStore,
+    request: RevisionRequest,
+    catalog: TargetCatalog,
+) -> ArtifactRef:
+    validate_revision_request(store, request, catalog)
+    ref = store.put(_envelope(REVISION_REQUEST_ARTIFACT_TYPE, request.revision_request_id, 1, request.to_dict()))
+    if ref != request.artifact_ref:
+        raise GuidanceError("persisted RevisionRequest does not match its deterministic exact ref")
+    return ref
+
+
+def load_revision_request(store: FileArtifactStore, ref: ArtifactRef) -> RevisionRequest:
+    if not isinstance(store, FileArtifactStore) or not isinstance(ref, ArtifactRef) or ref.artifact_type != REVISION_REQUEST_ARTIFACT_TYPE:
+        raise GuidanceError("ref must be an exact revision_request ArtifactRef")
+    try:
+        envelope = store.get_ref(ref)
+    except ArtifactError as exc:
+        raise GuidanceError(f"revision request ref cannot be resolved exactly: {ref!r}") from exc
+    try:
+        request = RevisionRequest.from_dict(envelope.payload)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise GuidanceError("persisted RevisionRequest payload is invalid") from exc
+    if request.artifact_ref != ref:
+        raise GuidanceError("revision request payload identity does not match its exact ArtifactRef")
+    try:
+        store.get_ref(request.target_artifact_ref)
+    except ArtifactError as exc:
+        raise GuidanceError("RevisionRequest target_artifact_ref cannot be resolved exactly") from exc
+    for direction_ref in request.resulting_direction_refs:
+        load_user_direction(store, direction_ref)
+    return request

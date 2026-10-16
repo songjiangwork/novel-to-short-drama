@@ -63,7 +63,7 @@ These values are cross-checks only: FileArtifactStore and FilePointerStore must 
 - Human reviews target, strategy, critical character/relationship/plot decisions, ending/reveals, deliberate divergences, important omissions/inventions, episode dramatic goals/climaxes/hooks and duration risks.
 - Each REVIEW_REQUIRED must be explicitly ACCEPT_AS_DESIGNED or REVISION_REQUESTED; warnings remain visible. FAIL/BLOCKING/stale validation forbids APPROVE.
 - The user may request revision or abandon even if technical validation passes. Revision request pins exact immutable artifact ID/revision/hash and returns to earliest owner; then downstream revalidation.
-- **Never generate an APPPROVE decision or human reviewer provenance on behalf of an unconsulted user.** Only after actual explicit reviewer approval persist ApprovalRecord and advance CURRENT_APPROVED.
+- **Never generate an APPROVE decision or human reviewer provenance on behalf of an unconsulted user.** Only after actual explicit reviewer approval persist ApprovalRecord and advance CURRENT_APPROVED.
 - Until then verdict is TECHNICAL PASS / HUMAN APPROVAL PENDING. Whole-plan approval only.
 
 ### Gate 6 — Exact reuse + negative integrity verification

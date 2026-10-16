@@ -20,7 +20,6 @@ from short_drama.adaptation import (
     CanonicalTargetReference,
     ConstraintKind,
     ConstraintStrength,
-    DurationCountFeasibility,
     FidelityProfile,
     NumericConstraint,
     Provenance,
@@ -122,6 +121,7 @@ def test_strict_round_trip_serialization_and_schema_validation():
     resolved = resolve_adaptation_target(raw, source_snapshot=source_snapshot())
     data = resolved.to_dict()
 
+    assert "duration_count_feasibility" not in data
     assert type(resolved).from_dict(data) == resolved
     assert type(resolved).from_dict(data).content_hash() == resolved.content_hash()
     raw_schema = load_json(SCHEMAS_DIR / "adaptation-target.schema.json")
@@ -143,6 +143,11 @@ def test_strict_round_trip_serialization_and_schema_validation():
     assert list(Draft202012Validator(resolved_schema, registry=registry).iter_errors(malformed_count))
     bad = dict(data)
     bad["unknown"] = True
+    with pytest.raises(AdaptationTargetError, match="exactly"):
+        type(resolved).from_dict(bad)
+    bad = dict(data)
+    bad["duration_count_feasibility"] = "pending_b1_5"
+    assert list(Draft202012Validator(resolved_schema, registry=registry).iter_errors(bad))
     with pytest.raises(AdaptationTargetError, match="exactly"):
         type(resolved).from_dict(bad)
 
@@ -168,6 +173,19 @@ def test_all_constraint_kinds_and_strengths_are_orthogonal():
     ]
     assert resolved.per_episode_duration_constraints.value[0].maximum == 100
     assert resolved.episode_count_constraints.value[0].strength is ConstraintStrength.HARD
+    assert "resolved_episode_count" not in resolved.to_dict()
+
+
+def test_soft_duration_targets_do_not_become_hard_fixed_durations():
+    resolved = resolve_adaptation_target(AdaptationTarget(
+        "soft-duration-target",
+        total_duration_constraints=value((constraint("fixed", "hard", value=121),)),
+        per_episode_duration_constraints=value((constraint("target", "soft", value=60),)),
+        episode_count_constraints=value((constraint("fixed", "hard", value=2),)),
+    ), source_snapshot=source_snapshot())
+
+    assert resolved.per_episode_duration_constraints.value[0].kind is ConstraintKind.TARGET
+    assert resolved.per_episode_duration_constraints.value[0].strength is ConstraintStrength.SOFT
 
 
 @pytest.mark.parametrize(
@@ -251,14 +269,14 @@ def test_bound_snapshot_rejects_dangling_and_cross_revision_references():
     assert old.story_analysis_manifest_ref.revision != current.story_analysis_manifest_ref.revision
 
 
-def test_fixed_seconds_reject_non_integral_count_feasibility_and_float_precision():
+def test_fixed_episode_duration_rejects_unavailable_total_and_float_precision():
     raw = AdaptationTarget(
         "integral-count",
         total_duration_constraints=value((constraint("fixed", "hard", value=150),)),
         per_episode_duration_constraints=value((constraint("fixed", "hard", value=60),)),
         episode_count_constraints=value((constraint("range", "hard", minimum=2, maximum=3),)),
     )
-    with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
+    with pytest.raises(AdaptationTargetError, match="contradictory"):
         resolve_adaptation_target(raw, source_snapshot=source_snapshot())
     with pytest.raises(AdaptationTargetError, match="positive integer"):
         AdaptationTarget(
@@ -270,7 +288,6 @@ def test_fixed_seconds_reject_non_integral_count_feasibility_and_float_precision
 @pytest.mark.parametrize(
     "total,per_episode,count",
     [
-        (("fixed", 121), ("range", 60, 61), ("fixed", 2)),
         (("range", 125, 130), ("fixed", 60), ("range", 2, 3)),
     ],
 )
@@ -286,8 +303,31 @@ def test_discrete_hard_ranges_reject_continuous_hull_false_passes(total, per_epi
         per_episode_duration_constraints=value((build(per_episode),)),
         episode_count_constraints=value((build(count),)),
     )
-    with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
+    with pytest.raises(AdaptationTargetError, match="contradictory"):
         resolve_adaptation_target(raw, source_snapshot=source_snapshot())
+
+
+@pytest.mark.parametrize(
+    "total,per_episode,count",
+    [
+        (("fixed", 121), ("range", 60, 61), ("fixed", 2)),
+        (("fixed", 1835), ("range", 80, 100), ("fixed", 20)),
+    ],
+)
+def test_independent_per_episode_duration_ranges_allow_nonuniform_integer_totals(total, per_episode, count):
+    def build(spec):
+        if spec[0] == "fixed":
+            return constraint("fixed", "hard", value=spec[1])
+        return constraint("range", "hard", minimum=spec[1], maximum=spec[2])
+
+    resolved = resolve_adaptation_target(AdaptationTarget(
+        "nonuniform-duration-range",
+        total_duration_constraints=value((build(total),)),
+        per_episode_duration_constraints=value((build(per_episode),)),
+        episode_count_constraints=value((build(count),)),
+    ), source_snapshot=source_snapshot())
+
+    assert resolved.total_duration_constraints.value[0].value == total[1]
 
 
 def test_large_range_discrete_feasibility_is_exact_when_one_dimension_is_narrow():
@@ -298,23 +338,46 @@ def test_large_range_discrete_feasibility_is_exact_when_one_dimension_is_narrow(
         per_episode_duration_constraints=value((constraint("range", "hard", minimum=1_000_000, maximum=1_000_001),)),
         episode_count_constraints=value((constraint("range", "hard", minimum=1, maximum=10_000),)),
     )
-    with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
+    with pytest.raises(AdaptationTargetError, match="contradictory"):
         resolve_adaptation_target(raw, source_snapshot=source_snapshot())
 
 
-def test_unbounded_integer_search_is_explicitly_pending_for_b1_5():
-    raw = AdaptationTarget(
-        "large-integer-rectangle",
-        total_duration_constraints=value((constraint("range", "hard", minimum=5_000_000_000, maximum=5_000_001_000),)),
-        per_episode_duration_constraints=value((constraint("range", "hard", minimum=1_000_000, maximum=1_010_000),)),
-        episode_count_constraints=value((constraint("range", "hard", minimum=1, maximum=10_000),)),
-    )
-    resolved = resolve_adaptation_target(raw, source_snapshot=source_snapshot())
-    assert resolved.duration_count_feasibility is DurationCountFeasibility.PENDING_B1_5
-    tampered = resolved.to_dict()
-    tampered["duration_count_feasibility"] = "feasible"
-    with pytest.raises(AdaptationTargetError, match="must match deterministic"):
-        type(resolved).from_dict(tampered)
+@pytest.mark.parametrize(
+    "total,per_episode,count",
+    [
+        (("fixed", 121), ("range_min", 60), ("range", 1, None)),
+        (("fixed", 121), ("range_min", 60), ("fixed", 2)),
+        (("range_min", 121), ("fixed", 60), ("fixed", 3)),
+    ],
+)
+def test_unbounded_hard_duration_count_constraints_pass_when_numerically_feasible(total, per_episode, count):
+    def build(spec):
+        if spec[0] == "fixed":
+            return constraint("fixed", "hard", value=spec[1])
+        if spec[0] == "range_min":
+            return constraint("range", "hard", minimum=spec[1])
+        return constraint("range", "hard", minimum=spec[1], maximum=spec[2])
+
+    assert resolve_adaptation_target(AdaptationTarget(
+        "unbounded-feasible",
+        total_duration_constraints=value((build(total),)),
+        per_episode_duration_constraints=value((build(per_episode),)),
+        episode_count_constraints=value((build(count),)),
+    ), source_snapshot=source_snapshot())
+
+
+def test_very_large_integer_seconds_use_exact_interval_arithmetic():
+    # Keep the total at RFC 8785's exact JSON integer boundary while verifying
+    # that the feasibility code itself uses integer arithmetic throughout.
+    duration = 2 ** 52 - 1
+    resolved = resolve_adaptation_target(AdaptationTarget(
+        "very-large-seconds",
+        total_duration_constraints=value((constraint("fixed", "hard", value=2 * duration + 1),)),
+        per_episode_duration_constraints=value((constraint("range", "hard", minimum=duration, maximum=duration + 1),)),
+        episode_count_constraints=value((constraint("fixed", "hard", value=2),)),
+    ), source_snapshot=source_snapshot())
+
+    assert resolved.total_duration_constraints.value[0].value == 2 * duration + 1
 
 
 def test_raw_and_overrides_cannot_elevate_profile_or_model_values_over_user():

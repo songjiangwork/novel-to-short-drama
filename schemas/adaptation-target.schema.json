@@ -11,7 +11,6 @@
         "schema_version": {"const": 1},
         "adaptation_target_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
         "source_snapshot": {"$ref": "#/$defs/sourceSnapshot"},
-        "duration_count_feasibility": {"enum": ["feasible", "pending_b1_5"]},
         "narrative_format": {"$ref": "#/$defs/textValue"},
         "presentation_orientation": {"$ref": "#/$defs/textValue"},
         "adaptation_genre": {"$ref": "#/$defs/textValue"},

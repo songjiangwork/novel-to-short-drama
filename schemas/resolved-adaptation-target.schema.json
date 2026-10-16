@@ -3,6 +3,6 @@
   "$id": "https://novel-to-short-drama.local/schemas/resolved-adaptation-target.schema.json",
   "allOf": [
     {"$ref": "https://novel-to-short-drama.local/schemas/adaptation-target.schema.json#/$defs/target"},
-    {"type": "object", "required": ["source_snapshot", "duration_count_feasibility"]}
+    {"type": "object", "required": ["source_snapshot"]}
   ]
 }

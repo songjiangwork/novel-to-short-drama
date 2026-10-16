@@ -20,6 +20,7 @@ from short_drama.adaptation import (
     CanonicalTargetReference,
     ConstraintKind,
     ConstraintStrength,
+    DurationCountFeasibility,
     FidelityProfile,
     NumericConstraint,
     Provenance,
@@ -287,6 +288,33 @@ def test_discrete_hard_ranges_reject_continuous_hull_false_passes(total, per_epi
     )
     with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
         resolve_adaptation_target(raw, source_snapshot=source_snapshot())
+
+
+def test_large_range_discrete_feasibility_is_exact_when_one_dimension_is_narrow():
+    """Do not skip a contradiction solely because the count range is large."""
+    raw = AdaptationTarget(
+        "large-narrow-duration-range",
+        total_duration_constraints=value((constraint("range", "hard", minimum=5_000_006_000, maximum=5_000_007_000),)),
+        per_episode_duration_constraints=value((constraint("range", "hard", minimum=1_000_000, maximum=1_000_001),)),
+        episode_count_constraints=value((constraint("range", "hard", minimum=1, maximum=10_000),)),
+    )
+    with pytest.raises(AdaptationTargetError, match="no feasible episode count"):
+        resolve_adaptation_target(raw, source_snapshot=source_snapshot())
+
+
+def test_unbounded_integer_search_is_explicitly_pending_for_b1_5():
+    raw = AdaptationTarget(
+        "large-integer-rectangle",
+        total_duration_constraints=value((constraint("range", "hard", minimum=5_000_000_000, maximum=5_000_001_000),)),
+        per_episode_duration_constraints=value((constraint("range", "hard", minimum=1_000_000, maximum=1_010_000),)),
+        episode_count_constraints=value((constraint("range", "hard", minimum=1, maximum=10_000),)),
+    )
+    resolved = resolve_adaptation_target(raw, source_snapshot=source_snapshot())
+    assert resolved.duration_count_feasibility is DurationCountFeasibility.PENDING_B1_5
+    tampered = resolved.to_dict()
+    tampered["duration_count_feasibility"] = "feasible"
+    with pytest.raises(AdaptationTargetError, match="must match deterministic"):
+        type(resolved).from_dict(tampered)
 
 
 def test_raw_and_overrides_cannot_elevate_profile_or_model_values_over_user():

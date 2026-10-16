@@ -13,6 +13,7 @@ from .target import (
     CanonicalTargetReference,
     ConstraintKind,
     ConstraintStrength,
+    DurationCountFeasibility,
     FidelityProfile,
     NumericConstraint,
     Provenance,
@@ -27,7 +28,7 @@ from .target import (
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
     "AdaptationTargetOverrides", "AdaptationSourceSnapshot", "CanonicalTargetReference", "ConstraintKind",
-    "ConstraintStrength", "FidelityProfile", "NumericConstraint", "Provenance",
+    "ConstraintStrength", "DurationCountFeasibility", "FidelityProfile", "NumericConstraint", "Provenance",
     "ResolvedAdaptationTarget", "StableIdIndex", "TargetElement", "TargetValue",
     "UnresolvedTargetReference", "resolve_adaptation_target",
 ]

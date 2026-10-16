@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable, Mapping
 
@@ -59,6 +59,18 @@ class ConstraintKind(str, Enum):
 class ConstraintStrength(str, Enum):
     HARD = "hard"
     SOFT = "soft"
+
+
+class DurationCountFeasibility(str, Enum):
+    """What B1.1 can prove about hard integer duration/count constraints.
+
+    ``PENDING_B1_5`` is deliberately explicit rather than a false feasible
+    result: B1.5 owns the eventual count and must resolve cases whose exact
+    integer search would exceed this slice's bounded deterministic work.
+    """
+
+    FEASIBLE = "feasible"
+    PENDING_B1_5 = "pending_b1_5"
 
 
 def _exact(value: Any, fields: set[str], model: str) -> dict[str, Any]:
@@ -448,7 +460,7 @@ class NumericConstraint:
                 if value is not None:
                     _number(value, f"{field} constraint", integer=True)
 
-    def hard_interval(self, *, lower_default: float) -> tuple[float, float] | None:
+    def hard_interval(self, *, lower_default: int) -> tuple[int | float, int | float] | None:
         """Return the feasibility interval for hard fixed/range constraints only.
 
         A target remains an optimization target even when it is hard, so it
@@ -458,11 +470,11 @@ class NumericConstraint:
         if self.strength is not ConstraintStrength.HARD:
             return None
         if self.kind is ConstraintKind.FIXED:
-            return (float(self.value), float(self.value))
+            return (self.value, self.value)
         if self.kind is ConstraintKind.RANGE:
             return (
-                lower_default if self.minimum is None else float(self.minimum),
-                math.inf if self.maximum is None else float(self.maximum),
+                lower_default if self.minimum is None else self.minimum,
+                math.inf if self.maximum is None else self.maximum,
             )
         return None
 
@@ -736,6 +748,7 @@ class ResolvedAdaptationTarget(_TargetLayer):
     total_duration_constraints: TargetValue | None = None
     per_episode_duration_constraints: TargetValue | None = None
     episode_count_constraints: TargetValue | None = None
+    duration_count_feasibility: DurationCountFeasibility = field(init=False)
 
     def __post_init__(self) -> None:
         _id(self.adaptation_target_id, "adaptation_target_id")
@@ -744,13 +757,14 @@ class ResolvedAdaptationTarget(_TargetLayer):
         self._validate_fields()
         _validate_snapshot_membership(self)
         _validate_element_conflicts(self)
-        _validate_hard_numeric_feasibility(self)
+        object.__setattr__(self, "duration_count_feasibility", _validate_hard_numeric_feasibility(self))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": ADAPTATION_TARGET_SCHEMA_VERSION,
             "adaptation_target_id": self.adaptation_target_id,
             "source_snapshot": self.source_snapshot.to_dict(),
+            "duration_count_feasibility": self.duration_count_feasibility.value,
             **self._fields_to_dict(),
         }
 
@@ -759,10 +773,20 @@ class ResolvedAdaptationTarget(_TargetLayer):
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ResolvedAdaptationTarget":
-        value = _exact(value, {"schema_version", "adaptation_target_id", "source_snapshot", *_VALUE_FIELDS}, cls.__name__)
+        value = _exact(
+            value,
+            {"schema_version", "adaptation_target_id", "source_snapshot", "duration_count_feasibility", *_VALUE_FIELDS},
+            cls.__name__,
+        )
         if value["schema_version"] != ADAPTATION_TARGET_SCHEMA_VERSION:
             raise AdaptationTargetError("unsupported ResolvedAdaptationTarget schema_version")
-        return cls(value["adaptation_target_id"], AdaptationSourceSnapshot.from_dict(value["source_snapshot"]), **cls._fields_from_dict(value))
+        resolved = cls(
+            value["adaptation_target_id"], AdaptationSourceSnapshot.from_dict(value["source_snapshot"]),
+            **cls._fields_from_dict(value),
+        )
+        if value["duration_count_feasibility"] != resolved.duration_count_feasibility.value:
+            raise AdaptationTargetError("duration_count_feasibility must match deterministic resolution")
+        return resolved
 
 
 def _canonical_element_ids(value: TargetValue | None) -> set[tuple[str, str]]:
@@ -796,7 +820,9 @@ def _validate_snapshot_membership(target: ResolvedAdaptationTarget) -> None:
                 )
 
 
-def _combined_hard_interval(constraints: Iterable[NumericConstraint], *, lower_default: float, label: str) -> tuple[float, float]:
+def _combined_hard_interval(
+    constraints: Iterable[NumericConstraint], *, lower_default: int, label: str,
+) -> tuple[int | float, int | float]:
     lower, upper = lower_default, math.inf
     for constraint in constraints:
         interval = constraint.hard_interval(lower_default=lower_default)
@@ -813,63 +839,81 @@ def _constraint_values(target: ResolvedAdaptationTarget, field: str) -> tuple[Nu
     return () if item is None else item.value
 
 
-def _validate_hard_numeric_feasibility(target: ResolvedAdaptationTarget) -> None:
-    total = _combined_hard_interval(_constraint_values(target, "total_duration_constraints"), lower_default=1.0, label="total duration")
-    per_episode = _combined_hard_interval(_constraint_values(target, "per_episode_duration_constraints"), lower_default=1.0, label="per-episode duration")
-    episode_count = _combined_hard_interval(_constraint_values(target, "episode_count_constraints"), lower_default=1.0, label="episode count")
-    per_lower = max(per_episode[0], 1.0)
-    product_lower, product_upper = per_lower * episode_count[0], per_episode[1] * episode_count[1]
+def _validate_hard_numeric_feasibility(target: ResolvedAdaptationTarget) -> DurationCountFeasibility:
+    total = _combined_hard_interval(_constraint_values(target, "total_duration_constraints"), lower_default=1, label="total duration")
+    per_episode = _combined_hard_interval(_constraint_values(target, "per_episode_duration_constraints"), lower_default=1, label="per-episode duration")
+    episode_count = _combined_hard_interval(_constraint_values(target, "episode_count_constraints"), lower_default=1, label="episode count")
+    per_lower = max(per_episode[0], 1)
+    product_lower = per_lower * episode_count[0]
+    product_upper = (
+        math.inf
+        if per_episode[1] == math.inf or episode_count[1] == math.inf
+        else per_episode[1] * episode_count[1]
+    )
     if product_upper < total[0] or product_lower > total[1]:
         raise AdaptationTargetError(
             "hard total/per-episode/count duration constraints are contradictory"
         )
-    _validate_discrete_integer_duration_count(total, per_episode, episode_count)
+    return _validate_discrete_integer_duration_count(total, per_episode, episode_count)
 
 
 def _validate_discrete_integer_duration_count(
-    total: tuple[float, float], per_episode: tuple[float, float], episode_count: tuple[float, float]
-) -> None:
+    total: tuple[int | float, int | float], per_episode: tuple[int | float, int | float],
+    episode_count: tuple[int | float, int | float],
+) -> DurationCountFeasibility:
     """Check bounded integer-second feasibility without choosing a B1.5 count.
 
     The continuous product hull is only a necessary condition.  These exact
-    branches cover fixed count, fixed per-episode duration, and fixed total
-    duration (via divisors), plus small explicitly bounded ranges.  They never
-    enumerate an unbounded or enormous count range.
+    branches cover fixed count, fixed per-episode duration, and small bounded
+    ranges.  For a non-singleton rectangle too large for an exact finite
+    search, the result is explicit ``PENDING_B1_5`` rather than a false
+    feasible result.  The work limit applies to candidate values, not a
+    duration value, so arbitrary integer seconds never trigger an unbounded
+    divisor scan.
     """
     count_low, count_high = int(episode_count[0]), episode_count[1]
     total_low = int(total[0])
-    total_high = math.inf if not math.isfinite(total[1]) else int(total[1])
+    total_high = math.inf if total[1] == math.inf else int(total[1])
     per_low = int(per_episode[0])
-    per_high = math.inf if not math.isfinite(per_episode[1]) else int(per_episode[1])
+    per_high = math.inf if per_episode[1] == math.inf else int(per_episode[1])
 
     def exists_for_count(count: int) -> bool:
         duration_low = max(per_low, _ceil_div(total_low, count))
-        duration_high = per_high if not math.isfinite(total_high) else min(per_high, math.floor(total_high / count))
+        duration_high = per_high if total_high == math.inf else min(per_high, total_high // count)
         return duration_low <= duration_high
+
+    def exists_for_duration(duration: int) -> bool:
+        count_minimum = max(count_low, _ceil_div(total_low, duration))
+        count_maximum = count_high if total_high == math.inf else min(count_high, total_high // duration)
+        return count_minimum <= count_maximum
 
     if count_low == count_high:
         if not exists_for_count(count_low):
             raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
-        return
+        return DurationCountFeasibility.FEASIBLE
     if per_low == per_high:
         low = max(count_low, _ceil_div(total_low, per_low))
-        high = count_high if not math.isfinite(total_high) else min(count_high, math.floor(total_high / per_low))
+        high = count_high if total_high == math.inf else min(count_high, total_high // per_low)
         if low > high:
             raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
-        return
-    if total_low == total_high:
-        total_seconds = total_low
-        for divisor in range(1, math.isqrt(total_seconds) + 1):
-            if total_seconds % divisor:
-                continue
-            for count in (divisor, total_seconds // divisor):
-                if count_low <= count <= count_high and per_low <= total_seconds // count <= per_high:
-                    return
+        return DurationCountFeasibility.FEASIBLE
+
+    # This is a deterministic resource contract, not an acceptance shortcut:
+    # an unchecked rectangle remains pending for B1.5.  Enumerate whichever
+    # finite dimension is smaller, so narrow per-episode ranges remain exact
+    # even when the allowed episode-count range is large.
+    exact_candidate_limit = 4096
+    count_candidates = math.inf if count_high == math.inf else int(count_high) - count_low + 1
+    duration_candidates = math.inf if per_high == math.inf else int(per_high) - per_low + 1
+    if min(count_candidates, duration_candidates) <= exact_candidate_limit:
+        if count_candidates <= duration_candidates:
+            exists = any(exists_for_count(count) for count in range(count_low, int(count_high) + 1))
+        else:
+            exists = any(exists_for_duration(duration) for duration in range(per_low, int(per_high) + 1))
+        if exists:
+            return DurationCountFeasibility.FEASIBLE
         raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
-    if math.isfinite(count_high) and count_high - count_low <= 4096:
-        if any(exists_for_count(count) for count in range(count_low, int(count_high) + 1)):
-            return
-        raise AdaptationTargetError("hard integer duration/count constraints have no feasible episode count")
+    return DurationCountFeasibility.PENDING_B1_5
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:

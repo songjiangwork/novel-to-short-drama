@@ -1,7 +1,7 @@
 """A6F StoryBible structured semantic pass; all persisted IDs remain Python-owned."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 from short_drama.artifacts import ArtifactRef
@@ -119,6 +119,14 @@ def _refs_ok(interp: EvidenceBackedInterpretation, universe: dict[str, frozenset
     return all(ref in universe[k] for k, refs in (("fact", interp.supporting_fact_refs), ("evt", interp.supporting_event_refs), ("rel", interp.supporting_relationship_refs), ("conf", interp.supporting_conflict_refs)) for ref in refs)
 
 
+def _no_source_conflicts_summary() -> EvidenceBackedInterpretation:
+    """The authoritative zero-conflict result required by the non-empty model."""
+    return EvidenceBackedInterpretation(
+        text_zh="未发现 canonical 来源证据之间的冲突。",
+        evidence_mode="explicit",
+    )
+
+
 def build_story_bible_from_provider_output(payload: dict[str, Any], snapshot: StoryAnalysisInputSnapshot,
     global_event_analysis: GlobalEventAnalysis, arc_analysis: ArcAnalysis,
     global_structure: GlobalStructure) -> GlobalStoryBible:
@@ -135,7 +143,7 @@ def build_story_bible_from_provider_output(payload: dict[str, Any], snapshot: St
             "provider StoryBible keys mismatch: "
             f"missing_keys={missing_keys!r}, unexpected_keys={unexpected_keys!r}"
         )
-    return GlobalStoryBible.from_dict({
+    bible = GlobalStoryBible.from_dict({
         "schema_version": 1,
         **payload,
         "main_character_refs": list(global_structure.main_character_refs),
@@ -149,6 +157,12 @@ def build_story_bible_from_provider_output(payload: dict[str, Any], snapshot: St
             "arc_count": len(arc_analysis.arcs),
         },
     })
+    # A5 is the sole authority for source-evidence conflicts.  With no A5
+    # conflict records, no model prose may turn narrative tension into a source
+    # contradiction; unresolved entities remain a separate provider field.
+    if not snapshot.conflicts:
+        return replace(bible, source_conflict_summary=_no_source_conflicts_summary())
+    return bible
 
 
 def validate_story_bible_output(payload: dict[str, Any], snapshot: StoryAnalysisInputSnapshot,
@@ -167,6 +181,23 @@ def validate_story_bible_output(payload: dict[str, Any], snapshot: StoryAnalysis
     if not set(bible.major_turning_point_refs) <= {x.turning_point_id for x in arc_analysis.turning_points}: return "StoryBible has unknown turning-point refs"
     if not set(bible.major_reveal_refs) <= {x.reveal_id for x in arc_analysis.reveals}: return "StoryBible has unknown reveal refs"
     if not set(bible.main_character_refs) <= set(global_structure.main_character_refs): return "StoryBible main characters must be in GlobalStructure"
+    conflict_ids = {conflict.conflict_id for conflict in snapshot.conflicts}
+    source_conflict = bible.source_conflict_summary
+    if not conflict_ids:
+        if source_conflict != _no_source_conflicts_summary():
+            return "StoryBible source_conflict_summary must be the A5 zero-conflict summary"
+    else:
+        if set(source_conflict.supporting_conflict_refs) != conflict_ids:
+            return "StoryBible source_conflict_summary must reference every A5 source conflict"
+        conflict_fact_refs = {fact_id for conflict in snapshot.conflicts for fact_id in conflict.fact_ids}
+        conflict_relationship_refs = {
+            relationship_id for conflict in snapshot.conflicts
+            for relationship_id in conflict.relationship_ids
+        }
+        if (source_conflict.supporting_event_refs or
+                not set(source_conflict.supporting_fact_refs) <= conflict_fact_refs or
+                not set(source_conflict.supporting_relationship_refs) <= conflict_relationship_refs):
+            return "StoryBible source_conflict_summary has refs outside A5 source conflicts"
     return None
 
 

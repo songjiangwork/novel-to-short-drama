@@ -91,13 +91,12 @@ def validate_revision_request(store: FileArtifactStore, request: RevisionRequest
         raise GuidanceError("RevisionRequest target_artifact_ref cannot be resolved exactly") from exc
     owner_value = _ARTIFACT_STAGE_OWNER.get(request.target_artifact_ref.artifact_type)
     if owner_value is None:
-        if request.routed_owner_stage is None:
-            raise GuidanceError("unknown revision target artifact type requires explicit routed_owner_stage provenance")
-        owner_stage = request.routed_owner_stage
-    else:
-        owner_stage = DirectionStage(owner_value)
-        if request.routed_owner_stage is not None and request.routed_owner_stage is not owner_stage:
-            raise GuidanceError("routed_owner_stage disagrees with known target artifact owner")
+        raise GuidanceError(
+            "unknown revision target artifact type has no registered authoritative stage owner"
+        )
+    owner_stage = DirectionStage(owner_value)
+    if request.routed_owner_stage is not None and request.routed_owner_stage is not owner_stage:
+        raise GuidanceError("routed_owner_stage disagrees with known target artifact owner")
     if request.requested_stage is not owner_stage:
         raise GuidanceError("requested_stage does not own target_artifact_ref; route to the earliest authoritative owner")
     for target in request.target_refs:

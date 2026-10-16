@@ -46,6 +46,7 @@ def _direction(
     supersedes: tuple[ArtifactRef, ...] = (),
     exceptions: tuple[ArtifactRef, ...] = (),
     key: str | None = "tone",
+    project_id: str = "project-001",
 ) -> UserDirection:
     stage = {
         DirectionCategory.ADAPTATION_STORY: DirectionStage.B1_ADAPTATION,
@@ -67,7 +68,7 @@ def _direction(
     }[category]
     return UserDirection(
         direction_id=direction_id,
-        project_id="project-001",
+        project_id=project_id,
         direction_revision=revision,
         origin=DirectionOrigin.USER,
         category=category,
@@ -90,7 +91,7 @@ def _catalog(store: FileArtifactStore, *targets: TargetRef) -> TargetCatalog:
         if all(target.scope is TargetScope.CHARACTER for target in targets):
             authority_ref = store.put(ImmutableArtifactEnvelope.create(
                 artifact_type="canonical_character_registry",
-                artifact_id="project.characters",
+                artifact_id="project-001.document.a4.profile.characters",
                 revision=1,
                 schema_version=1,
                 payload={
@@ -273,6 +274,9 @@ def test_revision_request_pins_exact_resolvable_artifact_ref(tmp_path) -> None:
     b1_direction_ref = persist_user_direction(store, _direction("b1-result"))
     with pytest.raises(GuidanceError, match="resulting_direction_refs"):
         persist_revision_request(store, RevisionRequest("rr-004", target, DirectionStage.B2_SCREENPLAY, "缩短台词", (), (b1_direction_ref,), "reviewer:user-01"), catalog)
+    unknown_target = _artifact(store, "unregistered_semantic")
+    with pytest.raises(GuidanceError, match="no registered authoritative stage owner"):
+        persist_revision_request(store, RevisionRequest("rr-005", unknown_target, DirectionStage.B2_SCREENPLAY, "修订", (), (), "reviewer:user-01", DirectionStage.B2_SCREENPLAY), catalog)
 
 
 def test_project_binding_and_unmaterialized_future_targets_are_rejected(tmp_path) -> None:
@@ -287,8 +291,88 @@ def test_project_binding_and_unmaterialized_future_targets_are_rejected(tmp_path
     authority = _artifact(store, "story_analysis_manifest")
     fake_catalog = TargetCatalog("project-001", (fake_shot,), authority)
     future = _direction("future-shot", category=DirectionCategory.CAMERA, scope=TargetScope.PLANNED_SHOT, targets=(fake_shot,), key="camera")
-    with pytest.raises(GuidanceError, match="exact existing ArtifactRef"):
+    with pytest.raises(GuidanceError, match="no registered authoritative membership resolver"):
         _persist_set(store, fake_catalog, future, set_id="future-shot-set")
+
+
+def test_cross_stage_supersession_cannot_invalidate_b1_identity(tmp_path) -> None:
+    store = FileArtifactStore(tmp_path / "artifacts")
+    catalog = _catalog(store)
+    b1 = _direction("b1-story", key="story")
+    b1_ref = persist_user_direction(store, b1)
+    base = UserDirectionSet("project-001", "base", 1, (b1_ref,))
+    before = project_effective_directions(store, base, catalog, stage=DirectionStage.B1_ADAPTATION)
+    b4 = _direction(
+        "b4-camera", category=DirectionCategory.CAMERA, instruction="多用特写", key="camera",
+        supersedes=(b1_ref,),
+    )
+    bad_set = UserDirectionSet(
+        "project-001", "bad-cross-stage", 1, (b1_ref, persist_user_direction(store, b4)),
+    )
+    with pytest.raises(GuidanceError, match="preserve stage_scope and category"):
+        project_effective_directions(store, bad_set, catalog, stage=DirectionStage.B1_ADAPTATION)
+    plain_b4 = _direction("b4-camera-plain", category=DirectionCategory.CAMERA, instruction="多用特写", key="camera")
+    safe_set = UserDirectionSet(
+        "project-001", "safe-stage", 1, (b1_ref, persist_user_direction(store, plain_b4)),
+    )
+    after = project_effective_directions(store, safe_set, catalog, stage=DirectionStage.B1_ADAPTATION)
+    assert after.effective_user_direction_set_hash == before.effective_user_direction_set_hash
+
+
+def test_cross_category_and_cross_project_supersession_are_rejected(tmp_path) -> None:
+    store = FileArtifactStore(tmp_path / "artifacts")
+    catalog = _catalog(store)
+    original = _direction("story-original", key="story")
+    original_ref = persist_user_direction(store, original)
+    cross_category = _direction(
+        "story-category", category=DirectionCategory.CHARACTER_NARRATIVE, key="character",
+        supersedes=(original_ref,),
+    )
+    category_set = UserDirectionSet(
+        "project-001", "cross-category", 1, (persist_user_direction(store, cross_category),),
+    )
+    with pytest.raises(GuidanceError, match="preserve stage_scope and category"):
+        project_effective_directions(store, category_set, catalog, stage=DirectionStage.B1_ADAPTATION)
+    cross_project = _direction(
+        "other-project", key="story", project_id="project-002", supersedes=(original_ref,),
+    )
+    project_set = UserDirectionSet(
+        "project-002", "cross-project", 1, (persist_user_direction(store, cross_project),),
+    )
+    with pytest.raises(GuidanceError, match="within one project"):
+        project_effective_directions(
+            store, project_set, TargetCatalog("project-002"), stage=DirectionStage.B1_ADAPTATION,
+        )
+
+
+def test_existing_unrelated_artifact_cannot_certify_fabricated_shot(tmp_path) -> None:
+    store = FileArtifactStore(tmp_path / "artifacts")
+    unrelated = _artifact(store, "screenplay")
+    fake_shot = TargetRef(TargetScope.PLANNED_SHOT, "shot-9999", unrelated)
+    catalog = TargetCatalog("project-001", (fake_shot,), _artifact(store, "story_analysis_manifest"))
+    direction = _direction(
+        "fabricated-shot", category=DirectionCategory.CAMERA, scope=TargetScope.PLANNED_SHOT,
+        targets=(fake_shot,), key="camera",
+    )
+    with pytest.raises(GuidanceError, match="no registered authoritative membership resolver"):
+        _persist_set(store, catalog, direction, set_id="fabricated-shot-set")
+
+
+def test_cross_project_character_registry_cannot_authorize_target(tmp_path) -> None:
+    store = FileArtifactStore(tmp_path / "artifacts")
+    character = TargetRef(TargetScope.CHARACTER, "char_0001")
+    local = _catalog(store, character)
+    foreign_authority = store.put(ImmutableArtifactEnvelope.create(
+        artifact_type="canonical_character_registry",
+        artifact_id="project-002.document.a4.profile.characters",
+        revision=1,
+        schema_version=1,
+        payload=store.get_ref(local.authority_ref).payload,  # type: ignore[arg-type]
+    ))
+    catalog = TargetCatalog("project-001", (character,), foreign_authority)
+    direction = _direction("cross-project-character", category=DirectionCategory.WARDROBE, scope=TargetScope.CHARACTER, targets=(character,), key="wardrobe")
+    with pytest.raises(GuidanceError, match="another project"):
+        _persist_set(store, catalog, direction, set_id="cross-project-character-set")
 
 
 def test_serialization_round_trips_and_exact_set_persistence(tmp_path) -> None:

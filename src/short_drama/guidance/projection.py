@@ -112,6 +112,8 @@ def validate_target_ref(store: FileArtifactStore, catalog: TargetCatalog, target
         if target.scope is TargetScope.CHARACTER:
             if catalog.authority_ref.artifact_type != "canonical_character_registry":
                 raise GuidanceError("CHARACTER targets require a canonical_character_registry authority_ref")
+            if not catalog.authority_ref.artifact_id.startswith(f"{catalog.project_id}."):
+                raise GuidanceError("canonical_character_registry authority_ref is bound to another project")
             try:
                 from short_drama.story.reconciliation import CanonicalCharacterRegistry
 
@@ -121,8 +123,12 @@ def validate_target_ref(store: FileArtifactStore, catalog: TargetCatalog, target
                 raise GuidanceError("canonical_character_registry authority_ref is not a valid Foundation registry") from exc
             if target.target_id not in {entity.canonical_id for entity in registry.entities}:
                 raise GuidanceError("CHARACTER target_id is absent from the exact canonical character registry")
-        elif target.artifact_ref is None:
-            raise GuidanceError("future/non-character targets require an exact existing ArtifactRef")
+        else:
+            # No B2-B6 target-membership artifact contracts exist yet.  An
+            # arbitrary persisted ref cannot prove it is this scene/shot/asset.
+            raise GuidanceError(
+                "target scope has no registered authoritative membership resolver in G1"
+            )
     if target.artifact_ref is not None:
         try:
             store.get_ref(target.artifact_ref)
@@ -173,6 +179,11 @@ def _verify_revision_lineage(
         predecessor = load_user_direction(store, predecessors[0])
         if predecessor.project_id != current.project_id:
             raise GuidanceError("direction revision lineage must remain within one project")
+        if (
+            predecessor.stage_scope is not current.stage_scope
+            or predecessor.category is not current.category
+        ):
+            raise GuidanceError("direction revision lineage must preserve stage_scope and category")
         validate_direction_targets(store, catalog, predecessor)
         current = predecessor
 
@@ -200,6 +211,15 @@ def resolve_direction_set(
             validate_direction_targets(store, catalog, related)
             if related.artifact_ref == direction.artifact_ref:
                 raise GuidanceError("a direction cannot supersede or except itself")
+            if related.project_id != direction.project_id:
+                raise GuidanceError("supersession/exception provenance must remain within one project")
+            if (
+                related.stage_scope is not direction.stage_scope
+                or related.category is not direction.category
+            ):
+                raise GuidanceError(
+                    "supersession/exception provenance must preserve stage_scope and category"
+                )
     return tuple(sorted(directions, key=lambda direction: artifact_ref_sort_key(direction.artifact_ref)))
 
 

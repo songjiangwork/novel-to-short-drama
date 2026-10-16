@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/resolved-adaptation-target.schema.json",
+  "allOf": [
+    {"$ref": "https://novel-to-short-drama.local/schemas/adaptation-target.schema.json#/$defs/target"},
+    {"type": "object", "required": ["source_snapshot"]}
+  ]
+}

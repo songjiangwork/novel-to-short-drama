@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/adaptation-target.schema.json",
+  "$ref": "#/$defs/target",
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "adaptation_target_id", "narrative_format", "presentation_orientation", "adaptation_genre", "fidelity", "pacing", "compression", "primary_focus", "audience", "required_elements", "forbidden_elements", "working_language", "total_duration_constraints", "per_episode_duration_constraints", "episode_count_constraints"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "adaptation_target_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+        "source_snapshot": {"$ref": "#/$defs/sourceSnapshot"},
+        "narrative_format": {"$ref": "#/$defs/textValue"},
+        "presentation_orientation": {"$ref": "#/$defs/textValue"},
+        "adaptation_genre": {"$ref": "#/$defs/textValue"},
+        "fidelity": {"$ref": "#/$defs/fidelityValue"},
+        "pacing": {"$ref": "#/$defs/textValue"},
+        "compression": {"$ref": "#/$defs/textValue"},
+        "primary_focus": {"$ref": "#/$defs/referenceListValue"},
+        "audience": {"$ref": "#/$defs/textValue"},
+        "required_elements": {"$ref": "#/$defs/elementsValue"},
+        "forbidden_elements": {"$ref": "#/$defs/elementsValue"},
+        "working_language": {"$ref": "#/$defs/workingLanguageValue"},
+        "total_duration_constraints": {"$ref": "#/$defs/constraintsValue"},
+        "per_episode_duration_constraints": {"$ref": "#/$defs/constraintsValue"},
+        "episode_count_constraints": {"$ref": "#/$defs/constraintsValue"}
+      }
+    },
+    "value": {"type": "object", "additionalProperties": false, "required": ["value", "provenance"], "properties": {"value": {}, "provenance": {"enum": ["user", "profile_default", "derived", "model_proposed"]}}},
+    "textValue": {"anyOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/value"}, {"properties": {"value": {"type": "string", "minLength": 1, "pattern": "^(?=.*\\S)[^\\u0000]+$"}}}]}]},
+    "fidelityValue": {"anyOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/value"}, {"properties": {"value": {"enum": ["high", "balanced", "aggressive"]}}}]}]},
+    "workingLanguageValue": {"anyOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/value"}, {"properties": {"value": {"const": "zh-CN"}}}]}]},
+    "reference": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["kind", "canonical_id"], "properties": {"kind": {"enum": ["character", "location", "fact", "event", "relationship", "arc", "turning_point", "reveal", "payoff"]}, "canonical_id": {"type": "string", "minLength": 1}}}, {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1, "pattern": "^(?=.*\\S)[^\\u0000]+$"}}}]},
+    "referenceListValue": {"anyOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/value"}, {"properties": {"value": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/reference"}}}}]}]},
+    "element": {"type": "object", "additionalProperties": false, "required": ["reference", "instruction"], "properties": {"reference": {"$ref": "#/$defs/reference"}, "instruction": {"type": ["string", "null"]}}},
+    "elementsValue": {"anyOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/value"}, {"properties": {"value": {"type": "array", "items": {"$ref": "#/$defs/element"}}}}]}]},
+    "constraint": {"type": "object", "additionalProperties": false, "required": ["kind", "strength", "value", "minimum", "maximum", "derivation"], "properties": {"kind": {"enum": ["fixed", "target", "range", "derived"]}, "strength": {"enum": ["hard", "soft"]}, "value": {"type": ["integer", "null"], "exclusiveMinimum": 0}, "minimum": {"type": ["integer", "null"], "exclusiveMinimum": 0}, "maximum": {"type": ["integer", "null"], "exclusiveMinimum": 0}, "derivation": {"type": ["string", "null"]}}},
+    "constraintsValue": {"anyOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/value"}, {"properties": {"value": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/constraint"}}}}]}]},
+    "artifactRef": {"type": "object", "additionalProperties": false, "required": ["artifact_type", "artifact_id", "revision", "content_hash"], "properties": {"artifact_type": {"type": "string"}, "artifact_id": {"type": "string"}, "revision": {"type": "integer", "minimum": 1}, "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "sourceSnapshot": {"type": "object", "additionalProperties": false, "required": ["story_analysis_manifest_ref", "consolidation_manifest_ref", "entity_map_ref", "canonical_character_registry_ref", "canonical_location_registry_ref", "canonical_fact_set_ref", "canonical_event_set_ref", "canonical_relationship_set_ref", "arc_analysis_ref", "canonical_references"], "properties": {"story_analysis_manifest_ref": {"$ref": "#/$defs/artifactRef"}, "consolidation_manifest_ref": {"$ref": "#/$defs/artifactRef"}, "entity_map_ref": {"$ref": "#/$defs/artifactRef"}, "canonical_character_registry_ref": {"$ref": "#/$defs/artifactRef"}, "canonical_location_registry_ref": {"$ref": "#/$defs/artifactRef"}, "canonical_fact_set_ref": {"$ref": "#/$defs/artifactRef"}, "canonical_event_set_ref": {"$ref": "#/$defs/artifactRef"}, "canonical_relationship_set_ref": {"$ref": "#/$defs/artifactRef"}, "arc_analysis_ref": {"$ref": "#/$defs/artifactRef"}, "canonical_references": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["kind", "canonical_id"], "properties": {"kind": {"enum": ["character", "location", "fact", "event", "relationship", "arc", "turning_point", "reveal", "payoff"]}, "canonical_id": {"type": "string"}}}}}}
+  }
+}

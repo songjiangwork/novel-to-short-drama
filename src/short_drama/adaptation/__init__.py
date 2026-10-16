@@ -9,6 +9,7 @@ from .target import (
     AdaptationTargetDefaults,
     AdaptationTargetError,
     AdaptationTargetOverrides,
+    AdaptationSourceSnapshot,
     CanonicalTargetReference,
     ConstraintKind,
     ConstraintStrength,
@@ -25,7 +26,7 @@ from .target import (
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
-    "AdaptationTargetOverrides", "CanonicalTargetReference", "ConstraintKind",
+    "AdaptationTargetOverrides", "AdaptationSourceSnapshot", "CanonicalTargetReference", "ConstraintKind",
     "ConstraintStrength", "FidelityProfile", "NumericConstraint", "Provenance",
     "ResolvedAdaptationTarget", "StableIdIndex", "TargetElement", "TargetValue",
     "UnresolvedTargetReference", "resolve_adaptation_target",

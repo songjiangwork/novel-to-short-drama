@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping
 
-from short_drama.artifacts import content_hash
+from short_drama.artifacts import ArtifactRef, FileArtifactStore, content_hash
 
 
 ADAPTATION_TARGET_SCHEMA_VERSION = 1
@@ -131,6 +131,155 @@ class CanonicalTargetReference:
 
 
 @dataclass(frozen=True, slots=True)
+class AdaptationSourceSnapshot:
+    """The exact validated A5/A6 input identity consumed by a B1.1 target.
+
+    This is a read-only binding to existing Foundation ``ArtifactRef`` values,
+    not a new artifact or publication mechanism.  The contained ID universe is
+    the sole authority for canonical target refs in the resolved target.
+    """
+
+    story_analysis_manifest_ref: ArtifactRef
+    consolidation_manifest_ref: ArtifactRef
+    entity_map_ref: ArtifactRef
+    canonical_fact_set_ref: ArtifactRef
+    canonical_event_set_ref: ArtifactRef
+    canonical_relationship_set_ref: ArtifactRef
+    arc_analysis_ref: ArtifactRef
+    canonical_references: tuple[CanonicalTargetReference, ...]
+
+    def __post_init__(self) -> None:
+        expected = {
+            "story_analysis_manifest_ref": "story_analysis_manifest",
+            "consolidation_manifest_ref": "consolidation_manifest",
+            "entity_map_ref": "entity_map",
+            "canonical_fact_set_ref": "canonical_fact_set",
+            "canonical_event_set_ref": "canonical_event_set",
+            "canonical_relationship_set_ref": "canonical_relationship_set",
+            "arc_analysis_ref": "arc_analysis",
+        }
+        for field, artifact_type in expected.items():
+            ref = getattr(self, field)
+            if not isinstance(ref, ArtifactRef) or ref.artifact_type != artifact_type:
+                raise AdaptationTargetError(f"{field} must be an exact {artifact_type} ArtifactRef")
+        refs = tuple(self.canonical_references)
+        if any(not isinstance(ref, CanonicalTargetReference) for ref in refs):
+            raise AdaptationTargetError("canonical_references must contain CanonicalTargetReference values")
+        if len({(ref.kind, ref.canonical_id) for ref in refs}) != len(refs):
+            raise AdaptationTargetError("canonical_references must not contain duplicates")
+        object.__setattr__(self, "canonical_references", refs)
+
+    def contains(self, reference: CanonicalTargetReference) -> bool:
+        return reference in self.canonical_references
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "story_analysis_manifest_ref": self.story_analysis_manifest_ref.to_dict(),
+            "consolidation_manifest_ref": self.consolidation_manifest_ref.to_dict(),
+            "entity_map_ref": self.entity_map_ref.to_dict(),
+            "canonical_fact_set_ref": self.canonical_fact_set_ref.to_dict(),
+            "canonical_event_set_ref": self.canonical_event_set_ref.to_dict(),
+            "canonical_relationship_set_ref": self.canonical_relationship_set_ref.to_dict(),
+            "arc_analysis_ref": self.arc_analysis_ref.to_dict(),
+            "canonical_references": [ref.to_dict() for ref in self.canonical_references],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "AdaptationSourceSnapshot":
+        fields = {
+            "story_analysis_manifest_ref", "consolidation_manifest_ref", "entity_map_ref",
+            "canonical_fact_set_ref", "canonical_event_set_ref", "canonical_relationship_set_ref",
+            "arc_analysis_ref", "canonical_references",
+        }
+        value = _exact(value, fields, cls.__name__)
+        if not isinstance(value["canonical_references"], list):
+            raise AdaptationTargetError("canonical_references must be an array")
+        try:
+            return cls(
+                **{field: ArtifactRef.from_dict(value[field]) for field in fields if field.endswith("_ref")},
+                canonical_references=tuple(CanonicalTargetReference.from_dict(item) for item in value["canonical_references"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise AdaptationTargetError(f"invalid AdaptationSourceSnapshot: {exc}") from exc
+
+    @classmethod
+    def from_store(
+        cls, store: FileArtifactStore, story_analysis_manifest_ref: ArtifactRef
+    ) -> "AdaptationSourceSnapshot":
+        """Read and verify the exact A5/A6 member artifacts without writing.
+
+        ``ArtifactRef`` hash verification is delegated to the existing
+        FileArtifactStore.  A6 pins A5's manifest; A5 in turn pins its exact
+        entity/fact/event/relationship leaves.  No CURRENT pointer is followed
+        and no historical/latest lookup is performed.
+        """
+        if not isinstance(store, FileArtifactStore):
+            raise AdaptationTargetError("store must be FileArtifactStore")
+        from short_drama.story.consolidation import (
+            CanonicalEventSet, CanonicalFactSet, CanonicalRelationshipSet, ConsolidationManifest,
+        )
+        from short_drama.story.reconciliation import EntityMap
+        from short_drama.story.story_analysis import ArcAnalysis, StoryAnalysisManifest
+
+        def load(ref: ArtifactRef, artifact_type: str, model: Any) -> Any:
+            if not isinstance(ref, ArtifactRef) or ref.artifact_type != artifact_type:
+                raise AdaptationTargetError(f"expected exact {artifact_type} ArtifactRef")
+            try:
+                envelope = store.get_ref(ref)
+                if not isinstance(envelope.schema_version, int) or not isinstance(envelope.payload, dict):
+                    raise AdaptationTargetError(f"invalid persisted {artifact_type}")
+                typed = model.from_dict(envelope.payload)
+                if typed.to_dict() != envelope.payload:
+                    raise AdaptationTargetError(f"persisted {artifact_type} is not canonical")
+                return typed
+            except AdaptationTargetError:
+                raise
+            except Exception as exc:  # Existing store verifies ref/hash before this point.
+                raise AdaptationTargetError(f"cannot resolve exact {artifact_type} snapshot input") from exc
+
+        a6 = load(story_analysis_manifest_ref, "story_analysis_manifest", StoryAnalysisManifest)
+        if a6.consolidation_manifest_ref != a6.upstream_identity.consolidation_manifest_ref:
+            raise AdaptationTargetError("A6 manifest has a mismatched A5 upstream binding")
+        a5 = load(a6.consolidation_manifest_ref, "consolidation_manifest", ConsolidationManifest)
+        if (a5.project_id, a5.document_id) != (a6.project_id, a6.document_id):
+            raise AdaptationTargetError("A5/A6 snapshot project or document binding differs")
+        leaf_refs = (
+            a5.canonical_fact_set_ref, a5.canonical_event_set_ref,
+            a5.canonical_relationship_set_ref,
+        )
+        if any(ref.revision != a6.consolidation_manifest_ref.revision for ref in leaf_refs):
+            raise AdaptationTargetError("A5 canonical leaves cross revisions within the bound snapshot")
+        entity_map = load(a5.entity_map_ref, "entity_map", EntityMap)
+        facts = load(a5.canonical_fact_set_ref, "canonical_fact_set", CanonicalFactSet)
+        events = load(a5.canonical_event_set_ref, "canonical_event_set", CanonicalEventSet)
+        relationships = load(a5.canonical_relationship_set_ref, "canonical_relationship_set", CanonicalRelationshipSet)
+        arcs = load(a6.arc_analysis_ref, "arc_analysis", ArcAnalysis)
+        refs: list[CanonicalTargetReference] = []
+        for item in entity_map.entries:
+            if item.canonical_id is not None:
+                refs.append(CanonicalTargetReference(
+                    "character" if item.canonical_id.startswith("char_") else "location", item.canonical_id
+                ))
+        refs.extend(CanonicalTargetReference("fact", item.fact_id) for item in facts.facts)
+        refs.extend(CanonicalTargetReference("event", item.event_id) for item in events.events)
+        refs.extend(CanonicalTargetReference("relationship", item.relationship_id) for item in relationships.relationships)
+        refs.extend(CanonicalTargetReference("arc", item.arc_id) for item in arcs.arcs)
+        refs.extend(CanonicalTargetReference("turning_point", item.turning_point_id) for item in arcs.turning_points)
+        refs.extend(CanonicalTargetReference("reveal", item.reveal_id) for item in arcs.reveals)
+        refs.extend(CanonicalTargetReference("payoff", item.payoff_id) for item in arcs.foreshadow_payoffs)
+        return cls(
+            story_analysis_manifest_ref=story_analysis_manifest_ref,
+            consolidation_manifest_ref=a6.consolidation_manifest_ref,
+            entity_map_ref=a5.entity_map_ref,
+            canonical_fact_set_ref=a5.canonical_fact_set_ref,
+            canonical_event_set_ref=a5.canonical_event_set_ref,
+            canonical_relationship_set_ref=a5.canonical_relationship_set_ref,
+            arc_analysis_ref=a6.arc_analysis_ref,
+            canonical_references=tuple(refs),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class UnresolvedTargetReference:
     """A natural-language target that was not safely canonicalized."""
 
@@ -221,10 +370,10 @@ class NumericConstraint:
             _text(self.derivation, "constraint.derivation")
 
     def validate_for(self, field: str) -> None:
-        if field == "episode_count":
+        if field in {"total_duration", "per_episode_duration", "episode_count"}:
             for value in (self.value, self.minimum, self.maximum):
                 if value is not None:
-                    _number(value, "episode_count constraint", integer=True)
+                    _number(value, f"{field} constraint", integer=True)
 
     def hard_interval(self, *, lower_default: float) -> tuple[float, float] | None:
         """Return the feasibility interval for hard fixed/range constraints only.
@@ -404,6 +553,10 @@ class AdaptationTarget(_TargetLayer):
     def __post_init__(self) -> None:
         _id(self.adaptation_target_id, "adaptation_target_id")
         self._validate_fields()
+        for field in _VALUE_FIELDS:
+            item = getattr(self, field)
+            if item is not None and item.provenance is not Provenance.USER:
+                raise AdaptationTargetError("raw intent fields must have user provenance")
 
     def to_dict(self) -> dict[str, Any]:
         return {"schema_version": ADAPTATION_TARGET_SCHEMA_VERSION, "adaptation_target_id": self.adaptation_target_id, **self._fields_to_dict()}
@@ -476,8 +629,8 @@ class AdaptationTargetOverrides(_TargetLayer):
         self._validate_fields()
         for field in _VALUE_FIELDS:
             item = getattr(self, field)
-            if item is not None and item.provenance not in {Provenance.USER, Provenance.MODEL_PROPOSED}:
-                raise AdaptationTargetError("explicit overrides must retain user or model_proposed provenance")
+            if item is not None and item.provenance is not Provenance.USER:
+                raise AdaptationTargetError("explicit overrides require explicit user acceptance/provenance")
 
     def to_dict(self) -> dict[str, Any]:
         return {"schema_version": ADAPTATION_TARGET_SCHEMA_VERSION, "override_id": self.override_id, **self._fields_to_dict()}
@@ -495,6 +648,7 @@ class ResolvedAdaptationTarget(_TargetLayer):
     """The one target shape consumed by later B1 stages; no defaults are re-inferred."""
 
     adaptation_target_id: str
+    source_snapshot: AdaptationSourceSnapshot
     narrative_format: TargetValue | None = None
     presentation_orientation: TargetValue | None = None
     adaptation_genre: TargetValue | None = None
@@ -512,22 +666,30 @@ class ResolvedAdaptationTarget(_TargetLayer):
 
     def __post_init__(self) -> None:
         _id(self.adaptation_target_id, "adaptation_target_id")
+        if not isinstance(self.source_snapshot, AdaptationSourceSnapshot):
+            raise AdaptationTargetError("source_snapshot must be an exact AdaptationSourceSnapshot")
         self._validate_fields()
+        _validate_snapshot_membership(self)
         _validate_element_conflicts(self)
         _validate_hard_numeric_feasibility(self)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema_version": ADAPTATION_TARGET_SCHEMA_VERSION, "adaptation_target_id": self.adaptation_target_id, **self._fields_to_dict()}
+        return {
+            "schema_version": ADAPTATION_TARGET_SCHEMA_VERSION,
+            "adaptation_target_id": self.adaptation_target_id,
+            "source_snapshot": self.source_snapshot.to_dict(),
+            **self._fields_to_dict(),
+        }
 
     def content_hash(self) -> str:
         return content_hash(self.to_dict())
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ResolvedAdaptationTarget":
-        value = _exact(value, {"schema_version", "adaptation_target_id", *_VALUE_FIELDS}, cls.__name__)
+        value = _exact(value, {"schema_version", "adaptation_target_id", "source_snapshot", *_VALUE_FIELDS}, cls.__name__)
         if value["schema_version"] != ADAPTATION_TARGET_SCHEMA_VERSION:
             raise AdaptationTargetError("unsupported ResolvedAdaptationTarget schema_version")
-        return cls(value["adaptation_target_id"], **cls._fields_from_dict(value))
+        return cls(value["adaptation_target_id"], AdaptationSourceSnapshot.from_dict(value["source_snapshot"]), **cls._fields_from_dict(value))
 
 
 def _canonical_element_ids(value: TargetValue | None) -> set[tuple[str, str]]:
@@ -545,6 +707,20 @@ def _validate_element_conflicts(target: ResolvedAdaptationTarget) -> None:
     if overlap:
         refs = ", ".join(f"{kind}:{identifier}" for kind, identifier in sorted(overlap))
         raise AdaptationTargetError(f"required_elements and forbidden_elements contradict: {refs}")
+
+
+def _validate_snapshot_membership(target: ResolvedAdaptationTarget) -> None:
+    for field in ("primary_focus", "required_elements", "forbidden_elements"):
+        item = getattr(target, field)
+        if item is None:
+            continue
+        values = item.value
+        refs = values if field == "primary_focus" else tuple(element.reference for element in values)
+        for ref in refs:
+            if isinstance(ref, CanonicalTargetReference) and not target.source_snapshot.contains(ref):
+                raise AdaptationTargetError(
+                    f"{field} references {ref.kind}:{ref.canonical_id} outside the exact bound A5/A6 snapshot"
+                )
 
 
 def _combined_hard_interval(constraints: Iterable[NumericConstraint], *, lower_default: float, label: str) -> tuple[float, float]:
@@ -575,12 +751,37 @@ def _validate_hard_numeric_feasibility(target: ResolvedAdaptationTarget) -> None
         raise AdaptationTargetError(
             "hard total/per-episode/count duration constraints are contradictory"
         )
+    _validate_fixed_integer_duration_count(total, per_episode, episode_count)
+
+
+def _validate_fixed_integer_duration_count(
+    total: tuple[float, float], per_episode: tuple[float, float], episode_count: tuple[float, float]
+) -> None:
+    """Reject a continuous-looking interval that has no integral episode count.
+
+    Values are normalized integer seconds.  This exact check covers the
+    fixed-duration case without selecting a count (which remains B1.5's job).
+    """
+    if total[0] != total[1] or per_episode[0] != per_episode[1]:
+        return
+    total_seconds, per_episode_seconds = int(total[0]), int(per_episode[0])
+    if total_seconds % per_episode_seconds:
+        raise AdaptationTargetError(
+            "hard fixed total/per-episode duration has no integral episode-count solution"
+        )
+    count = total_seconds // per_episode_seconds
+    if not episode_count[0] <= count <= episode_count[1]:
+        raise AdaptationTargetError(
+            "hard fixed duration solution conflicts with hard episode-count constraints"
+        )
 
 
 def resolve_adaptation_target(
     raw_intent: AdaptationTarget,
     profile_defaults: AdaptationTargetDefaults | None = None,
     explicit_overrides: AdaptationTargetOverrides | None = None,
+    *,
+    source_snapshot: AdaptationSourceSnapshot,
 ) -> ResolvedAdaptationTarget:
     """Resolve exactly ``raw > profile default`` and ``override > raw`` per field.
 
@@ -604,7 +805,9 @@ def resolve_adaptation_target(
         if explicit_overrides is not None and getattr(explicit_overrides, field) is not None:
             value = getattr(explicit_overrides, field)
         resolved[field] = value
-    return ResolvedAdaptationTarget(raw_intent.adaptation_target_id, **resolved)
+    if not isinstance(source_snapshot, AdaptationSourceSnapshot):
+        raise AdaptationTargetError("source_snapshot must be an exact AdaptationSourceSnapshot")
+    return ResolvedAdaptationTarget(raw_intent.adaptation_target_id, source_snapshot, **resolved)
 
 
 @dataclass(frozen=True, slots=True)

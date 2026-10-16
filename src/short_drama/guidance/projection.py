@@ -37,6 +37,7 @@ class TargetCatalog:
 
     project_id: str
     targets: tuple[TargetRef, ...] = ()
+    authority_ref: ArtifactRef | None = None
 
     def __post_init__(self) -> None:
         require_storage_id(self.project_id, "project_id", GuidanceError)
@@ -48,19 +49,29 @@ class TargetCatalog:
         if len(set(targets)) != len(targets):
             raise GuidanceError("TargetCatalog targets must not contain duplicates")
         object.__setattr__(self, "targets", targets)
+        if self.authority_ref is not None and not isinstance(self.authority_ref, ArtifactRef):
+            raise GuidanceError("TargetCatalog authority_ref must be an exact ArtifactRef")
 
     def contains(self, target: TargetRef) -> bool:
         return target.scope is TargetScope.PROJECT or target in self.targets
 
     def to_dict(self) -> dict[str, object]:
-        return {"project_id": self.project_id, "targets": [target.to_dict() for target in self.targets]}
+        return {
+            "project_id": self.project_id,
+            "targets": [target.to_dict() for target in self.targets],
+            "authority_ref": None if self.authority_ref is None else self.authority_ref.to_dict(),
+        }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "TargetCatalog":
-        value = _exact(value, {"project_id", "targets"}, cls.__name__)
+        value = _exact(value, {"project_id", "targets", "authority_ref"}, cls.__name__)
         if not isinstance(value["targets"], list):
             raise GuidanceError("TargetCatalog targets must be a list")
-        return cls(value["project_id"], tuple(TargetRef.from_dict(item) for item in value["targets"]))
+        try:
+            authority_ref = None if value["authority_ref"] is None else ArtifactRef.from_dict(value["authority_ref"])
+        except (TypeError, ValueError) as exc:
+            raise GuidanceError(f"invalid TargetCatalog authority_ref: {exc}") from exc
+        return cls(value["project_id"], tuple(TargetRef.from_dict(item) for item in value["targets"]), authority_ref)
 
 
 def _target_sort_key(target: TargetRef) -> tuple[object, ...]:
@@ -89,6 +100,29 @@ def validate_target_ref(store: FileArtifactStore, catalog: TargetCatalog, target
         raise GuidanceError("target must be a TargetRef")
     if not catalog.contains(target):
         raise GuidanceError(f"target does not exist in the authoritative target catalog: {target.scope.value}/{target.target_id}")
+    if target.scope is not TargetScope.PROJECT:
+        if catalog.authority_ref is None:
+            raise GuidanceError("non-PROJECT targets require an exact authoritative target catalog ref")
+        try:
+            store.get_ref(catalog.authority_ref)
+        except ArtifactError as exc:
+            raise GuidanceError("target catalog authority_ref cannot be resolved exactly") from exc
+        # Only A-layer character IDs exist as stable, unmaterialized IDs in G1.
+        # Future Scene/Shot/etc. targets must pin their already-created artifact.
+        if target.scope is TargetScope.CHARACTER:
+            if catalog.authority_ref.artifact_type != "canonical_character_registry":
+                raise GuidanceError("CHARACTER targets require a canonical_character_registry authority_ref")
+            try:
+                from short_drama.story.reconciliation import CanonicalCharacterRegistry
+
+                payload = store.get_ref(catalog.authority_ref).payload
+                registry = CanonicalCharacterRegistry.from_dict(payload)  # type: ignore[arg-type]
+            except Exception as exc:
+                raise GuidanceError("canonical_character_registry authority_ref is not a valid Foundation registry") from exc
+            if target.target_id not in {entity.canonical_id for entity in registry.entities}:
+                raise GuidanceError("CHARACTER target_id is absent from the exact canonical character registry")
+        elif target.artifact_ref is None:
+            raise GuidanceError("future/non-character targets require an exact existing ArtifactRef")
     if target.artifact_ref is not None:
         try:
             store.get_ref(target.artifact_ref)
@@ -121,6 +155,28 @@ def load_user_direction(store: FileArtifactStore, ref: ArtifactRef) -> UserDirec
     return direction
 
 
+def _verify_revision_lineage(
+    store: FileArtifactStore,
+    catalog: TargetCatalog,
+    direction: UserDirection,
+) -> None:
+    """Verify every immutable predecessor pin; never infer a current revision."""
+
+    current = direction
+    while current.direction_revision > 1:
+        predecessors = tuple(
+            ref for ref in current.supersedes_direction_refs
+            if ref.artifact_id == current.direction_id and ref.revision == current.direction_revision - 1
+        )
+        if len(predecessors) != 1:
+            raise GuidanceError("direction revision must have exactly one exact predecessor supersession ref")
+        predecessor = load_user_direction(store, predecessors[0])
+        if predecessor.project_id != current.project_id:
+            raise GuidanceError("direction revision lineage must remain within one project")
+        validate_direction_targets(store, catalog, predecessor)
+        current = predecessor
+
+
 def resolve_direction_set(
     store: FileArtifactStore,
     direction_set: UserDirectionSet,
@@ -135,7 +191,10 @@ def resolve_direction_set(
     if len(identities) != len(directions):
         raise GuidanceError("direction set must not contain duplicate direction ID/revision records")
     for direction in directions:
+        if direction.project_id != direction_set.project_id:
+            raise GuidanceError("direction project_id does not match UserDirectionSet project_id")
         validate_direction_targets(store, catalog, direction)
+        _verify_revision_lineage(store, catalog, direction)
         for ref in (*direction.supersedes_direction_refs, *direction.exception_for_direction_refs):
             related = load_user_direction(store, ref)
             validate_direction_targets(store, catalog, related)

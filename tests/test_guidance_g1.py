@@ -67,6 +67,7 @@ def _direction(
     }[category]
     return UserDirection(
         direction_id=direction_id,
+        project_id="project-001",
         direction_revision=revision,
         origin=DirectionOrigin.USER,
         category=category,
@@ -83,8 +84,31 @@ def _direction(
     )
 
 
-def _catalog(*targets: TargetRef) -> TargetCatalog:
-    return TargetCatalog("project-001", targets)
+def _catalog(store: FileArtifactStore, *targets: TargetRef) -> TargetCatalog:
+    authority_ref = None
+    if targets:
+        if all(target.scope is TargetScope.CHARACTER for target in targets):
+            authority_ref = store.put(ImmutableArtifactEnvelope.create(
+                artifact_type="canonical_character_registry",
+                artifact_id="project.characters",
+                revision=1,
+                schema_version=1,
+                payload={
+                    "schema_version": 1,
+                    "entity_type": "character",
+                    "entities": [{
+                        "canonical_id": "char_0001",
+                        "entity_type": "character",
+                        "display_name_original": "Alice",
+                        "aliases_original": [],
+                        "candidate_refs": ["CH001_C001:cand_char_001"],
+                        "first_appearance_candidate_ref": "CH001_C001:cand_char_001",
+                    }],
+                },
+            ))
+        else:
+            authority_ref = _artifact(store, "story_analysis_manifest")
+    return TargetCatalog("project-001", targets, authority_ref)
 
 
 def _persist_set(
@@ -108,7 +132,7 @@ def _artifact(store: FileArtifactStore, artifact_type: str = "screenplay") -> Ar
 
 def test_empty_guidance_has_a_stable_identity(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     direction_set = _persist_set(store, catalog)
     first = project_effective_directions(store, direction_set, catalog, stage=DirectionStage.B1_ADAPTATION)
     second = project_effective_directions(store, direction_set, catalog, stage=DirectionStage.B2_SCREENPLAY)
@@ -119,7 +143,7 @@ def test_empty_guidance_has_a_stable_identity(tmp_path) -> None:
 
 def test_canonical_ordering_and_hash_are_insertion_independent(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     first = _direction("dir-b", instruction="保留柴郡猫", key="cheshire")
     second = _direction("dir-a", instruction="不要爱情线", strength=DirectionStrength.MUST_NOT, key="romance")
     ref_first, ref_second = persist_user_direction(store, first), persist_user_direction(store, second)
@@ -131,7 +155,7 @@ def test_canonical_ordering_and_hash_are_insertion_independent(tmp_path) -> None
 
 def test_b4_direction_does_not_change_b1_or_b2_identity(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     b1 = _direction("dir-b1")
     b2 = _direction("dir-b2", category=DirectionCategory.DIALOGUE, key="alice-dialogue")
     base = _persist_set(store, catalog, b1, b2)
@@ -147,7 +171,7 @@ def test_b4_direction_does_not_change_b1_or_b2_identity(tmp_path) -> None:
 
 def test_relevant_b1_guidance_changes_only_b1_identity(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     base = _persist_set(store, catalog)
     before = project_effective_directions(store, base, catalog, stage=DirectionStage.B1_ADAPTATION)
     b1 = _direction("dir-b1")
@@ -159,7 +183,7 @@ def test_relevant_b1_guidance_changes_only_b1_identity(tmp_path) -> None:
 
 def test_unresolved_hard_conflicts_fail_closed(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     required = _direction("must", instruction="保留爱情线", key="romance")
     forbidden = _direction("must-not", instruction="不要爱情线", strength=DirectionStrength.MUST_NOT, key="romance")
     direction_set = _persist_set(store, catalog, required, forbidden)
@@ -169,8 +193,8 @@ def test_unresolved_hard_conflicts_fail_closed(tmp_path) -> None:
 
 def test_broad_and_narrow_hard_directions_need_explicit_exception(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    character = TargetRef(TargetScope.CHARACTER, "char-0001")
-    catalog = _catalog(character)
+    character = TargetRef(TargetScope.CHARACTER, "char_0001")
+    catalog = _catalog(store, character)
     broad = _direction("broad", instruction="Alice 穿蓝白裙", key="alice-wardrobe", category=DirectionCategory.WARDROBE)
     narrow = _direction("narrow", instruction="Alice 穿红裙", key="alice-wardrobe", category=DirectionCategory.WARDROBE, scope=TargetScope.CHARACTER, targets=(character,))
     direction_set = _persist_set(store, catalog, broad, narrow)
@@ -183,7 +207,7 @@ def test_broad_and_narrow_hard_directions_need_explicit_exception(tmp_path) -> N
 
 def test_explicit_supersession_withdrawal_and_historical_revisions(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     old = _direction("dir-story", instruction="保留茶会", key="tea-party")
     new = _direction("dir-story", revision=2, instruction="压缩茶会", key="tea-party", supersedes=(old.artifact_ref,))
     direction_set = _persist_set(store, catalog, old, new)
@@ -192,9 +216,23 @@ def test_explicit_supersession_withdrawal_and_historical_revisions(tmp_path) -> 
     with pytest.raises(FrozenInstanceError):
         old.instruction_zh = "mutate"  # type: ignore[misc]
     assert store.get_ref(old.artifact_ref).ref == old.artifact_ref
-    withdrawn = _direction("dir-withdrawn", status=DirectionStatus.WITHDRAWN, key="unused")
-    withdrawn_set = _persist_set(store, catalog, withdrawn, set_id="guidance-set-withdrawn")
+    withdrawable = _direction("dir-withdrawn", key="unused")
+    withdrawn = _direction(
+        "dir-withdrawn", revision=2, status=DirectionStatus.WITHDRAWN, key="unused",
+        supersedes=(withdrawable.artifact_ref,),
+    )
+    withdrawn_set = _persist_set(store, catalog, withdrawable, withdrawn, set_id="guidance-set-withdrawn")
     assert project_effective_directions(store, withdrawn_set, catalog, stage=DirectionStage.B1_ADAPTATION).is_empty
+
+
+def test_competing_revisions_and_unkeyed_hard_direction_fail_closed() -> None:
+    old = _direction("dir-revision", key="revision")
+    with pytest.raises(GuidanceError, match="explicitly supersede"):
+        _direction("dir-revision", revision=2, key="revision")
+    with pytest.raises(GuidanceError, match="constraint_key"):
+        _direction("dir-unkeyed", key=None)
+    # Free-text soft guidance stays valid without a conflict key.
+    assert _direction("dir-soft", strength=DirectionStrength.PREFER, key=None).constraint_key is None
 
 
 @pytest.mark.parametrize("bad", [
@@ -204,7 +242,7 @@ def test_explicit_supersession_withdrawal_and_historical_revisions(tmp_path) -> 
 def test_missing_and_wrong_revision_direction_refs_are_rejected(tmp_path, bad: ArtifactRef) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
     with pytest.raises(GuidanceError):
-        persist_user_direction_set(store, UserDirectionSet("project-001", "set", 1, (bad,)), _catalog())
+        persist_user_direction_set(store, UserDirectionSet("project-001", "set", 1, (bad,)), _catalog(store))
 
 
 def test_invalid_future_target_and_stage_category_mismatch_are_rejected(tmp_path) -> None:
@@ -212,14 +250,16 @@ def test_invalid_future_target_and_stage_category_mismatch_are_rejected(tmp_path
     future_shot = TargetRef(TargetScope.PLANNED_SHOT, "shot-0001")
     direction = _direction("camera", category=DirectionCategory.CAMERA, scope=TargetScope.PLANNED_SHOT, targets=(future_shot,), key="camera")
     with pytest.raises(GuidanceError, match="does not exist"):
-        _persist_set(store, _catalog(), direction)
+        _persist_set(store, _catalog(store), direction)
     with pytest.raises(GuidanceError, match="earliest authoritative owner"):
-        UserDirection("bad-stage", 1, DirectionOrigin.USER, DirectionCategory.CAMERA, DirectionStrength.MUST, DirectionStage.B1_ADAPTATION, TargetScope.PROJECT, (), "close-up")
+        UserDirection("bad-stage", "project-001", 1, DirectionOrigin.USER, DirectionCategory.CAMERA, DirectionStrength.MUST, DirectionStage.B1_ADAPTATION, TargetScope.PROJECT, (), "close-up", constraint_key="camera")
+    with pytest.raises(GuidanceError, match="target_scope"):
+        _direction("bad-target", scope=TargetScope.PLANNED_SHOT, targets=(future_shot,), key="story")
 
 
 def test_revision_request_pins_exact_resolvable_artifact_ref(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    catalog = _catalog()
+    catalog = _catalog(store)
     target = _artifact(store)
     request = RevisionRequest("rr-001", target, DirectionStage.B2_SCREENPLAY, "缩短台词", (), (), "reviewer:user-01")
     ref = persist_revision_request(store, request, catalog)
@@ -227,12 +267,34 @@ def test_revision_request_pins_exact_resolvable_artifact_ref(tmp_path) -> None:
     tampered = ArtifactRef(target.artifact_type, target.artifact_id, target.revision, HASH)
     with pytest.raises(GuidanceError, match="cannot be resolved exactly"):
         persist_revision_request(store, RevisionRequest("rr-002", tampered, DirectionStage.B2_SCREENPLAY, "缩短台词", (), (), "reviewer:user-01"), catalog)
+    b1_target = _artifact(store, "adaptation_plan")
+    with pytest.raises(GuidanceError, match="earliest authoritative owner"):
+        persist_revision_request(store, RevisionRequest("rr-003", b1_target, DirectionStage.B4_SHOT, "换镜头", (), (), "reviewer:user-01"), catalog)
+    b1_direction_ref = persist_user_direction(store, _direction("b1-result"))
+    with pytest.raises(GuidanceError, match="resulting_direction_refs"):
+        persist_revision_request(store, RevisionRequest("rr-004", target, DirectionStage.B2_SCREENPLAY, "缩短台词", (), (b1_direction_ref,), "reviewer:user-01"), catalog)
+
+
+def test_project_binding_and_unmaterialized_future_targets_are_rejected(tmp_path) -> None:
+    store = FileArtifactStore(tmp_path / "artifacts")
+    catalog = _catalog(store)
+    direction = _direction("project-bound")
+    direction_set = _persist_set(store, catalog, direction)
+    foreign_set = UserDirectionSet("project-002", "foreign-set", 1, direction_set.direction_refs)
+    with pytest.raises(GuidanceError, match="project_id"):
+        project_effective_directions(store, foreign_set, TargetCatalog("project-002"), stage=DirectionStage.B1_ADAPTATION)
+    fake_shot = TargetRef(TargetScope.PLANNED_SHOT, "shot-9999")
+    authority = _artifact(store, "story_analysis_manifest")
+    fake_catalog = TargetCatalog("project-001", (fake_shot,), authority)
+    future = _direction("future-shot", category=DirectionCategory.CAMERA, scope=TargetScope.PLANNED_SHOT, targets=(fake_shot,), key="camera")
+    with pytest.raises(GuidanceError, match="exact existing ArtifactRef"):
+        _persist_set(store, fake_catalog, future, set_id="future-shot-set")
 
 
 def test_serialization_round_trips_and_exact_set_persistence(tmp_path) -> None:
     store = FileArtifactStore(tmp_path / "artifacts")
-    character = TargetRef(TargetScope.CHARACTER, "char-0001")
-    catalog = _catalog(character)
+    character = TargetRef(TargetScope.CHARACTER, "char_0001")
+    catalog = _catalog(store, character)
     direction = _direction("visual", category=DirectionCategory.WARDROBE, scope=TargetScope.CHARACTER, targets=(character,), key="wardrobe")
     assert UserDirection.from_dict(direction.to_dict()) == direction
     direction_set = _persist_set(store, catalog, direction)

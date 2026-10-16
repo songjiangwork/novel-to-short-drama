@@ -8,12 +8,25 @@ from .models import (
     REVISION_REQUEST_ARTIFACT_TYPE,
     USER_DIRECTION_ARTIFACT_TYPE,
     USER_DIRECTION_SET_ARTIFACT_TYPE,
+    DirectionStage,
     GuidanceError,
     RevisionRequest,
     UserDirection,
     UserDirectionSet,
 )
 from .projection import TargetCatalog, load_user_direction, resolve_direction_set, validate_target_ref
+
+
+_ARTIFACT_STAGE_OWNER = {
+    "adaptation_target": "B1_ADAPTATION",
+    "resolved_adaptation_target": "B1_ADAPTATION",
+    "adaptation_plan": "B1_ADAPTATION",
+    "episode_screenplay": "B2_SCREENPLAY",
+    "screenplay": "B2_SCREENPLAY",
+    "production_plan": "B3_PRODUCTION",
+    "shot_plan": "B4_SHOT",
+    "asset_plan": "B6_ASSET",
+}
 
 
 def _envelope(artifact_type: str, artifact_id: str, revision: int, payload: dict[str, object]) -> ImmutableArtifactEnvelope:
@@ -76,10 +89,23 @@ def validate_revision_request(store: FileArtifactStore, request: RevisionRequest
         store.get_ref(request.target_artifact_ref)
     except ArtifactError as exc:
         raise GuidanceError("RevisionRequest target_artifact_ref cannot be resolved exactly") from exc
+    owner_value = _ARTIFACT_STAGE_OWNER.get(request.target_artifact_ref.artifact_type)
+    if owner_value is None:
+        if request.routed_owner_stage is None:
+            raise GuidanceError("unknown revision target artifact type requires explicit routed_owner_stage provenance")
+        owner_stage = request.routed_owner_stage
+    else:
+        owner_stage = DirectionStage(owner_value)
+        if request.routed_owner_stage is not None and request.routed_owner_stage is not owner_stage:
+            raise GuidanceError("routed_owner_stage disagrees with known target artifact owner")
+    if request.requested_stage is not owner_stage:
+        raise GuidanceError("requested_stage does not own target_artifact_ref; route to the earliest authoritative owner")
     for target in request.target_refs:
         validate_target_ref(store, catalog, target)
     for ref in request.resulting_direction_refs:
-        load_user_direction(store, ref)
+        direction = load_user_direction(store, ref)
+        if direction.stage_scope is not request.requested_stage:
+            raise GuidanceError("resulting_direction_refs must belong to RevisionRequest requested_stage")
 
 
 def persist_revision_request(

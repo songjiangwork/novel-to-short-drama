@@ -110,6 +110,15 @@ _CATEGORY_OWNER = {
     DirectionCategory.ASSET_REJECTION: DirectionStage.B6_ASSET,
 }
 
+_STAGE_TARGET_SCOPES = {
+    DirectionStage.B1_ADAPTATION: {TargetScope.PROJECT, TargetScope.CHARACTER, TargetScope.EPISODE},
+    DirectionStage.B2_SCREENPLAY: {TargetScope.PROJECT, TargetScope.CHARACTER, TargetScope.EPISODE, TargetScope.SCENE, TargetScope.SCREENPLAY_ELEMENT, TargetScope.UTTERANCE},
+    DirectionStage.B3_PRODUCTION: {TargetScope.PROJECT, TargetScope.CHARACTER, TargetScope.EPISODE, TargetScope.SCENE, TargetScope.PRODUCTION_UNIT, TargetScope.PRODUCTION_REQUIREMENT},
+    DirectionStage.B4_SHOT: {TargetScope.PROJECT, TargetScope.EPISODE, TargetScope.SCENE, TargetScope.PLANNED_SHOT},
+    DirectionStage.B5_RELEASE: {TargetScope.PROJECT, TargetScope.EPISODE, TargetScope.SCENE},
+    DirectionStage.B6_ASSET: {TargetScope.PROJECT, TargetScope.CHARACTER, TargetScope.ASSET_REQUIREMENT, TargetScope.ASSET_BINDING},
+}
+
 
 def _enum(value: Any, enum: type[Enum], name: str) -> Enum:
     try:
@@ -205,6 +214,7 @@ def _targets(value: Iterable[TargetRef], name: str, *, scope: TargetScope) -> tu
 @dataclass(frozen=True, slots=True)
 class UserDirection:
     direction_id: str
+    project_id: str
     direction_revision: int
     origin: DirectionOrigin
     category: DirectionCategory
@@ -221,6 +231,7 @@ class UserDirection:
 
     def __post_init__(self) -> None:
         require_storage_id(self.direction_id, "direction_id", GuidanceError)
+        require_storage_id(self.project_id, "project_id", GuidanceError)
         _revision(self.direction_revision, "direction_revision")
         object.__setattr__(self, "origin", _enum(self.origin, DirectionOrigin, "origin"))
         object.__setattr__(self, "category", _enum(self.category, DirectionCategory, "category"))
@@ -232,13 +243,25 @@ class UserDirection:
             raise GuidanceError("G1 only accepts USER direction origin")
         if _CATEGORY_OWNER[self.category] is not self.stage_scope:
             raise GuidanceError("stage_scope does not own category; route to the earliest authoritative owner")
+        if self.target_scope not in _STAGE_TARGET_SCOPES[self.stage_scope]:
+            raise GuidanceError("target_scope is not owned by stage_scope; route to the earliest authoritative owner")
         object.__setattr__(self, "target_refs", _targets(self.target_refs, "target_refs", scope=self.target_scope))
         require_text(self.instruction_zh, "instruction_zh", GuidanceError)
         require_text(self.provenance, "provenance", GuidanceError)
+        if self.strength.is_hard and self.constraint_key is None:
+            raise GuidanceError("hard directions require a machine-checkable constraint_key")
         if self.constraint_key is not None:
             require_text(self.constraint_key, "constraint_key", GuidanceError)
         object.__setattr__(self, "supersedes_direction_refs", _direction_refs(self.supersedes_direction_refs, "supersedes_direction_refs"))
         object.__setattr__(self, "exception_for_direction_refs", _direction_refs(self.exception_for_direction_refs, "exception_for_direction_refs"))
+        if self.direction_revision > 1:
+            if not any(
+                ref.artifact_id == self.direction_id and ref.revision == self.direction_revision - 1
+                for ref in self.supersedes_direction_refs
+            ):
+                raise GuidanceError("new direction revisions must explicitly supersede their exact predecessor")
+        if self.status in {DirectionStatus.WITHDRAWN, DirectionStatus.SUPERSEDED} and self.direction_revision == 1:
+            raise GuidanceError("WITHDRAWN/SUPERSEDED lifecycle records must audit the prior direction revision")
 
     @property
     def artifact_ref(self) -> ArtifactRef:
@@ -251,6 +274,7 @@ class UserDirection:
     def to_dict(self) -> dict[str, object]:
         return {
             "direction_id": self.direction_id,
+            "project_id": self.project_id,
             "direction_revision": self.direction_revision,
             "origin": self.origin.value,
             "category": self.category.value,
@@ -269,7 +293,7 @@ class UserDirection:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "UserDirection":
         value = _exact(value, {
-            "direction_id", "direction_revision", "origin", "category", "strength", "stage_scope",
+            "direction_id", "project_id", "direction_revision", "origin", "category", "strength", "stage_scope",
             "target_scope", "target_refs", "instruction_zh", "status", "supersedes_direction_refs",
             "exception_for_direction_refs", "provenance", "constraint_key",
         }, cls.__name__)
@@ -277,7 +301,7 @@ class UserDirection:
             raise GuidanceError("direction refs must be lists")
         try:
             return cls(
-                direction_id=value["direction_id"], direction_revision=value["direction_revision"], origin=value["origin"],
+                direction_id=value["direction_id"], project_id=value["project_id"], direction_revision=value["direction_revision"], origin=value["origin"],
                 category=value["category"], strength=value["strength"], stage_scope=value["stage_scope"],
                 target_scope=value["target_scope"], target_refs=tuple(TargetRef.from_dict(item) for item in value["target_refs"]),
                 instruction_zh=value["instruction_zh"], status=value["status"],
@@ -333,11 +357,14 @@ class RevisionRequest:
     target_refs: tuple[TargetRef, ...]
     resulting_direction_refs: tuple[ArtifactRef, ...]
     reviewer_provenance: str
+    routed_owner_stage: DirectionStage | None = None
 
     def __post_init__(self) -> None:
         require_storage_id(self.revision_request_id, "revision_request_id", GuidanceError)
         _ref(self.target_artifact_ref, "target_artifact_ref")
         object.__setattr__(self, "requested_stage", _enum(self.requested_stage, DirectionStage, "requested_stage"))
+        if self.routed_owner_stage is not None:
+            object.__setattr__(self, "routed_owner_stage", _enum(self.routed_owner_stage, DirectionStage, "routed_owner_stage"))
         require_text(self.instruction_zh, "instruction_zh", GuidanceError)
         require_text(self.reviewer_provenance, "reviewer_provenance", GuidanceError)
         refs = tuple(self.target_refs)
@@ -367,14 +394,15 @@ class RevisionRequest:
             "target_refs": [ref.to_dict() for ref in self.target_refs],
             "resulting_direction_refs": [ref.to_dict() for ref in self.resulting_direction_refs],
             "reviewer_provenance": self.reviewer_provenance,
+            "routed_owner_stage": None if self.routed_owner_stage is None else self.routed_owner_stage.value,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RevisionRequest":
-        value = _exact(value, {"revision_request_id", "target_artifact_ref", "requested_stage", "instruction_zh", "target_refs", "resulting_direction_refs", "reviewer_provenance"}, cls.__name__)
+        value = _exact(value, {"revision_request_id", "target_artifact_ref", "requested_stage", "instruction_zh", "target_refs", "resulting_direction_refs", "reviewer_provenance", "routed_owner_stage"}, cls.__name__)
         if not isinstance(value["target_refs"], list) or not isinstance(value["resulting_direction_refs"], list):
             raise GuidanceError("RevisionRequest refs must be lists")
         try:
-            return cls(value["revision_request_id"], ArtifactRef.from_dict(value["target_artifact_ref"]), value["requested_stage"], value["instruction_zh"], tuple(TargetRef.from_dict(item) for item in value["target_refs"]), tuple(ArtifactRef.from_dict(item) for item in value["resulting_direction_refs"]), value["reviewer_provenance"])
+            return cls(value["revision_request_id"], ArtifactRef.from_dict(value["target_artifact_ref"]), value["requested_stage"], value["instruction_zh"], tuple(TargetRef.from_dict(item) for item in value["target_refs"]), tuple(ArtifactRef.from_dict(item) for item in value["resulting_direction_refs"]), value["reviewer_provenance"], value["routed_owner_stage"])
         except (TypeError, ValueError) as exc:
             raise GuidanceError(f"invalid RevisionRequest: {exc}") from exc

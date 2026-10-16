@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/resolved-adaptation-target.schema.json",
+  "$ref": "adaptation-target.schema.json"
+}

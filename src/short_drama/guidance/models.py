@@ -120,6 +120,12 @@ _STAGE_TARGET_SCOPES = {
 }
 
 
+def owner_stage_for_category(category: DirectionCategory) -> DirectionStage:
+    """Return the frozen earliest owner for one structured guidance category."""
+
+    return _CATEGORY_OWNER[_enum(category, DirectionCategory, "category")]
+
+
 def _enum(value: Any, enum: type[Enum], name: str) -> Enum:
     try:
         return value if isinstance(value, enum) else enum(value)
@@ -358,6 +364,7 @@ class RevisionRequest:
     resulting_direction_refs: tuple[ArtifactRef, ...]
     reviewer_provenance: str
     routed_owner_stage: DirectionStage | None = None
+    requested_category: DirectionCategory | None = None
 
     def __post_init__(self) -> None:
         require_storage_id(self.revision_request_id, "revision_request_id", GuidanceError)
@@ -365,6 +372,8 @@ class RevisionRequest:
         object.__setattr__(self, "requested_stage", _enum(self.requested_stage, DirectionStage, "requested_stage"))
         if self.routed_owner_stage is not None:
             object.__setattr__(self, "routed_owner_stage", _enum(self.routed_owner_stage, DirectionStage, "routed_owner_stage"))
+        if self.requested_category is not None:
+            object.__setattr__(self, "requested_category", _enum(self.requested_category, DirectionCategory, "requested_category"))
         require_text(self.instruction_zh, "instruction_zh", GuidanceError)
         require_text(self.reviewer_provenance, "reviewer_provenance", GuidanceError)
         refs = tuple(self.target_refs)
@@ -395,14 +404,15 @@ class RevisionRequest:
             "resulting_direction_refs": [ref.to_dict() for ref in self.resulting_direction_refs],
             "reviewer_provenance": self.reviewer_provenance,
             "routed_owner_stage": None if self.routed_owner_stage is None else self.routed_owner_stage.value,
+            "requested_category": None if self.requested_category is None else self.requested_category.value,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RevisionRequest":
-        value = _exact(value, {"revision_request_id", "target_artifact_ref", "requested_stage", "instruction_zh", "target_refs", "resulting_direction_refs", "reviewer_provenance", "routed_owner_stage"}, cls.__name__)
+        value = _exact(value, {"revision_request_id", "target_artifact_ref", "requested_stage", "instruction_zh", "target_refs", "resulting_direction_refs", "reviewer_provenance", "routed_owner_stage", "requested_category"}, cls.__name__)
         if not isinstance(value["target_refs"], list) or not isinstance(value["resulting_direction_refs"], list):
             raise GuidanceError("RevisionRequest refs must be lists")
         try:
-            return cls(value["revision_request_id"], ArtifactRef.from_dict(value["target_artifact_ref"]), value["requested_stage"], value["instruction_zh"], tuple(TargetRef.from_dict(item) for item in value["target_refs"]), tuple(ArtifactRef.from_dict(item) for item in value["resulting_direction_refs"]), value["reviewer_provenance"], value["routed_owner_stage"])
+            return cls(value["revision_request_id"], ArtifactRef.from_dict(value["target_artifact_ref"]), value["requested_stage"], value["instruction_zh"], tuple(TargetRef.from_dict(item) for item in value["target_refs"]), tuple(ArtifactRef.from_dict(item) for item in value["resulting_direction_refs"]), value["reviewer_provenance"], value["routed_owner_stage"], value["requested_category"])
         except (TypeError, ValueError) as exc:
             raise GuidanceError(f"invalid RevisionRequest: {exc}") from exc

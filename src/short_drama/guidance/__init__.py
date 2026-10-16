@@ -4,7 +4,7 @@ from .models import (
     GUIDANCE_SCHEMA_VERSION, REVISION_REQUEST_ARTIFACT_TYPE, USER_DIRECTION_ARTIFACT_TYPE,
     USER_DIRECTION_SET_ARTIFACT_TYPE, DirectionCategory, DirectionConflictError, DirectionOrigin,
     DirectionStage, DirectionStatus, DirectionStrength, GuidanceError, RevisionRequest, TargetRef,
-    TargetScope, UserDirection, UserDirectionSet,
+    TargetScope, UserDirection, UserDirectionSet, owner_stage_for_category,
 )
 from .persistence import (
     load_revision_request, load_user_direction_set, persist_revision_request,
@@ -20,6 +20,7 @@ __all__ = [
     "USER_DIRECTION_SET_ARTIFACT_TYPE", "DirectionCategory", "DirectionConflictError",
     "DirectionOrigin", "DirectionStage", "DirectionStatus", "DirectionStrength", "GuidanceError",
     "RevisionRequest", "TargetRef", "TargetScope", "UserDirection", "UserDirectionSet",
+    "owner_stage_for_category",
     "EMPTY_EFFECTIVE_USER_DIRECTION_SET_HASH", "EffectiveUserDirectionSet", "TargetCatalog",
     "load_revision_request", "load_user_direction_set", "persist_revision_request",
     "persist_user_direction", "persist_user_direction_set", "project_effective_directions",

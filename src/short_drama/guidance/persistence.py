@@ -13,6 +13,7 @@ from .models import (
     RevisionRequest,
     UserDirection,
     UserDirectionSet,
+    owner_stage_for_category,
 )
 from .projection import TargetCatalog, load_user_direction, resolve_direction_set, validate_target_ref
 
@@ -26,6 +27,15 @@ _ARTIFACT_STAGE_OWNER = {
     "production_plan": "B3_PRODUCTION",
     "shot_plan": "B4_SHOT",
     "asset_plan": "B6_ASSET",
+}
+
+_STAGE_ORDER = {
+    DirectionStage.B1_ADAPTATION: 1,
+    DirectionStage.B2_SCREENPLAY: 2,
+    DirectionStage.B3_PRODUCTION: 3,
+    DirectionStage.B4_SHOT: 4,
+    DirectionStage.B5_RELEASE: 5,
+    DirectionStage.B6_ASSET: 6,
 }
 
 
@@ -97,14 +107,24 @@ def validate_revision_request(store: FileArtifactStore, request: RevisionRequest
     owner_stage = DirectionStage(owner_value)
     if request.routed_owner_stage is not None and request.routed_owner_stage is not owner_stage:
         raise GuidanceError("routed_owner_stage disagrees with known target artifact owner")
-    if request.requested_stage is not owner_stage:
-        raise GuidanceError("requested_stage does not own target_artifact_ref; route to the earliest authoritative owner")
+    is_cross_stage_route = request.requested_stage is not owner_stage
+    if request.requested_category is not None and owner_stage_for_category(request.requested_category) is not request.requested_stage:
+        raise GuidanceError("requested_category does not belong to requested_stage")
+    if is_cross_stage_route:
+        if _STAGE_ORDER[request.requested_stage] > _STAGE_ORDER[owner_stage]:
+            raise GuidanceError("RevisionRequest must route to the earliest authoritative owner stage")
+        if request.requested_category is None:
+            raise GuidanceError("cross-stage RevisionRequest requires explicit requested_category")
+        if not request.resulting_direction_refs:
+            raise GuidanceError("cross-stage RevisionRequest requires exact routed direction refs")
     for target in request.target_refs:
         validate_target_ref(store, catalog, target)
     for ref in request.resulting_direction_refs:
         direction = load_user_direction(store, ref)
         if direction.stage_scope is not request.requested_stage:
             raise GuidanceError("resulting_direction_refs must belong to RevisionRequest requested_stage")
+        if request.requested_category is not None and direction.category is not request.requested_category:
+            raise GuidanceError("resulting_direction_refs must match RevisionRequest requested_category")
 
 
 def persist_revision_request(

@@ -277,6 +277,18 @@ def test_revision_request_pins_exact_resolvable_artifact_ref(tmp_path) -> None:
     unknown_target = _artifact(store, "unregistered_semantic")
     with pytest.raises(GuidanceError, match="no registered authoritative stage owner"):
         persist_revision_request(store, RevisionRequest("rr-005", unknown_target, DirectionStage.B2_SCREENPLAY, "修订", (), (), "reviewer:user-01", DirectionStage.B2_SCREENPLAY), catalog)
+    b1_route_ref = persist_user_direction(store, _direction("b1-route", category=DirectionCategory.CHARACTER_NARRATIVE, key="cheshire"))
+    routed = RevisionRequest(
+        "rr-006", target, DirectionStage.B1_ADAPTATION, "让被省略角色回归", (),
+        (b1_route_ref,), "reviewer:user-01", requested_category=DirectionCategory.CHARACTER_NARRATIVE,
+    )
+    assert persist_revision_request(store, routed, catalog) == routed.artifact_ref
+    with pytest.raises(GuidanceError, match="explicit requested_category"):
+        persist_revision_request(store, RevisionRequest("rr-007", target, DirectionStage.B1_ADAPTATION, "让角色回归", (), (), "reviewer:user-01"), catalog)
+    b4_target = _artifact(store, "shot_plan")
+    camera_ref = persist_user_direction(store, _direction("camera-route", category=DirectionCategory.CAMERA, key="camera"))
+    with pytest.raises(GuidanceError, match="requested_category"):
+        persist_revision_request(store, RevisionRequest("rr-008", b4_target, DirectionStage.B1_ADAPTATION, "镜头改近", (), (camera_ref,), "reviewer:user-01", requested_category=DirectionCategory.CAMERA), catalog)
 
 
 def test_project_binding_and_unmaterialized_future_targets_are_rejected(tmp_path) -> None:

@@ -160,30 +160,62 @@ def load_b12_output_schema() -> OutputSchema:
     )
 
 
+def b12_request_identity_from_components(
+    *,
+    a6_manifest_ref: Any,
+    a5_manifest_ref: Any,
+    resolved_target_hash: str,
+    effective_b1_direction_hash: str,
+    semantic_view_hash: str,
+    prompt_identity: dict[str, Any],
+    output_schema_identity: dict[str, Any],
+    semantic_profile_identity: dict[str, Any],
+    semantic_request_hash: str,
+) -> str:
+    """Hash the persisted B1.2 identity pins using the frozen B1.2 shape.
+
+    ``semantic_request_hash`` intentionally occupies the historical
+    ``rendered_request_hash`` key: it is the exact key shape frozen by B1.2-B1
+    and must not be confused with the separately persisted rendered-prompt
+    hash used for provenance/audit.
+    """
+    return content_hash({
+        "stage": "B1.2",
+        "a6_manifest_ref": a6_manifest_ref.to_dict(),
+        "a5_manifest_ref": a5_manifest_ref.to_dict(),
+        "resolved_target_hash": resolved_target_hash,
+        "effective_b1_direction_hash": effective_b1_direction_hash,
+        "semantic_view_hash": semantic_view_hash,
+        "prompt": prompt_identity,
+        "output_schema": output_schema_identity,
+        "semantic_profile": semantic_profile_identity,
+        "rendered_request_hash": semantic_request_hash,
+    })
+
+
 def b12_request_identity(*, preparation: B12Preparation, profile: SemanticLLMProfile,
                          output_schema: OutputSchema, request: StructuredGenerationRequest) -> str:
     """Backend-neutral identity for exactly the semantic material B1.2 uses."""
     packet = preparation.packet
-    return content_hash({
-        "stage": "B1.2",
-        "a6_manifest_ref": packet.source_snapshot.story_analysis_manifest_ref.to_dict(),
-        "a5_manifest_ref": packet.source_snapshot.consolidation_manifest_ref.to_dict(),
-        "resolved_target_hash": packet.resolved_target.content_hash(),
-        "effective_b1_direction_hash": preparation.measurement.effective_b1_direction_hash,
-        "semantic_view_hash": preparation.semantic_view.content_hash(),
-        "prompt": {
+    return b12_request_identity_from_components(
+        a6_manifest_ref=packet.source_snapshot.story_analysis_manifest_ref,
+        a5_manifest_ref=packet.source_snapshot.consolidation_manifest_ref,
+        resolved_target_hash=packet.resolved_target.content_hash(),
+        effective_b1_direction_hash=preparation.measurement.effective_b1_direction_hash,
+        semantic_view_hash=preparation.semantic_view.content_hash(),
+        prompt_identity={
             "prompt_id": request.rendered_prompt.prompt_id,
             "prompt_version": request.rendered_prompt.prompt_version,
             "prompt_content_hash": request.rendered_prompt.prompt_content_hash,
         },
-        "output_schema": {
+        output_schema_identity={
             "schema_id": output_schema.schema_id,
             "schema_version": output_schema.schema_version,
             "schema_content_hash": output_schema.schema_hash,
         },
-        "semantic_profile": {"profile_id": profile.profile_id, "profile_hash": profile.semantic_profile_hash},
-        "rendered_request_hash": request.request_hash,
-    })
+        semantic_profile_identity={"profile_id": profile.profile_id, "profile_hash": profile.semantic_profile_hash},
+        semantic_request_hash=request.request_hash,
+    )
 
 
 def _mapped_provider_request_bytes(

@@ -34,6 +34,13 @@ from .strategy_semantic import (
     B12SemanticBudget, B12SemanticBudgetError, B12SemanticMeasurement, B12SemanticPreparation,
     b12_request_identity, build_b12_semantic_preparation, load_b12_output_schema, load_b12_semantic_profile,
 )
+from .strategy_execution import (
+    B12_MAX_SEMANTIC_GENERATION_ROUNDS, B12_STRATEGY_ARTIFACT_TYPE,
+    B12SemanticExecutionError, B12SemanticGenerationExhaustedError,
+    B12SemanticGenerationPolicy, B12SemanticProvenanceError, B12StrategyArtifact,
+    B12StrategyPublication, b12_strategy_artifact_id,
+    b12_strategy_pointer_id, execute_b12_strategy,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -48,4 +55,9 @@ __all__ = [
     "B12Packet", "B12PacketMeasurement", "B12Preparation", "B12SemanticView", "derive_snapshot_local_plotlines", "prepare_b12_packet",
     "B12SemanticBudget", "B12SemanticBudgetError", "B12SemanticMeasurement", "B12SemanticPreparation",
     "b12_request_identity", "build_b12_semantic_preparation", "load_b12_output_schema", "load_b12_semantic_profile",
+    "B12_MAX_SEMANTIC_GENERATION_ROUNDS", "B12_STRATEGY_ARTIFACT_TYPE",
+    "B12SemanticExecutionError", "B12SemanticGenerationExhaustedError",
+    "B12SemanticGenerationPolicy", "B12SemanticProvenanceError", "B12StrategyArtifact",
+    "B12StrategyPublication", "b12_strategy_artifact_id",
+    "b12_strategy_pointer_id", "execute_b12_strategy",
 ]

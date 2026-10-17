@@ -15,7 +15,7 @@ from short_drama.io import load_json
 from short_drama.llm import (
     GenerationExecutionOptions, OpenAICompatibleLLMClient, OutputSchema, PromptRegistry,
     RuntimeConfig, SemanticLLMProfile, StructuredGenerationRequest, build_structured_request,
-    load_runtime_config, load_semantic_profile,
+    load_semantic_profile,
 )
 from short_drama.paths import REPO_ROOT
 from short_drama.story.chunking import estimate_tokens
@@ -31,7 +31,6 @@ B12_STRATEGY_OUTPUT_SCHEMA_VERSION = 1
 B12_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
 B12_SEMANTIC_PROFILE_PATH = REPO_ROOT / "profiles" / "adaptation_strategy_llm_v1.yaml"
 B12_OUTPUT_SCHEMA_PATH = REPO_ROOT / "schemas" / "b12-adaptation-strategy-proposal.schema.json"
-B12_RUNTIME_CONFIG_PATH = REPO_ROOT / "profiles" / "llm_local.yaml"
 
 
 class B12SemanticBudgetError(AdaptationStrategyError):
@@ -226,11 +225,13 @@ def build_b12_semantic_preparation(
     prompts = PromptRegistry(B12_PROMPTS_DIR) if prompts is None else prompts
     semantic_profile = load_b12_semantic_profile() if semantic_profile is None else semantic_profile
     output_schema = load_b12_output_schema() if output_schema is None else output_schema
-    runtime_config = load_runtime_config(B12_RUNTIME_CONFIG_PATH) if runtime_config is None else runtime_config
     if semantic_profile.structured_output_mode != "json_schema":
         raise AdaptationStrategyError("B1.2 adaptation strategy requires structured_output_mode=json_schema")
     if not isinstance(runtime_config, RuntimeConfig):
-        raise AdaptationStrategyError("B1.2 semantic preparation requires an exact RuntimeConfig")
+        raise AdaptationStrategyError(
+            "B1.2 semantic preparation requires an explicit exact RuntimeConfig; "
+            "it never loads a local runtime YAML implicitly"
+        )
     if execution_options is not None and not isinstance(execution_options, GenerationExecutionOptions):
         raise AdaptationStrategyError("B1.2 execution_options must be GenerationExecutionOptions or None")
     prompt = prompts.load(B12_STRATEGY_PROMPT_ID, version=B12_STRATEGY_PROMPT_VERSION)

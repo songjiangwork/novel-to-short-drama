@@ -260,13 +260,27 @@ def _semantic_preparation(tmp_path, *, direction_set=None):
         resolve_adaptation_target(AdaptationTarget("semantic-preparation"), source_snapshot=source),
         direction_set,
     )
-    return tree, prepared, build_b12_semantic_preparation(prepared)
+    return tree, prepared, build_b12_semantic_preparation(prepared, runtime_config=_b12_test_runtime_config())
 
 
 def _proposal(strategy):
     proposal = strategy.to_dict()
     proposal.pop("resolved_target")
     return proposal
+
+
+def _b12_test_runtime_config():
+    """Committed-test equivalent: deterministic, local, credential-free, unused network route."""
+    from short_drama.llm import RuntimeConfig
+    return RuntimeConfig(
+        schema_version=2,
+        transport_id="b12-test-runtime",
+        base_url="http://127.0.0.1:8080/v1",
+        request_model="b12-test-qwen",
+        provider_family="qwen",
+        credential_environment_name=None,
+        timeout_seconds=1,
+    )
 
 
 def test_semantic_view_component_accounting_complete_coverage_and_immutable_bytes(tmp_path):
@@ -301,14 +315,14 @@ def test_b12_prompt_schema_and_request_identity_are_deterministic_and_versioned(
     from short_drama.adaptation import build_b12_semantic_preparation
     from short_drama.llm import OutputSchema, PromptRegistry, compute_prompt_content_hash
     from short_drama.adaptation.strategy_semantic import B12_PROMPTS_DIR
-    second = build_b12_semantic_preparation(packet_prep)
+    second = build_b12_semantic_preparation(packet_prep, runtime_config=first.runtime_config)
     assert first.request.rendered_prompt.rendered_prompt_hash == second.request.rendered_prompt.rendered_prompt_hash
     assert first.request_identity == second.request_identity
 
     changed_schema = dict(first.output_schema.schema)
     changed_schema["title"] = "changed proposal contract"
     schema_variant = OutputSchema.create(schema_id=first.output_schema.schema_id, schema_version=2, schema=changed_schema)
-    assert build_b12_semantic_preparation(packet_prep, output_schema=schema_variant).request_identity != first.request_identity
+    assert build_b12_semantic_preparation(packet_prep, output_schema=schema_variant, runtime_config=first.runtime_config).request_identity != first.request_identity
 
     prompt_root = tmp_path / "prompts"
     shutil.copytree(B12_PROMPTS_DIR, prompt_root)
@@ -321,7 +335,7 @@ def test_b12_prompt_schema_and_request_identity_are_deterministic_and_versioned(
         user_template=(version_dir / "user.txt").read_text(encoding="utf-8"), required_variables=["semantic_view_json"],
     )
     (version_dir / "prompt.yaml").write_text(__import__("yaml").safe_dump(metadata, sort_keys=False), encoding="utf-8")
-    assert build_b12_semantic_preparation(packet_prep, prompts=PromptRegistry(prompt_root)).request_identity != first.request_identity
+    assert build_b12_semantic_preparation(packet_prep, prompts=PromptRegistry(prompt_root), runtime_config=first.runtime_config).request_identity != first.request_identity
 
 
 def test_b12_identity_ignores_runtime_only_budget_and_b4_guidance(tmp_path):
@@ -346,13 +360,14 @@ def test_b12_identity_ignores_runtime_only_budget_and_b4_guidance(tmp_path):
         DirectionStrength.PREFER, DirectionStage.B1_ADAPTATION, TargetScope.PROJECT, (), "强化主角能动性。")
     narrative_ref = persist_user_direction(tree.store, narrative)
     b1 = prepare_b12_packet(tree.store, tree.pointers, target, UserDirectionSet(project_id, "directions", 3, (camera_ref, narrative_ref)))
-    identity_empty = build_b12_semantic_preparation(empty).request_identity
-    assert identity_empty == build_b12_semantic_preparation(b4).request_identity
-    assert identity_empty != build_b12_semantic_preparation(b1).request_identity
+    runtime = _b12_test_runtime_config()
+    identity_empty = build_b12_semantic_preparation(empty, runtime_config=runtime).request_identity
+    assert identity_empty == build_b12_semantic_preparation(b4, runtime_config=runtime).request_identity
+    assert identity_empty != build_b12_semantic_preparation(b1, runtime_config=runtime).request_identity
     # Budget/runtime values are execution guards, deliberately not semantic input.
     B12SemanticBudget("qwen-a", 200_000, 180_000)
     B12SemanticBudget("qwen-b", 300_000, 280_000)
-    assert build_b12_semantic_preparation(empty).request_identity == identity_empty
+    assert build_b12_semantic_preparation(empty, runtime_config=runtime).request_identity == identity_empty
 
 
 def test_b12_budget_fails_closed_before_provider_and_reserves_output_headroom(tmp_path):
@@ -415,8 +430,11 @@ def test_b12_requires_json_schema_mode_and_runtime_mapping_does_not_change_ident
     assert remapped.provider_request_bytes != semantic.provider_request_bytes
     with pytest.raises(AdaptationStrategyError, match="structured_output_mode=json_schema"):
         build_b12_semantic_preparation(
-            packet_prep, semantic_profile=replace(semantic.semantic_profile, structured_output_mode="json_object"),
+            packet_prep, runtime_config=semantic.runtime_config,
+            semantic_profile=replace(semantic.semantic_profile, structured_output_mode="json_object"),
         )
+    with pytest.raises(AdaptationStrategyError, match="requires an explicit exact RuntimeConfig"):
+        build_b12_semantic_preparation(packet_prep)
 
 
 def test_provider_proposal_schema_is_strict_and_acceptance_attaches_exact_preparation(tmp_path):

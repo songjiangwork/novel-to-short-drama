@@ -20,6 +20,7 @@ from .target import AdaptationSourceSnapshot, ResolvedAdaptationTarget
 
 
 B12_PACKET_SCHEMA_VERSION = 1
+B12_SEMANTIC_VIEW_SCHEMA_VERSION = 1
 
 
 def _load(store: FileArtifactStore, ref: ArtifactRef, model: Any) -> Any:
@@ -148,6 +149,77 @@ class B12Packet:
 
 
 @dataclass(frozen=True, slots=True)
+class B12SemanticView:
+    """The provider-facing, immutable projection of a :class:`B12Packet`.
+
+    The A6/A5 snapshot is Python-owned authority and occurs twice in the full
+    packet (once directly and once in ``resolved_target``).  A provider cannot
+    choose or alter that authority, so this view deliberately omits both
+    copies.  It retains the target's non-lineage instructions and all story
+    evidence/indexes.  This is a lossless-for-semantic-planning compaction, not
+    a replacement for the authoritative packet.
+    """
+
+    packet_hash: str
+    _canonical_payload: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.packet_hash, str) or len(self.packet_hash) != 64:
+            raise AdaptationStrategyError("semantic view requires a packet hash")
+        if not isinstance(self._canonical_payload, bytes):
+            raise AdaptationStrategyError("semantic view canonical payload must be bytes")
+        payload = strict_json_loads(self._canonical_payload)
+        if not isinstance(payload, dict) or canonical_json_bytes(payload) != self._canonical_payload:
+            raise AdaptationStrategyError("semantic view canonical payload is invalid")
+        if payload.get("schema_version") != B12_SEMANTIC_VIEW_SCHEMA_VERSION:
+            raise AdaptationStrategyError("unsupported semantic view schema_version")
+        if payload.get("packet_hash") != self.packet_hash:
+            raise AdaptationStrategyError("semantic view packet hash does not match")
+        target = payload.get("adaptation_target")
+        if not isinstance(target, dict) or "source_snapshot" in target:
+            raise AdaptationStrategyError("semantic view must not expose Python-owned source snapshot")
+        event_index = payload.get("canonical_event_index")
+        if not isinstance(event_index, list) or not event_index:
+            raise AdaptationStrategyError("semantic view must preserve complete event index")
+        event_ids = [item.get("event_id") for item in event_index if isinstance(item, dict)]
+        if len(event_ids) != len(event_index) or len(set(event_ids)) != len(event_ids):
+            raise AdaptationStrategyError("semantic view event IDs must be unique")
+        windows = payload.get("global_event_analysis", {}).get("windows") if isinstance(payload.get("global_event_analysis"), dict) else None
+        if not isinstance(windows, list) or not windows:
+            raise AdaptationStrategyError("semantic view must preserve all plot windows")
+
+    @classmethod
+    def from_packet(cls, packet: B12Packet) -> "B12SemanticView":
+        target = packet.resolved_target.to_dict().copy()
+        target.pop("source_snapshot")
+        payload = {
+            "schema_version": B12_SEMANTIC_VIEW_SCHEMA_VERSION,
+            "packet_hash": packet.content_hash(),
+            "adaptation_target": target,
+            "effective_directions": packet.effective_directions,
+            "plotlines": [item.to_dict() for item in packet.plotlines],
+            "story_bible": packet.story_bible,
+            "global_structure": packet.global_structure,
+            "character_analyses": list(packet.character_analyses),
+            "global_event_analysis": packet.global_event_analysis,
+            "arc_analysis": packet.arc_analysis,
+            "canonical_event_index": list(packet.canonical_event_index),
+            "canonical_relationship_index": list(packet.canonical_relationship_index),
+            "unresolved_entity_index": list(packet.unresolved_entity_index),
+            "source_conflict_index": list(packet.source_conflict_index),
+        }
+        return cls(packet.content_hash(), canonical_json_bytes(payload))
+
+    def to_dict(self) -> dict[str, Any]:
+        value = strict_json_loads(self._canonical_payload)
+        assert isinstance(value, dict)
+        return value
+
+    def canonical_bytes(self) -> bytes: return self._canonical_payload
+    def content_hash(self) -> str: return content_hash(strict_json_loads(self._canonical_payload))
+
+
+@dataclass(frozen=True, slots=True)
 class B12PacketMeasurement:
     packet_bytes: int
     packet_estimated_tokens: int
@@ -168,6 +240,7 @@ class B12PacketMeasurement:
 @dataclass(frozen=True, slots=True)
 class B12Preparation:
     packet: B12Packet
+    semantic_view: B12SemanticView
     measurement: B12PacketMeasurement
     semantic_input_identity: str
 
@@ -184,6 +257,14 @@ class B12Preparation:
         if strategy.resolved_target != self.packet.resolved_target:
             raise AdaptationStrategyError("strategy target differs from prepared exact target")
         strategy.validate_source_membership(self.packet.plotlines)
+        effective = self.packet.effective_directions.get("effective_set", {})
+        expected_refs = effective.get("direction_refs", []) if isinstance(effective, dict) else []
+        allowed_direction_refs = {content_hash(item) for item in expected_refs if isinstance(item, dict)}
+        for conflict in strategy.explicit_conflicts:
+            if any(content_hash(ref.to_dict()) not in allowed_direction_refs for ref in conflict.user_direction_refs):
+                raise AdaptationStrategyError("strategy conflict references a direction outside the exact effective B1 set")
+        if strategy.ending_disposition.value == "adapted_ending" and not strategy.deliberate_divergences:
+            raise AdaptationStrategyError("adapted_ending requires explicit deliberate divergence provenance")
 
 
 def _direction_payload(store: FileArtifactStore, effective: Any) -> dict[str, Any]:
@@ -269,4 +350,4 @@ def prepare_b12_packet(
     raw = packet.canonical_bytes()
     measurement = B12PacketMeasurement(len(raw), estimate_tokens(raw.decode("utf-8")), sizes, len(chars.analyses), len(event_index), len(events.windows), content_hash(bound.to_dict()), packet.content_hash(), effective.effective_user_direction_set_hash)
     identity = content_hash({"stage": "B1.2", "a6_manifest_ref": bound.story_analysis_manifest_ref.to_dict(), "a5_manifest_ref": bound.consolidation_manifest_ref.to_dict(), "resolved_target_hash": resolved_target.content_hash(), "effective_b1_direction_hash": effective.effective_user_direction_set_hash, "packet_hash": packet.content_hash()})
-    return B12Preparation(packet, measurement, identity)
+    return B12Preparation(packet, B12SemanticView.from_packet(packet), measurement, identity)

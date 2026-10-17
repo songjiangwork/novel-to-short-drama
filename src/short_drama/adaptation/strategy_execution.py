@@ -21,7 +21,11 @@ from short_drama.llm import GenerationExecutionOptions, LLMClient, LLMInvocation
 from short_drama.story.chunking import estimate_tokens
 
 from .strategy import AdaptationStrategy, AdaptationStrategyError
-from .strategy_semantic import B12SemanticBudget, B12SemanticBudgetError, B12SemanticPreparation, _mapped_provider_request_bytes
+from .strategy_packet import derive_snapshot_local_plotlines
+from .strategy_semantic import (
+    B12SemanticBudget, B12SemanticBudgetError, B12SemanticPreparation,
+    _mapped_provider_request_bytes, b12_request_identity_from_components,
+)
 from .target import AdaptationSourceSnapshot
 
 
@@ -336,6 +340,34 @@ def _strategy_lineage_from_artifact(artifact: B12StrategyArtifact) -> tuple[Line
     ), key=LineageRef.sort_key))
 
 
+def _validate_historical_plotlines(store: FileArtifactStore, artifact: B12StrategyArtifact) -> None:
+    """Check handles against the pinned A6 structure without resolving CURRENT."""
+    from short_drama.story.story_analysis import GlobalStructure, StoryAnalysisManifest
+
+    snapshot = artifact.source_snapshot
+    try:
+        manifest_payload = store.get_ref(snapshot.story_analysis_manifest_ref).payload
+        manifest = StoryAnalysisManifest.from_dict(manifest_payload)
+        if (manifest.to_dict() != manifest_payload
+                or manifest.consolidation_manifest_ref != snapshot.consolidation_manifest_ref
+                or manifest.arc_analysis_ref != snapshot.arc_analysis_ref):
+            raise B12SemanticExecutionError("historical A6 manifest disagrees with strategy source snapshot")
+        structure_payload = store.get_ref(manifest.global_structure_ref).payload
+        structure = GlobalStructure.from_dict(structure_payload)
+        if structure.to_dict() != structure_payload:
+            raise B12SemanticExecutionError("historical A6 structure is not canonical")
+        plotlines = derive_snapshot_local_plotlines(
+            snapshot.story_analysis_manifest_ref, structure
+        )
+        artifact.strategy.validate_source_membership(plotlines)
+    except B12SemanticExecutionError:
+        raise
+    except Exception as exc:
+        raise B12SemanticExecutionError(
+            "cannot verify B1.2 strategy plotlines against pinned historical A6 structure"
+        ) from exc
+
+
 class _B12StrategyPersistenceService:
     """Internal CURRENT-only B1.2 persistence adapter; never emits approval."""
 
@@ -380,6 +412,26 @@ class _B12StrategyPersistenceService:
 
     def _validate_intrinsic_artifact(self, artifact: B12StrategyArtifact) -> None:
         """Validate old authority without treating changed input as corruption."""
+        try:
+            expected_request_identity = b12_request_identity_from_components(
+                a6_manifest_ref=artifact.source_snapshot.story_analysis_manifest_ref,
+                a5_manifest_ref=artifact.source_snapshot.consolidation_manifest_ref,
+                resolved_target_hash=artifact.strategy.resolved_target.content_hash(),
+                effective_b1_direction_hash=artifact.effective_b1_direction_hash,
+                semantic_view_hash=artifact.semantic_view_hash,
+                prompt_identity=artifact.prompt_identity,
+                output_schema_identity=artifact.output_schema_identity,
+                semantic_profile_identity=artifact.semantic_profile_identity,
+                semantic_request_hash=artifact.semantic_request_hash,
+            )
+        except Exception as exc:
+            raise B12SemanticExecutionError(
+                "B1.2 CURRENT strategy has invalid persisted request identity material"
+            ) from exc
+        if artifact.request_identity != expected_request_identity:
+            raise B12SemanticExecutionError(
+                "B1.2 CURRENT strategy request_identity does not commit to its pinned inputs"
+            )
         if artifact.lineage != _strategy_lineage_from_artifact(artifact):
             raise B12SemanticExecutionError("B1.2 CURRENT strategy has internally inconsistent lineage")
         try:
@@ -389,6 +441,7 @@ class _B12StrategyPersistenceService:
         except Exception as exc:
             raise B12SemanticExecutionError("B1.2 CURRENT strategy has missing or corrupt pinned authority") from exc
         artifact.strategy.validate_source_membership()
+        _validate_historical_plotlines(self._store, artifact)
         direction_ref_set = set(artifact.effective_direction_refs)
         if any(
             ref not in direction_ref_set

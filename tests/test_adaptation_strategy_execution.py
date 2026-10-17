@@ -164,6 +164,53 @@ def test_changed_b1_direction_is_a_healthy_cache_miss_and_publishes_new_revision
     assert len(fake.calls) == 1
 
 
+def test_tampered_old_request_identity_blocks_changed_b1_cache_miss_before_provider(tmp_path):
+    tree, _packet, semantic = _semantic_preparation(tmp_path)
+    publication = execute_b12_strategy(
+        store=tree.store, pointers=tree.pointers, semantic=semantic,
+        runtime_config=semantic.runtime_config, budget=_budget(semantic),
+        llm_client=_FakeClient([(_valid_proposal(semantic), False)], semantic.runtime_config),
+    )
+    payload = publication.artifact.to_dict()
+    payload["request_identity"] = "f" * 64
+    _move_current_to_payload(tree, semantic, publication, payload)
+    project_id = _project_id(tree, semantic)
+    direction_ref = persist_user_direction(tree.store, UserDirection(
+        "b12-changed-focus", project_id, 1, DirectionOrigin.USER,
+        DirectionCategory.ADAPTATION_STORY, DirectionStrength.PREFER,
+        DirectionStage.B1_ADAPTATION, TargetScope.PROJECT, (), "强化悬念。",
+    ))
+    changed = _semantic_with_directions(
+        tree, semantic, UserDirectionSet(project_id, "b12-directions", 1, (direction_ref,))
+    )
+    fake = _FakeClient([(_valid_proposal(changed), False)], changed.runtime_config)
+    with pytest.raises(B12SemanticExecutionError, match="request_identity"):
+        execute_b12_strategy(
+            store=tree.store, pointers=tree.pointers, semantic=changed,
+            runtime_config=changed.runtime_config, budget=_budget(changed), llm_client=fake,
+        )
+    assert fake.calls == []
+
+
+def test_historical_plotline_handles_are_checked_without_requiring_a6_current_reload(tmp_path):
+    tree, _packet, semantic = _semantic_preparation(tmp_path)
+    publication = execute_b12_strategy(
+        store=tree.store, pointers=tree.pointers, semantic=semantic,
+        runtime_config=semantic.runtime_config, budget=_budget(semantic),
+        llm_client=_FakeClient([(_valid_proposal(semantic), False)], semantic.runtime_config),
+    )
+    payload = publication.artifact.to_dict()
+    payload["strategy"]["plotline_strategies"][0]["plotline_handle"] = "a6pl_999_forged000000000"
+    _move_current_to_payload(tree, semantic, publication, payload)
+    fake = _FakeClient([], semantic.runtime_config)
+    with pytest.raises(B12SemanticExecutionError, match="pinned historical A6 structure"):
+        execute_b12_strategy(
+            store=tree.store, pointers=tree.pointers, semantic=semantic,
+            runtime_config=semantic.runtime_config, budget=_budget(semantic), llm_client=fake,
+        )
+    assert fake.calls == []
+
+
 def test_b4_only_direction_leaves_exact_reuse_eligible(tmp_path):
     tree, _packet, semantic = _semantic_preparation(tmp_path)
     execute_b12_strategy(

@@ -9,7 +9,7 @@ from short_drama.adaptation import (
     CanonicalTargetReference, CharacterStrategy, DeliberateDivergence,
     PlotlineStrategy, PriorityEntry, RelationshipStrategy, RevealStrategy,
     ResolvedAdaptationTarget, SnapshotLocalPlotline,
-    prepare_b12_packet,
+    B12Packet, prepare_b12_packet,
 )
 from short_drama.artifacts import ArtifactRef
 from short_drama.io import load_json
@@ -144,6 +144,12 @@ def test_zero_provider_packet_is_complete_deterministic_and_read_only(tmp_path):
     assert {item["event_id"] for item in first.packet.canonical_event_index} == {
         ref.canonical_id for ref in source.canonical_references if ref.kind == "event"
     }
+    assert {item["relationship_id"] for item in first.packet.canonical_relationship_index} == {
+        ref.canonical_id for ref in source.canonical_references if ref.kind == "relationship"
+    }
+    assert [(item["narrative_order"], item["event_id"]) for item in first.packet.canonical_event_index] == sorted(
+        (item["narrative_order"], item["event_id"]) for item in first.packet.canonical_event_index
+    )
     assert first.measurement.packet_hash == second.measurement.packet_hash
     assert first.semantic_input_identity == second.semantic_input_identity
     assert first.measurement.effective_b1_direction_hash == second.measurement.effective_b1_direction_hash
@@ -173,3 +179,70 @@ def test_b4_direction_does_not_change_b12_identity_but_b1_direction_does(tmp_pat
     assert before.semantic_input_identity == b4_only.semantic_input_identity
     assert b1.measurement.effective_b1_direction_hash != before.measurement.effective_b1_direction_hash
     assert b1.semantic_input_identity != before.semantic_input_identity
+
+
+def _context_strategy(target, plotlines, *, merge_into=None):
+    event = next(ref for ref in target.source_snapshot.canonical_references if ref.kind == "event")
+    strategies = tuple(
+        PlotlineStrategy(item.handle, "merge_into" if merge_into and item.handle == merge_into[0] else "preserve", "策略。", merge_into[1] if merge_into and item.handle == merge_into[0] else None)
+        for item in plotlines
+    )
+    return AdaptationStrategy(target, "论文。", "承诺。", "问题？", strategies, (), (), (), "高潮。", (event,), "source_ending_retained", "保留结尾。", ())
+
+
+def test_preparation_is_mandatory_authoritative_plotline_acceptance_seam(tmp_path):
+    from short_drama.adaptation import AdaptationTarget, AdaptationSourceSnapshot, resolve_adaptation_target
+    tree, publication = _published_a6(tmp_path)
+    source = AdaptationSourceSnapshot.from_store(tree.store, tree.pointers, publication.story_analysis_manifest_ref)
+    target = resolve_adaptation_target(AdaptationTarget("strategy-context"), source_snapshot=source)
+    preparation = prepare_b12_packet(tree.store, tree.pointers, target)
+    valid = _context_strategy(target, preparation.packet.plotlines)
+    preparation.validate_strategy(AdaptationStrategy.from_dict(valid.to_dict()))
+    with pytest.raises(AdaptationStrategyError, match="cover exactly"):
+        preparation.validate_strategy(_context_strategy(target, ()))
+    forged = SnapshotLocalPlotline("a6pl_999_forged000000000", source.story_analysis_manifest_ref.content_hash, 999, "subplot")
+    with pytest.raises(AdaptationStrategyError, match="cover exactly"):
+        preparation.validate_strategy(_context_strategy(target, (forged,)))
+    handle = preparation.packet.plotlines[0].handle
+    with pytest.raises(AdaptationStrategyError, match="merge_into"):
+        preparation.validate_strategy(_context_strategy(target, preparation.packet.plotlines, merge_into=(handle, "a6pl_missing")))
+    with pytest.raises(AdaptationStrategyError, match="exact target A6 snapshot"):
+        valid.validate_source_membership((SnapshotLocalPlotline(handle, "b" * 64, 0, "main"),))
+    with pytest.raises(AdaptationStrategyError, match="exact A6 snapshot"):
+        B12Packet.build(source, target, {}, (SnapshotLocalPlotline(handle, "b" * 64, 0, "main"),), {}, {}, (), {}, {},
+            ({"event_id": ref.canonical_id, "narrative_order": 1} for ref in source.canonical_references if ref.kind == "event"), (), (), ())
+
+
+def test_packet_bytes_hash_and_identity_survive_public_component_mutation(tmp_path):
+    from short_drama.adaptation import AdaptationTarget, AdaptationSourceSnapshot, resolve_adaptation_target
+    tree, publication = _published_a6(tmp_path)
+    source = AdaptationSourceSnapshot.from_store(tree.store, tree.pointers, publication.story_analysis_manifest_ref)
+    preparation = prepare_b12_packet(tree.store, tree.pointers, resolve_adaptation_target(AdaptationTarget("immutable-packet"), source_snapshot=source))
+    before = preparation.packet.canonical_bytes()
+    inspected = preparation.packet.story_bible
+    inspected["genre"] = "被篡改"
+    rendered_copy = preparation.packet.to_dict()
+    rendered_copy["global_structure"]["schema_version"] = 999
+    assert preparation.packet.canonical_bytes() == before
+    assert preparation.packet.content_hash() == preparation.measurement.packet_hash
+    assert preparation.packet.story_bible["genre"] != "被篡改"
+
+
+def test_packet_requires_complete_sorted_compact_event_and_relationship_indexes():
+    base = _target().source_snapshot
+    snapshot = AdaptationSourceSnapshot(
+        base.story_analysis_manifest_ref, base.consolidation_manifest_ref, base.entity_map_ref,
+        base.canonical_character_registry_ref, base.canonical_location_registry_ref,
+        base.canonical_fact_set_ref, base.canonical_event_set_ref, base.canonical_relationship_set_ref,
+        base.arc_analysis_ref, (CanonicalTargetReference("event", "evt_000001"), CanonicalTargetReference("event", "evt_000002"), CanonicalTargetReference("relationship", "rel_000001")),
+    )
+    target = ResolvedAdaptationTarget("ordered-packet", snapshot)
+    with pytest.raises(AdaptationStrategyError, match="narrative order"):
+        B12Packet.build(snapshot, target, {}, (), {}, {}, (), {}, {},
+            ({"event_id": "evt_000002", "narrative_order": 2}, {"event_id": "evt_000001", "narrative_order": 1}),
+            ({"relationship_id": "rel_000001"},), (), ())
+    packet = B12Packet.build(snapshot, target, {}, (), {}, {}, (), {}, {},
+        ({"event_id": "evt_000001", "narrative_order": 1}, {"event_id": "evt_000002", "narrative_order": 2}),
+        ({"relationship_id": "rel_000001", "relationship_type_zh": "关系"},), (), ())
+    assert [entry["event_id"] for entry in packet.canonical_event_index] == ["evt_000001", "evt_000002"]
+    assert packet.canonical_relationship_index[0]["relationship_id"] == "rel_000001"

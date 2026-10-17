@@ -4,12 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from short_drama.artifacts import ArtifactRef, FileArtifactStore, canonical_json_bytes, content_hash
+from short_drama.artifacts import ArtifactRef, FileArtifactStore, canonical_json_bytes, content_hash, strict_json_loads
 from short_drama.foundation import FilePointerStore
 from short_drama.guidance.models import DirectionStage, UserDirectionSet
 from short_drama.guidance.projection import TargetCatalog, TargetRef, TargetScope, project_effective_directions, load_user_direction
 from short_drama.story.chunking import estimate_tokens
-from short_drama.story.consolidation import CanonicalEventSet
+from short_drama.story.consolidation import (
+    CanonicalEventSet, CanonicalRelationshipSet, ConsolidationManifest, StoryConflictSet,
+)
+from short_drama.story.reconciliation import EntityMap, UnresolvedEntitySet
 from short_drama.story.story_analysis_persistence import StoryAnalysisPersistenceService, a6_base_artifact_id
 
 from .strategy import AdaptationStrategyError, SnapshotLocalPlotline
@@ -46,30 +49,102 @@ def derive_snapshot_local_plotlines(a6_manifest_ref: ArtifactRef, structure: Any
 
 @dataclass(frozen=True, slots=True)
 class B12Packet:
-    """Whole-story compact semantic input, with no prompt/provider configuration."""
+    """Whole-story compact semantic input with canonical bytes as its authority.
+
+    The public component accessors decode a fresh defensive copy.  Thus callers
+    may inspect a normal JSON shape, but can never mutate bytes previously
+    measured or included in semantic identity.
+    """
     source_snapshot: AdaptationSourceSnapshot
     resolved_target: ResolvedAdaptationTarget
-    effective_directions: dict[str, Any]
     plotlines: tuple[SnapshotLocalPlotline, ...]
-    story_bible: dict[str, Any]
-    global_structure: dict[str, Any]
-    character_analyses: tuple[dict[str, Any], ...]
-    global_event_analysis: dict[str, Any]
-    arc_analysis: dict[str, Any]
-    canonical_event_index: tuple[dict[str, Any], ...]
+    _canonical_payload: bytes
 
     def __post_init__(self) -> None:
         if self.resolved_target.source_snapshot != self.source_snapshot:
             raise AdaptationStrategyError("packet target must bind exactly the packet source snapshot")
-        event_ids = [entry.get("event_id") for entry in self.canonical_event_index]
+        if not isinstance(self._canonical_payload, bytes):
+            raise AdaptationStrategyError("packet canonical payload must be bytes")
+        payload = strict_json_loads(self._canonical_payload)
+        if not isinstance(payload, dict) or canonical_json_bytes(payload) != self._canonical_payload:
+            raise AdaptationStrategyError("packet canonical payload is invalid")
+        if payload.get("source_snapshot") != self.source_snapshot.to_dict() or payload.get("resolved_target") != self.resolved_target.to_dict():
+            raise AdaptationStrategyError("packet canonical payload does not match exact source/target")
+        if payload.get("plotlines") != [item.to_dict() for item in self.plotlines]:
+            raise AdaptationStrategyError("packet canonical payload does not match derived plotlines")
+        if len({item.handle for item in self.plotlines}) != len(self.plotlines) or any(item.a6_manifest_hash != self.source_snapshot.story_analysis_manifest_ref.content_hash for item in self.plotlines):
+            raise AdaptationStrategyError("packet plotlines must be unique and bound to the exact A6 snapshot")
+        event_index = payload.get("canonical_event_index")
+        if not isinstance(event_index, list):
+            raise AdaptationStrategyError("packet canonical event index must be an array")
+        event_ids = [entry.get("event_id") for entry in event_index if isinstance(entry, dict)]
         if not event_ids or any(not isinstance(x, str) for x in event_ids) or len(set(event_ids)) != len(event_ids):
             raise AdaptationStrategyError("packet canonical event index must contain unique complete IDs")
+        if any(not isinstance(entry, dict) or not isinstance(entry.get("narrative_order"), int) for entry in event_index):
+            raise AdaptationStrategyError("packet canonical event index entries must include narrative_order")
+        if event_ids != [entry["event_id"] for entry in sorted(event_index, key=lambda entry: (entry["narrative_order"], entry["event_id"]))]:
+            raise AdaptationStrategyError("packet canonical event index must use deterministic narrative order")
+        expected_events = {ref.canonical_id for ref in self.source_snapshot.canonical_references if ref.kind == "event"}
+        if set(event_ids) != expected_events:
+            raise AdaptationStrategyError("packet canonical event index must exactly cover target source events")
+        relationship_index = payload.get("canonical_relationship_index")
+        if not isinstance(relationship_index, list) or any(not isinstance(entry, dict) for entry in relationship_index):
+            raise AdaptationStrategyError("packet canonical relationship index must be an array")
+        relationship_ids = [entry.get("relationship_id") for entry in relationship_index]
+        if relationship_ids != sorted(relationship_ids) or len(set(relationship_ids)) != len(relationship_ids):
+            raise AdaptationStrategyError("packet canonical relationship index must be uniquely sorted")
+        expected_relationships = {ref.canonical_id for ref in self.source_snapshot.canonical_references if ref.kind == "relationship"}
+        if set(relationship_ids) != expected_relationships:
+            raise AdaptationStrategyError("packet canonical relationship index must exactly cover target source relationships")
+        for field, key in (("unresolved_entity_index", "unresolved_id"), ("source_conflict_index", "conflict_id")):
+            index = payload.get(field)
+            if not isinstance(index, list) or any(not isinstance(entry, dict) for entry in index) or [entry.get(key) for entry in index] != sorted(entry.get(key) for entry in index):
+                raise AdaptationStrategyError(f"packet {field} must be deterministically ordered")
+
+    @classmethod
+    def build(
+        cls, source_snapshot: AdaptationSourceSnapshot, resolved_target: ResolvedAdaptationTarget,
+        effective_directions: dict[str, Any], plotlines: tuple[SnapshotLocalPlotline, ...],
+        story_bible: dict[str, Any], global_structure: dict[str, Any],
+        character_analyses: tuple[dict[str, Any], ...], global_event_analysis: dict[str, Any],
+        arc_analysis: dict[str, Any], canonical_event_index: tuple[dict[str, Any], ...],
+        canonical_relationship_index: tuple[dict[str, Any], ...],
+        unresolved_entity_index: tuple[dict[str, Any], ...], source_conflict_index: tuple[dict[str, Any], ...],
+    ) -> "B12Packet":
+        payload = {"schema_version": B12_PACKET_SCHEMA_VERSION, "source_snapshot": source_snapshot.to_dict(), "resolved_target": resolved_target.to_dict(), "effective_directions": effective_directions, "plotlines": [x.to_dict() for x in plotlines], "story_bible": story_bible, "global_structure": global_structure, "character_analyses": list(character_analyses), "global_event_analysis": global_event_analysis, "arc_analysis": arc_analysis, "canonical_event_index": list(canonical_event_index), "canonical_relationship_index": list(canonical_relationship_index), "unresolved_entity_index": list(unresolved_entity_index), "source_conflict_index": list(source_conflict_index)}
+        return cls(source_snapshot, resolved_target, tuple(plotlines), canonical_json_bytes(payload))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema_version": B12_PACKET_SCHEMA_VERSION, "source_snapshot": self.source_snapshot.to_dict(), "resolved_target": self.resolved_target.to_dict(), "effective_directions": self.effective_directions, "plotlines": [x.to_dict() for x in self.plotlines], "story_bible": self.story_bible, "global_structure": self.global_structure, "character_analyses": list(self.character_analyses), "global_event_analysis": self.global_event_analysis, "arc_analysis": self.arc_analysis, "canonical_event_index": list(self.canonical_event_index)}
+        payload = strict_json_loads(self._canonical_payload)
+        assert isinstance(payload, dict)
+        return payload
 
-    def canonical_bytes(self) -> bytes: return canonical_json_bytes(self.to_dict())
-    def content_hash(self) -> str: return content_hash(self.to_dict())
+    def _component(self, name: str) -> Any:
+        return self.to_dict()[name]
+
+    @property
+    def effective_directions(self) -> dict[str, Any]: return self._component("effective_directions")
+    @property
+    def story_bible(self) -> dict[str, Any]: return self._component("story_bible")
+    @property
+    def global_structure(self) -> dict[str, Any]: return self._component("global_structure")
+    @property
+    def character_analyses(self) -> tuple[dict[str, Any], ...]: return tuple(self._component("character_analyses"))
+    @property
+    def global_event_analysis(self) -> dict[str, Any]: return self._component("global_event_analysis")
+    @property
+    def arc_analysis(self) -> dict[str, Any]: return self._component("arc_analysis")
+    @property
+    def canonical_event_index(self) -> tuple[dict[str, Any], ...]: return tuple(self._component("canonical_event_index"))
+    @property
+    def canonical_relationship_index(self) -> tuple[dict[str, Any], ...]: return tuple(self._component("canonical_relationship_index"))
+    @property
+    def unresolved_entity_index(self) -> tuple[dict[str, Any], ...]: return tuple(self._component("unresolved_entity_index"))
+    @property
+    def source_conflict_index(self) -> tuple[dict[str, Any], ...]: return tuple(self._component("source_conflict_index"))
+
+    def canonical_bytes(self) -> bytes: return self._canonical_payload
+    def content_hash(self) -> str: return content_hash(strict_json_loads(self._canonical_payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +171,20 @@ class B12Preparation:
     measurement: B12PacketMeasurement
     semantic_input_identity: str
 
+    def validate_strategy(self, strategy: Any) -> None:
+        """Mandatory semantic-acceptance seam for a decoded B1.2 output.
+
+        ``AdaptationStrategy.from_dict`` is intentionally a pure structural
+        decoder.  Any future B1.2-B acceptance/publication path must invoke
+        this exact preparation-bound method before treating it as valid.
+        """
+        from .strategy import AdaptationStrategy
+        if not isinstance(strategy, AdaptationStrategy):
+            raise AdaptationStrategyError("semantic acceptance requires AdaptationStrategy")
+        if strategy.resolved_target != self.packet.resolved_target:
+            raise AdaptationStrategyError("strategy target differs from prepared exact target")
+        strategy.validate_source_membership(self.packet.plotlines)
+
 
 def _direction_payload(store: FileArtifactStore, effective: Any) -> dict[str, Any]:
     return {"effective_set": effective.to_dict(), "directions": [load_user_direction(store, ref).to_dict() for ref in effective.direction_refs]}
@@ -108,6 +197,9 @@ def _component_sizes(packet: B12Packet) -> tuple[tuple[str, int, int], ...]:
         "story_bible": packet.story_bible, "global_structure": packet.global_structure,
         "character_analyses": list(packet.character_analyses), "global_event_analysis": packet.global_event_analysis,
         "arc_analysis": packet.arc_analysis, "canonical_event_index": list(packet.canonical_event_index),
+        "canonical_relationship_index": list(packet.canonical_relationship_index),
+        "unresolved_entity_index": list(packet.unresolved_entity_index),
+        "source_conflict_index": list(packet.source_conflict_index),
     }
     return tuple((name, len(canonical_json_bytes(value)), estimate_tokens(canonical_json_bytes(value).decode("utf-8"))) for name, value in components.items())
 
@@ -134,20 +226,45 @@ def prepare_b12_packet(
     verified = StoryAnalysisPersistenceService(store, pointers)._load_current_integrity(base, bound.story_analysis_manifest_ref)
     _manifest, chars, events, arcs, structure, bible, _report = verified
     event_set = _load(store, bound.canonical_event_set_ref, CanonicalEventSet)
-    event_index = tuple({"event_id": e.event_id, "narrative_order": e.narrative_order, "summary_zh": e.summary_zh, "participants": list(e.participants), "locations": list(e.locations), "temporal_mode": e.temporal_mode} for e in event_set.events)
-    expected_events = tuple(e.event_id for e in event_set.events)
+    ordered_events = tuple(sorted(event_set.events, key=lambda event: (event.narrative_order, event.event_id)))
+    event_index = tuple({"event_id": e.event_id, "narrative_order": e.narrative_order, "summary_zh": e.summary_zh, "participants": list(e.participants), "locations": list(e.locations), "temporal_mode": e.temporal_mode} for e in ordered_events)
+    expected_events = tuple(e.event_id for e in ordered_events)
     owned = tuple(event_id for window in events.windows for event_id in window.owned_event_refs)
     if len(owned) != len(set(owned)) or set(owned) != set(expected_events):
         raise AdaptationStrategyError("A6 global event windows do not provide exact complete A5 event coverage")
     if tuple(sorted(item.event_ref for item in events.event_importance_overlay)) and not set(item.event_ref for item in events.event_importance_overlay) <= set(expected_events):
         raise AdaptationStrategyError("A6 event importance references unknown A5 event")
+    a5_manifest = _load(store, bound.consolidation_manifest_ref, ConsolidationManifest)
+    if a5_manifest.entity_map_ref != bound.entity_map_ref:
+        raise AdaptationStrategyError("bound A5 manifest disagrees with exact source EntityMap")
+    entity_map = _load(store, bound.entity_map_ref, EntityMap)
+    relationship_set = _load(store, bound.canonical_relationship_set_ref, CanonicalRelationshipSet)
+    unresolved_set = _load(store, entity_map.unresolved_entity_set_ref, UnresolvedEntitySet)
+    conflict_set = _load(store, a5_manifest.story_conflict_set_ref, StoryConflictSet)
+    relationship_index = tuple(
+        {"relationship_id": rel.relationship_id, "source_entity_ref": rel.source_entity_ref,
+         "target_entity_ref": rel.target_entity_ref, "direction": rel.direction,
+         "relationship_type_zh": rel.relationship_type_zh, "state_count": len(rel.state_history)}
+        for rel in sorted(relationship_set.relationships, key=lambda item: item.relationship_id)
+    )
+    unresolved_index = tuple(
+        {"unresolved_id": item.unresolved_id, "entity_kind": item.entity_kind,
+         "candidate_refs": list(item.candidate_refs), "possible_candidate_refs": list(item.possible_candidate_refs),
+         "first_appearance_candidate_ref": item.first_appearance_candidate_ref}
+        for item in sorted(unresolved_set.entities, key=lambda item: item.unresolved_id)
+    )
+    conflict_index = tuple(
+        {"conflict_id": item.conflict_id, "conflict_kind": item.conflict_kind,
+         "fact_ids": list(item.fact_ids), "relationship_ids": list(item.relationship_ids), "status": item.status}
+        for item in sorted(conflict_set.conflicts, key=lambda item: item.conflict_id)
+    )
     catalog = TargetCatalog(manifest.project_id, tuple(TargetRef(TargetScope.CHARACTER, ref.canonical_id) for ref in bound.canonical_references if ref.kind == "character"), bound.canonical_character_registry_ref)
     if direction_set is None:
         direction_set = UserDirectionSet(manifest.project_id, "b12-empty-directions", 1, ())
     if direction_set.project_id != manifest.project_id:
         raise AdaptationStrategyError("G1 UserDirectionSet project does not match exact A6 snapshot")
     effective = project_effective_directions(store, direction_set, catalog, stage=DirectionStage.B1_ADAPTATION)
-    packet = B12Packet(bound, resolved_target, _direction_payload(store, effective), derive_snapshot_local_plotlines(bound.story_analysis_manifest_ref, structure), bible.to_dict(), structure.to_dict(), tuple(x.to_dict() for x in chars.analyses), events.to_dict(), arcs.to_dict(), event_index)
+    packet = B12Packet.build(bound, resolved_target, _direction_payload(store, effective), derive_snapshot_local_plotlines(bound.story_analysis_manifest_ref, structure), bible.to_dict(), structure.to_dict(), tuple(x.to_dict() for x in chars.analyses), events.to_dict(), arcs.to_dict(), event_index, relationship_index, unresolved_index, conflict_index)
     sizes = _component_sizes(packet)
     raw = packet.canonical_bytes()
     measurement = B12PacketMeasurement(len(raw), estimate_tokens(raw.decode("utf-8")), sizes, len(chars.analyses), len(event_index), len(events.windows), content_hash(bound.to_dict()), packet.content_hash(), effective.effective_user_direction_set_hash)

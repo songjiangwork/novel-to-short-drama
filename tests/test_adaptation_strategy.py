@@ -1,5 +1,6 @@
 import json
 import shutil
+from dataclasses import replace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -292,7 +293,7 @@ def test_semantic_view_component_accounting_complete_coverage_and_immutable_byte
     view["canonical_event_index"][0]["event_id"] = "evt_999999"
     assert packet_prep.semantic_view.canonical_bytes() == view_bytes
     assert semantic.measurement.semantic_view_bytes < packet_prep.measurement.packet_bytes
-    assert semantic.measurement.rendered_request_estimated_tokens > semantic.measurement.semantic_view_estimated_tokens
+    assert semantic.measurement.provider_request_estimated_tokens > semantic.measurement.semantic_view_estimated_tokens
 
 
 def test_b12_prompt_schema_and_request_identity_are_deterministic_and_versioned(tmp_path):
@@ -361,13 +362,61 @@ def test_b12_budget_fails_closed_before_provider_and_reserves_output_headroom(tm
     with pytest.raises(B12SemanticBudgetError, match="requires an explicit"):
         semantic.enforce_budget(None)
     assert provider_calls == 0
+    model = semantic.runtime_config.request_model
     with pytest.raises(B12SemanticBudgetError, match="input ceiling"):
-        semantic.enforce_budget(B12SemanticBudget("qwen-test", 999_999, semantic.measurement.rendered_request_estimated_tokens - 1))
-    required = semantic.measurement.rendered_request_estimated_tokens + semantic.measurement.reserved_output_tokens
+        semantic.enforce_budget(B12SemanticBudget(model, 999_999, semantic.measurement.provider_request_estimated_tokens - 1))
+    required = semantic.measurement.provider_request_estimated_tokens + semantic.measurement.reserved_output_tokens
     with pytest.raises(B12SemanticBudgetError, match="reserved output"):
-        semantic.enforce_budget(B12SemanticBudget("qwen-test", required - 1, semantic.measurement.rendered_request_estimated_tokens))
-    semantic.enforce_budget(B12SemanticBudget("qwen-test", required, semantic.measurement.rendered_request_estimated_tokens))
+        semantic.enforce_budget(B12SemanticBudget(model, required - 1, semantic.measurement.provider_request_estimated_tokens))
+    semantic.enforce_budget(B12SemanticBudget(model, required, semantic.measurement.provider_request_estimated_tokens))
     assert provider_calls == 0
+
+
+def test_b12_wire_budget_matches_shared_adapter_without_network_and_never_understates(tmp_path):
+    from short_drama.adaptation import B12SemanticBudget, B12SemanticBudgetError, build_b12_semantic_preparation
+    from short_drama.llm import GenerationExecutionOptions, OpenAICompatibleLLMClient
+
+    _tree, packet_prep, semantic = _semantic_preparation(tmp_path)
+    adapter = OpenAICompatibleLLMClient(semantic.runtime_config)
+    mapped = adapter.build_request_body(
+        semantic.request.rendered_prompt, semantic.output_schema, semantic.semantic_profile,
+    )
+    expected = json.dumps(mapped, ensure_ascii=False).encode("utf-8")
+    assert semantic.provider_request_bytes == expected
+    assert semantic.measurement.provider_request_bytes == len(expected)
+    assert semantic.measurement.provider_request_estimated_tokens == (len(expected) + 2) // 3
+
+    disabled = build_b12_semantic_preparation(
+        packet_prep, runtime_config=semantic.runtime_config,
+        execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+    )
+    disabled_body = adapter.build_request_body(
+        disabled.request.rendered_prompt, disabled.output_schema, disabled.semantic_profile,
+        execution_options=disabled.execution_options,
+    )
+    assert json.loads(disabled.provider_request_bytes) == disabled_body
+    assert disabled.provider_request_bytes == json.dumps(disabled_body, ensure_ascii=False).encode("utf-8")
+    assert json.loads(disabled.provider_request_bytes)["cache_prompt"] is False
+    assert disabled.measurement.provider_request_estimated_tokens > semantic.measurement.provider_request_estimated_tokens
+    with pytest.raises(B12SemanticBudgetError, match="input ceiling"):
+        disabled.enforce_budget(B12SemanticBudget(
+            disabled.runtime_config.request_model, 999_999,
+            semantic.measurement.provider_request_estimated_tokens,
+        ))
+
+
+def test_b12_requires_json_schema_mode_and_runtime_mapping_does_not_change_identity(tmp_path):
+    from short_drama.adaptation import AdaptationStrategyError, build_b12_semantic_preparation
+
+    _tree, packet_prep, semantic = _semantic_preparation(tmp_path)
+    other_runtime = replace(semantic.runtime_config, request_model="offline-qwen-test-model")
+    remapped = build_b12_semantic_preparation(packet_prep, runtime_config=other_runtime)
+    assert remapped.request_identity == semantic.request_identity
+    assert remapped.provider_request_bytes != semantic.provider_request_bytes
+    with pytest.raises(AdaptationStrategyError, match="structured_output_mode=json_schema"):
+        build_b12_semantic_preparation(
+            packet_prep, semantic_profile=replace(semantic.semantic_profile, structured_output_mode="json_object"),
+        )
 
 
 def test_provider_proposal_schema_is_strict_and_acceptance_attaches_exact_preparation(tmp_path):

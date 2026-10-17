@@ -1,18 +1,21 @@
 """B1.2-B1 measured semantic preparation; deliberately no provider execution.
 
-This module owns the bounded hand-off to the shared LLM primitives.  It does
-not construct an LLM client, retry, persist an artifact, or call a provider.
+This module owns the bounded hand-off to the shared LLM primitives.  It uses
+the shared adapter's public request-body mapper for zero-network accounting;
+it never retries, persists an artifact, or calls a provider.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
-from short_drama.artifacts import canonical_json_bytes, content_hash
+from short_drama.artifacts import content_hash
 from short_drama.io import load_json
 from short_drama.llm import (
-    OutputSchema, PromptRegistry, SemanticLLMProfile, StructuredGenerationRequest,
-    build_structured_request, load_semantic_profile,
+    GenerationExecutionOptions, OpenAICompatibleLLMClient, OutputSchema, PromptRegistry,
+    RuntimeConfig, SemanticLLMProfile, StructuredGenerationRequest, build_structured_request,
+    load_runtime_config, load_semantic_profile,
 )
 from short_drama.paths import REPO_ROOT
 from short_drama.story.chunking import estimate_tokens
@@ -28,6 +31,7 @@ B12_STRATEGY_OUTPUT_SCHEMA_VERSION = 1
 B12_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
 B12_SEMANTIC_PROFILE_PATH = REPO_ROOT / "profiles" / "adaptation_strategy_llm_v1.yaml"
 B12_OUTPUT_SCHEMA_PATH = REPO_ROOT / "schemas" / "b12-adaptation-strategy-proposal.schema.json"
+B12_RUNTIME_CONFIG_PATH = REPO_ROOT / "profiles" / "llm_local.yaml"
 
 
 class B12SemanticBudgetError(AdaptationStrategyError):
@@ -62,16 +66,16 @@ class B12SemanticBudget:
 class B12SemanticMeasurement:
     semantic_view_bytes: int
     semantic_view_estimated_tokens: int
-    rendered_request_bytes: int
-    rendered_request_estimated_tokens: int
+    provider_request_bytes: int
+    provider_request_estimated_tokens: int
     reserved_output_tokens: int
 
     def to_dict(self) -> dict[str, int]:
         return {
             "semantic_view_bytes": self.semantic_view_bytes,
             "semantic_view_estimated_tokens": self.semantic_view_estimated_tokens,
-            "rendered_request_bytes": self.rendered_request_bytes,
-            "rendered_request_estimated_tokens": self.rendered_request_estimated_tokens,
+            "provider_request_bytes": self.provider_request_bytes,
+            "provider_request_estimated_tokens": self.provider_request_estimated_tokens,
             "reserved_output_tokens": self.reserved_output_tokens,
         }
 
@@ -84,6 +88,9 @@ class B12SemanticPreparation:
     semantic_profile: SemanticLLMProfile
     output_schema: OutputSchema
     request: StructuredGenerationRequest
+    runtime_config: RuntimeConfig
+    execution_options: GenerationExecutionOptions | None
+    provider_request_bytes: bytes
     measurement: B12SemanticMeasurement
     request_identity: str
 
@@ -96,16 +103,20 @@ class B12SemanticPreparation:
         """
         if budget is None:
             raise B12SemanticBudgetError("B1.2 provider execution requires an explicit semantic budget")
-        measured = self.measurement.rendered_request_estimated_tokens
+        if budget.runtime_model_id != self.runtime_config.request_model:
+            raise B12SemanticBudgetError(
+                "semantic budget runtime_model_id does not match the exact runtime request_model"
+            )
+        measured = self.measurement.provider_request_estimated_tokens
         if measured > budget.input_ceiling_tokens:
             raise B12SemanticBudgetError(
-                f"B1.2 rendered request ({measured} repository-estimated tokens) exceeds "
+                f"B1.2 mapped provider request ({measured} repository-estimated tokens) exceeds "
                 f"input ceiling ({budget.input_ceiling_tokens}); refusing to truncate"
             )
         required = measured + self.measurement.reserved_output_tokens
         if required > budget.model_context_tokens:
             raise B12SemanticBudgetError(
-                f"B1.2 rendered request plus reserved output ({required} repository-estimated tokens) "
+                f"B1.2 mapped provider request plus reserved output ({required} repository-estimated tokens) "
                 f"exceeds runtime model context ({budget.model_context_tokens})"
             )
 
@@ -176,28 +187,28 @@ def b12_request_identity(*, preparation: B12Preparation, profile: SemanticLLMPro
     })
 
 
-def _provider_request_material(request: StructuredGenerationRequest) -> dict[str, Any]:
-    """Shared OpenAI-compatible body minus runtime routing metadata.
+def _mapped_provider_request_bytes(
+    request: StructuredGenerationRequest,
+    runtime_config: RuntimeConfig,
+    execution_options: GenerationExecutionOptions | None,
+) -> bytes:
+    """Use the shared adapter's public, zero-network body mapper verbatim.
 
-    This is the complete prompt/schema/profile material transmitted to the
-    provider.  ``model`` is intentionally omitted because it is runtime-only;
-    it changes neither semantic identity nor the bounded context payload.
+    The adapter itself serializes this mapping with ``json.dumps(...,
+    ensure_ascii=False)``. Repeating that exact serialization after the public
+    ``build_request_body`` round trip produces the same bytes while avoiding a
+    private adapter API and any HTTP attempt. Runtime routing remains outside
+    semantic identity, but its actual ``model`` bytes remain in this measured
+    provider payload as a conservative accounting choice.
     """
-    profile = request.semantic_profile
-    return {
-        "messages": list(request.messages),
-        "temperature": profile.temperature,
-        "max_tokens": profile.max_output_tokens,
-        "reasoning_effort": profile.reasoning.request_effort,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": request.output_schema.schema_id,
-                "schema": request.output_schema.schema,
-                "strict": True,
-            },
-        },
-    }
+    client = OpenAICompatibleLLMClient(runtime_config)
+    body = client.build_request_body(
+        request.rendered_prompt,
+        request.output_schema,
+        request.semantic_profile,
+        execution_options=execution_options,
+    )
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
 
 def build_b12_semantic_preparation(
@@ -206,6 +217,8 @@ def build_b12_semantic_preparation(
     prompts: PromptRegistry | None = None,
     semantic_profile: SemanticLLMProfile | None = None,
     output_schema: OutputSchema | None = None,
+    runtime_config: RuntimeConfig | None = None,
+    execution_options: GenerationExecutionOptions | None = None,
 ) -> B12SemanticPreparation:
     """Render the entire B1.2 proposal request with no provider side effects."""
     if not isinstance(preparation, B12Preparation):
@@ -213,20 +226,26 @@ def build_b12_semantic_preparation(
     prompts = PromptRegistry(B12_PROMPTS_DIR) if prompts is None else prompts
     semantic_profile = load_b12_semantic_profile() if semantic_profile is None else semantic_profile
     output_schema = load_b12_output_schema() if output_schema is None else output_schema
+    runtime_config = load_runtime_config(B12_RUNTIME_CONFIG_PATH) if runtime_config is None else runtime_config
+    if semantic_profile.structured_output_mode != "json_schema":
+        raise AdaptationStrategyError("B1.2 adaptation strategy requires structured_output_mode=json_schema")
+    if not isinstance(runtime_config, RuntimeConfig):
+        raise AdaptationStrategyError("B1.2 semantic preparation requires an exact RuntimeConfig")
+    if execution_options is not None and not isinstance(execution_options, GenerationExecutionOptions):
+        raise AdaptationStrategyError("B1.2 execution_options must be GenerationExecutionOptions or None")
     prompt = prompts.load(B12_STRATEGY_PROMPT_ID, version=B12_STRATEGY_PROMPT_VERSION)
     rendered = prompt.render({"semantic_view_json": preparation.semantic_view.canonical_bytes().decode("utf-8")})
     request = build_structured_request(
         rendered_prompt=rendered, output_schema=output_schema, semantic_profile=semantic_profile,
     )
-    # Do not measure the in-memory request's diagnostic duplication of rendered
-    # prompt and messages.  Measure the full transport-neutral wire body the
-    # existing OpenAI-compatible adapter maps (minus runtime-only ``model``).
-    rendered_bytes = canonical_json_bytes(_provider_request_material(request))
+    # This is deliberately the same public adapter mapping and serialization
+    # used by execution, including runtime ``model`` and optional cache_prompt.
+    provider_request_bytes = _mapped_provider_request_bytes(request, runtime_config, execution_options)
     measurement = B12SemanticMeasurement(
         semantic_view_bytes=len(preparation.semantic_view.canonical_bytes()),
         semantic_view_estimated_tokens=estimate_tokens(preparation.semantic_view.canonical_bytes().decode("utf-8")),
-        rendered_request_bytes=len(rendered_bytes),
-        rendered_request_estimated_tokens=estimate_tokens(rendered_bytes.decode("utf-8")),
+        provider_request_bytes=len(provider_request_bytes),
+        provider_request_estimated_tokens=estimate_tokens(provider_request_bytes.decode("utf-8")),
         reserved_output_tokens=semantic_profile.max_output_tokens,
     )
     return B12SemanticPreparation(
@@ -234,6 +253,9 @@ def build_b12_semantic_preparation(
         semantic_profile=semantic_profile,
         output_schema=output_schema,
         request=request,
+        runtime_config=runtime_config,
+        execution_options=execution_options,
+        provider_request_bytes=provider_request_bytes,
         measurement=measurement,
         request_identity=b12_request_identity(
             preparation=preparation, profile=semantic_profile, output_schema=output_schema, request=request,

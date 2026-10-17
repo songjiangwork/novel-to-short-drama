@@ -38,7 +38,7 @@ from .strategy_execution import (
     B12_MAX_SEMANTIC_GENERATION_ROUNDS, B12_STRATEGY_ARTIFACT_TYPE,
     B12SemanticExecutionError, B12SemanticGenerationExhaustedError,
     B12SemanticGenerationPolicy, B12SemanticProvenanceError, B12StrategyArtifact,
-    B12StrategyPersistenceService, B12StrategyPublication, b12_strategy_artifact_id,
+    B12StrategyPublication, b12_strategy_artifact_id,
     b12_strategy_pointer_id, execute_b12_strategy,
 )
 
@@ -58,6 +58,6 @@ __all__ = [
     "B12_MAX_SEMANTIC_GENERATION_ROUNDS", "B12_STRATEGY_ARTIFACT_TYPE",
     "B12SemanticExecutionError", "B12SemanticGenerationExhaustedError",
     "B12SemanticGenerationPolicy", "B12SemanticProvenanceError", "B12StrategyArtifact",
-    "B12StrategyPersistenceService", "B12StrategyPublication", "b12_strategy_artifact_id",
+    "B12StrategyPublication", "b12_strategy_artifact_id",
     "b12_strategy_pointer_id", "execute_b12_strategy",
 ]

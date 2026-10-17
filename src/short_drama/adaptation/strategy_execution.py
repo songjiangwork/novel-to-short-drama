@@ -11,14 +11,16 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from short_drama.artifacts import ArtifactError, ArtifactNotFoundError, ArtifactRef, FileArtifactStore, ImmutableArtifactEnvelope
-from short_drama.foundation import FilePointerStore, LineageRef, PointerKind, PointerNotFoundError
+from short_drama.foundation import (
+    FilePointerStore, LineageRef, PointerKind, PointerNotFoundError,
+    verify_lineage_refs,
+)
 from short_drama.guidance import DirectionStrength
 from short_drama.guidance.projection import load_user_direction
 from short_drama.llm import GenerationExecutionOptions, LLMClient, LLMInvocationProvenance, RuntimeConfig
 from short_drama.story.chunking import estimate_tokens
 
 from .strategy import AdaptationStrategy, AdaptationStrategyError
-from .strategy_packet import B12Preparation
 from .strategy_semantic import B12SemanticBudget, B12SemanticBudgetError, B12SemanticPreparation, _mapped_provider_request_bytes
 from .target import AdaptationSourceSnapshot
 
@@ -189,12 +191,14 @@ def b12_strategy_pointer_id(project_id: str, adaptation_target_id: str) -> str:
     return f"{project_id}.b12.{adaptation_target_id}.strategy"
 
 
-def _provenance_checks(provenance: LLMInvocationProvenance, semantic: B12SemanticPreparation, runtime: RuntimeConfig) -> None:
+def _provenance_checks(
+    provenance: LLMInvocationProvenance,
+    semantic: B12SemanticPreparation,
+    runtime: RuntimeConfig,
+    *,
+    require_runtime_routing: bool,
+) -> None:
     request = semantic.request
-    # Runtime backend/model are recorded audit data, not semantic identity (the
-    # A6 convention).  ``runtime`` is checked against preparation separately
-    # before each call; it must not make a valid stored strategy unreusable.
-    del runtime
     checks = (
         (provenance.semantic_profile_id, request.semantic_profile.profile_id),
         (provenance.semantic_profile_hash, request.semantic_profile.semantic_profile_hash),
@@ -209,6 +213,13 @@ def _provenance_checks(provenance: LLMInvocationProvenance, semantic: B12Semanti
     )
     if any(got != expected for got, expected in checks):
         raise B12SemanticProvenanceError("B1.2 provider provenance does not match the exact prepared request")
+    if require_runtime_routing and (
+        provenance.provider_family != runtime.provider_family
+        or provenance.model != runtime.request_model
+    ):
+        raise B12SemanticProvenanceError(
+            "B1.2 provider routing provenance does not match the execution RuntimeConfig"
+        )
 
 
 def _verify_execution_request(semantic: B12SemanticPreparation, runtime: RuntimeConfig, options: GenerationExecutionOptions | None, budget: B12SemanticBudget) -> None:
@@ -235,6 +246,15 @@ def _verify_execution_request(semantic: B12SemanticPreparation, runtime: Runtime
         raise B12SemanticBudgetError("B1.2 mapped provider request plus reserved output exceeds runtime model context")
 
 
+def _verify_client_runtime(llm_client: LLMClient, runtime: RuntimeConfig) -> None:
+    """Concrete adapters must be routed exactly as the measured request was."""
+    configured = getattr(llm_client, "runtime_config", None)
+    if configured is not None and configured != runtime:
+        raise B12SemanticExecutionError(
+            "injected LLMClient runtime_config differs from the preparation-bound RuntimeConfig"
+        )
+
+
 def _ensure_source_current(store: FileArtifactStore, pointers: FilePointerStore, semantic: B12SemanticPreparation) -> None:
     current = AdaptationSourceSnapshot.from_store(
         store, pointers, semantic.preparation.packet.source_snapshot.story_analysis_manifest_ref
@@ -256,12 +276,26 @@ def _verify_effective_direction_authority(store: FileArtifactStore, semantic: B1
     return refs
 
 
-def _review_required_direction_refs(store: FileArtifactStore, semantic: B12SemanticPreparation, strategy: AdaptationStrategy) -> tuple[ArtifactRef, ...]:
-    refs = _verify_effective_direction_authority(store, semantic)
-    # Python does not infer whether natural language was fulfilled.  Every hard
-    # B1 direction remains a review item, as do explicit conflicts/divergences.
-    hard = tuple(ref for ref in refs if load_user_direction(store, ref).strength is DirectionStrength.MUST or load_user_direction(store, ref).strength is DirectionStrength.MUST_NOT)
-    return hard if (hard or strategy.explicit_conflicts or strategy.deliberate_divergences) else ()
+def _review_metadata(
+    store: FileArtifactStore,
+    direction_refs: tuple[ArtifactRef, ...],
+    strategy: AdaptationStrategy,
+) -> tuple[bool, tuple[str, ...], tuple[ArtifactRef, ...]]:
+    """Preserve review requirements; never infer natural-language compliance."""
+    hard = tuple(
+        ref for ref in direction_refs
+        if load_user_direction(store, ref).strength in {
+            DirectionStrength.MUST, DirectionStrength.MUST_NOT,
+        }
+    )
+    reasons = tuple(
+        reason for reason, present in (
+            ("deliberate_divergence", bool(strategy.deliberate_divergences)),
+            ("explicit_conflict", bool(strategy.explicit_conflicts)),
+            ("hard_user_direction_semantic_review", bool(hard)),
+        ) if present
+    )
+    return bool(reasons), reasons, hard
 
 
 def _strategy_lineage(semantic: B12SemanticPreparation, direction_refs: tuple[ArtifactRef, ...]) -> tuple[LineageRef, ...]:
@@ -283,8 +317,27 @@ def _strategy_lineage(semantic: B12SemanticPreparation, direction_refs: tuple[Ar
     ), key=LineageRef.sort_key))
 
 
-class B12StrategyPersistenceService:
-    """Small CURRENT-only B1.2 persistence adapter; never emits approval."""
+def _strategy_lineage_from_artifact(artifact: B12StrategyArtifact) -> tuple[LineageRef, ...]:
+    snapshot = artifact.source_snapshot
+    source_refs = (
+        ("a6_manifest", snapshot.story_analysis_manifest_ref),
+        ("a5_consolidation_manifest", snapshot.consolidation_manifest_ref),
+        ("a4_entity_map", snapshot.entity_map_ref),
+        ("a4_character_registry", snapshot.canonical_character_registry_ref),
+        ("a4_location_registry", snapshot.canonical_location_registry_ref),
+        ("a5_canonical_fact_set", snapshot.canonical_fact_set_ref),
+        ("a5_canonical_event_set", snapshot.canonical_event_set_ref),
+        ("a5_canonical_relationship_set", snapshot.canonical_relationship_set_ref),
+        ("a6_arc_analysis", snapshot.arc_analysis_ref),
+    )
+    return tuple(sorted((
+        LineageRef(role, ref)
+        for role, ref in (*source_refs, *((f"b1_effective_direction_{index:04d}", ref) for index, ref in enumerate(artifact.effective_direction_refs)))
+    ), key=LineageRef.sort_key))
+
+
+class _B12StrategyPersistenceService:
+    """Internal CURRENT-only B1.2 persistence adapter; never emits approval."""
 
     def __init__(self, store: FileArtifactStore, pointers: FilePointerStore) -> None:
         self._store, self._pointers = store, pointers
@@ -317,12 +370,72 @@ class B12StrategyPersistenceService:
         if envelope.schema_version != B12_STRATEGY_ARTIFACT_SCHEMA_VERSION or not isinstance(envelope.payload, dict):
             raise B12SemanticExecutionError("B1.2 CURRENT strategy artifact has unsupported schema")
         artifact = B12StrategyArtifact.from_dict(envelope.payload)
-        self._validate_reusable_artifact(artifact, semantic)
+        self._validate_intrinsic_artifact(artifact)
+        # A healthy historical strategy with another exact semantic request is
+        # a normal cache miss.  It must not prevent a new immutable revision.
+        if artifact.request_identity != semantic.request_identity:
+            return None
+        self._validate_exact_reuse_match(artifact, semantic)
         return B12StrategyPublication(pointer.target_ref, pointer_ref, artifact, reused=True)
 
-    def _validate_reusable_artifact(self, artifact: B12StrategyArtifact, semantic: B12SemanticPreparation) -> None:
-        if artifact.request_identity != semantic.request_identity or artifact.semantic_request_hash != semantic.request.request_hash:
-            raise B12SemanticExecutionError("B1.2 CURRENT strategy is not an exact semantic request match")
+    def _validate_intrinsic_artifact(self, artifact: B12StrategyArtifact) -> None:
+        """Validate old authority without treating changed input as corruption."""
+        if artifact.lineage != _strategy_lineage_from_artifact(artifact):
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy has internally inconsistent lineage")
+        try:
+            verify_lineage_refs(self._store, artifact.lineage)
+            for ref in artifact.effective_direction_refs:
+                load_user_direction(self._store, ref)
+        except Exception as exc:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy has missing or corrupt pinned authority") from exc
+        artifact.strategy.validate_source_membership()
+        direction_ref_set = set(artifact.effective_direction_refs)
+        if any(
+            ref not in direction_ref_set
+            for conflict in artifact.strategy.explicit_conflicts
+            for ref in conflict.user_direction_refs
+        ):
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy conflict references outside its effective directions")
+        provenance = _provenance_from_dict(artifact.invocation_provenance)
+        if artifact.semantic_request_hash != provenance.request_hash:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy semantic request hash disagrees with provenance")
+        if artifact.rendered_request_hash != provenance.rendered_prompt_hash:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy rendered prompt hash disagrees with provenance")
+        if artifact.prompt_identity != {
+            "prompt_id": provenance.prompt_id,
+            "prompt_version": provenance.prompt_version,
+            "prompt_content_hash": provenance.prompt_content_hash,
+        }:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy prompt identity disagrees with provenance")
+        if artifact.output_schema_identity != {
+            "schema_id": provenance.output_schema_id,
+            "schema_version": provenance.output_schema_version,
+            "schema_content_hash": provenance.output_schema_hash,
+        }:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy output schema identity disagrees with provenance")
+        if artifact.semantic_profile_identity != {
+            "profile_id": provenance.semantic_profile_id,
+            "profile_hash": provenance.semantic_profile_hash,
+        }:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy semantic profile identity disagrees with provenance")
+        expected_review = _review_metadata(
+            self._store, artifact.effective_direction_refs, artifact.strategy
+        )
+        actual_review = (
+            artifact.requires_human_review,
+            artifact.review_reasons,
+            artifact.review_required_direction_refs,
+        )
+        if actual_review != expected_review:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy review metadata is not reproducible")
+
+    def _validate_exact_reuse_match(self, artifact: B12StrategyArtifact, semantic: B12SemanticPreparation) -> None:
+        if artifact.request_identity != semantic.request_identity:
+            raise B12SemanticExecutionError("B1.2 strategy artifact request identity is not an exact match")
+        if artifact.semantic_request_hash != semantic.request.request_hash:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy semantic request hash is not an exact match")
+        if artifact.rendered_request_hash != semantic.request.rendered_prompt.rendered_prompt_hash:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy rendered prompt hash is not an exact match")
         if artifact.source_snapshot != semantic.preparation.packet.source_snapshot:
             raise B12SemanticExecutionError("B1.2 CURRENT strategy has cross-project or stale source lineage")
         if artifact.strategy.resolved_target != semantic.preparation.packet.resolved_target:
@@ -334,11 +447,38 @@ class B12StrategyPersistenceService:
         direction_refs = _verify_effective_direction_authority(self._store, semantic)
         if artifact.effective_direction_refs != direction_refs or artifact.lineage != _strategy_lineage(semantic, direction_refs):
             raise B12SemanticExecutionError("B1.2 CURRENT strategy has wrong exact lineage")
-        _provenance_checks(_provenance_from_dict(artifact.invocation_provenance), semantic, semantic.runtime_config)
+        if artifact.prompt_identity != {
+            "prompt_id": semantic.request.rendered_prompt.prompt_id,
+            "prompt_version": semantic.request.rendered_prompt.prompt_version,
+            "prompt_content_hash": semantic.request.rendered_prompt.prompt_content_hash,
+        } or artifact.output_schema_identity != {
+            "schema_id": semantic.output_schema.schema_id,
+            "schema_version": semantic.output_schema.schema_version,
+            "schema_content_hash": semantic.output_schema.schema_hash,
+        } or artifact.semantic_profile_identity != {
+            "profile_id": semantic.semantic_profile.profile_id,
+            "profile_hash": semantic.semantic_profile.semantic_profile_hash,
+        }:
+            raise B12SemanticExecutionError("B1.2 CURRENT strategy persisted semantic identities are not exact matches")
+        _provenance_checks(
+            _provenance_from_dict(artifact.invocation_provenance), semantic,
+            semantic.runtime_config, require_runtime_routing=False,
+        )
         semantic.decode_and_validate_proposal(_without_target(artifact.strategy))
 
-    def publish(self, semantic: B12SemanticPreparation, artifact: B12StrategyArtifact,
-                *, source_guard: Callable[[], None] | None = None) -> B12StrategyPublication:
+    def _publish_accepted(
+        self,
+        semantic: B12SemanticPreparation,
+        artifact: B12StrategyArtifact,
+        *,
+        source_guard: Callable[[], None],
+    ) -> B12StrategyPublication:
+        """Internal publication seam; callers cannot skip acceptance/current guards."""
+        if not callable(source_guard):
+            raise B12SemanticExecutionError("B1.2 publication requires a source-current guard")
+        self._validate_intrinsic_artifact(artifact)
+        self._validate_exact_reuse_match(artifact, semantic)
+        source_guard()
         _project, artifact_id, pointer_id = self._project_and_ids(semantic)
         try:
             old_pointer_ref = self._pointers.resolve_current_pointer_ref(pointer_id)
@@ -364,8 +504,7 @@ class B12StrategyPersistenceService:
             strategy_ref = self._store.put(envelope)
         except ArtifactError as exc:
             raise B12SemanticExecutionError("failed to persist immutable B1.2 strategy") from exc
-        if source_guard is not None:
-            source_guard()
+        source_guard()
         try:
             pointer_ref = self._pointers.compare_and_set(pointer_id=pointer_id, pointer_kind=PointerKind.CURRENT, expected_pointer_ref=old_pointer_ref, target_ref=strategy_ref)
         except Exception as exc:
@@ -405,12 +544,13 @@ def execute_b12_strategy(
     _verify_execution_request(semantic, runtime_config, semantic.execution_options, budget)  # type: ignore[arg-type]
     _ensure_source_current(store, pointers, semantic)
     _verify_effective_direction_authority(store, semantic)
-    persistence = B12StrategyPersistenceService(store, pointers)
+    persistence = _B12StrategyPersistenceService(store, pointers)
     reused = persistence.try_reuse_current(semantic)
     if reused is not None:
         _ensure_source_current(store, pointers, semantic)
         _verify_effective_direction_authority(store, semantic)
         return reused
+    _verify_client_runtime(llm_client, runtime_config)
 
     failures: list[str] = []
     for round_number in range(1, policy.max_rounds + 1):
@@ -422,7 +562,9 @@ def execute_b12_strategy(
             semantic.request.rendered_prompt, semantic.output_schema, semantic.semantic_profile,
             execution_options=options,
         )
-        _provenance_checks(result.provenance, semantic, runtime_config)
+        _provenance_checks(
+            result.provenance, semantic, runtime_config, require_runtime_routing=True,
+        )
         try:
             strategy = semantic.decode_and_validate_proposal(result.parsed_json)
         except AdaptationStrategyError as exc:
@@ -431,13 +573,8 @@ def execute_b12_strategy(
         # Upstream A5/A6 authority is re-read after the provider call and before
         # writing any B1 owned bytes, closing the CURRENT race.
         _ensure_source_current(store, pointers, semantic)
-        review_refs = _review_required_direction_refs(store, semantic, strategy)
         direction_refs = _verify_effective_direction_authority(store, semantic)
-        reasons = tuple(reason for reason, present in (
-            ("deliberate_divergence", bool(strategy.deliberate_divergences)),
-            ("explicit_conflict", bool(strategy.explicit_conflicts)),
-            ("hard_user_direction_semantic_review", bool(review_refs)),
-        ) if present)
+        requires_review, reasons, review_refs = _review_metadata(store, direction_refs, strategy)
         artifact = B12StrategyArtifact(
             request_identity=semantic.request_identity,
             semantic_request_hash=semantic.request.request_hash,
@@ -447,13 +584,16 @@ def execute_b12_strategy(
             prompt_identity={"prompt_id": semantic.request.rendered_prompt.prompt_id, "prompt_version": semantic.request.rendered_prompt.prompt_version, "prompt_content_hash": semantic.request.rendered_prompt.prompt_content_hash},
             output_schema_identity={"schema_id": semantic.output_schema.schema_id, "schema_version": semantic.output_schema.schema_version, "schema_content_hash": semantic.output_schema.schema_hash},
             semantic_profile_identity={"profile_id": semantic.semantic_profile.profile_id, "profile_hash": semantic.semantic_profile.semantic_profile_hash},
-            rendered_request_hash=semantic.request.request_hash,
+            rendered_request_hash=semantic.request.rendered_prompt.rendered_prompt_hash,
             invocation_provenance=result.provenance.to_dict(), semantic_rounds=round_number,
             lineage=_strategy_lineage(semantic, direction_refs), effective_direction_refs=direction_refs,
-            requires_human_review=bool(reasons), review_reasons=reasons,
+            requires_human_review=requires_review, review_reasons=reasons,
             review_required_direction_refs=review_refs, strategy=strategy,
         )
-        return persistence.publish(semantic, artifact, source_guard=lambda: _ensure_source_current(store, pointers, semantic))
+        return persistence._publish_accepted(
+            semantic, artifact,
+            source_guard=lambda: _ensure_source_current(store, pointers, semantic),
+        )
     raise B12SemanticGenerationExhaustedError(
         request_identity=semantic.request_identity, rounds_attempted=policy.max_rounds, failures=tuple(failures),
     )

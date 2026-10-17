@@ -1,0 +1,2 @@
+Whole-story semantic view (complete canonical event order and all plot windows are present):
+{{semantic_view_json}}

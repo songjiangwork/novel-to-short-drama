@@ -1,0 +1,5 @@
+schema_version: 1
+prompt_id: b12.adaptation-strategy
+version: 1
+required_variables: [semantic_view_json]
+content_hash: 78afc09b48659674e1ff2a6c02a91ff7229c4619972d6843757400cabe36c228

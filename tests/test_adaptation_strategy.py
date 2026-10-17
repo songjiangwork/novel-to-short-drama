@@ -1,4 +1,6 @@
 import json
+import shutil
+from dataclasses import replace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -246,3 +248,212 @@ def test_packet_requires_complete_sorted_compact_event_and_relationship_indexes(
         ({"relationship_id": "rel_000001", "relationship_type_zh": "关系"},), (), ())
     assert [entry["event_id"] for entry in packet.canonical_event_index] == ["evt_000001", "evt_000002"]
     assert packet.canonical_relationship_index[0]["relationship_id"] == "rel_000001"
+
+
+def _semantic_preparation(tmp_path, *, direction_set=None):
+    from short_drama.adaptation import AdaptationTarget, AdaptationSourceSnapshot, resolve_adaptation_target
+    from short_drama.adaptation import build_b12_semantic_preparation
+    tree, publication = _published_a6(tmp_path)
+    source = AdaptationSourceSnapshot.from_store(tree.store, tree.pointers, publication.story_analysis_manifest_ref)
+    prepared = prepare_b12_packet(
+        tree.store, tree.pointers,
+        resolve_adaptation_target(AdaptationTarget("semantic-preparation"), source_snapshot=source),
+        direction_set,
+    )
+    return tree, prepared, build_b12_semantic_preparation(prepared, runtime_config=_b12_test_runtime_config())
+
+
+def _proposal(strategy):
+    proposal = strategy.to_dict()
+    proposal.pop("resolved_target")
+    return proposal
+
+
+def _b12_test_runtime_config():
+    """Committed-test equivalent: deterministic, local, credential-free, unused network route."""
+    from short_drama.llm import RuntimeConfig
+    return RuntimeConfig(
+        schema_version=2,
+        transport_id="b12-test-runtime",
+        base_url="http://127.0.0.1:8080/v1",
+        request_model="b12-test-qwen",
+        provider_family="qwen",
+        credential_environment_name=None,
+        timeout_seconds=1,
+    )
+
+
+def test_semantic_view_component_accounting_complete_coverage_and_immutable_bytes(tmp_path):
+    _tree, packet_prep, semantic = _semantic_preparation(tmp_path)
+    component_names = [item[0] for item in packet_prep.measurement.component_sizes]
+    assert component_names == [
+        "source_snapshot", "resolved_target", "effective_directions", "plotlines", "story_bible",
+        "global_structure", "character_analyses", "global_event_analysis", "arc_analysis",
+        "canonical_event_index", "canonical_relationship_index", "unresolved_entity_index", "source_conflict_index",
+    ]
+    # Packet framing keys/version account for the small positive remainder.
+    assert 0 < packet_prep.measurement.packet_bytes - sum(item[1] for item in packet_prep.measurement.component_sizes) < 1_000
+    view_bytes = packet_prep.semantic_view.canonical_bytes()
+    view = packet_prep.semantic_view.to_dict()
+    assert "source_snapshot" not in view["adaptation_target"]
+    assert {item["event_id"] for item in view["canonical_event_index"]} == {
+        item["event_id"] for item in packet_prep.packet.canonical_event_index
+    }
+    assert [item["narrative_order"] for item in view["canonical_event_index"]] == [
+        item["narrative_order"] for item in packet_prep.packet.canonical_event_index
+    ]
+    assert len(view["global_event_analysis"]["windows"]) == packet_prep.measurement.plot_window_count
+    assert [item["handle"] for item in view["plotlines"]] == [item.handle for item in packet_prep.packet.plotlines]
+    view["canonical_event_index"][0]["event_id"] = "evt_999999"
+    assert packet_prep.semantic_view.canonical_bytes() == view_bytes
+    assert semantic.measurement.semantic_view_bytes < packet_prep.measurement.packet_bytes
+    assert semantic.measurement.provider_request_estimated_tokens > semantic.measurement.semantic_view_estimated_tokens
+
+
+def test_b12_prompt_schema_and_request_identity_are_deterministic_and_versioned(tmp_path):
+    _tree, packet_prep, first = _semantic_preparation(tmp_path)
+    from short_drama.adaptation import build_b12_semantic_preparation
+    from short_drama.llm import OutputSchema, PromptRegistry, compute_prompt_content_hash
+    from short_drama.adaptation.strategy_semantic import B12_PROMPTS_DIR
+    second = build_b12_semantic_preparation(packet_prep, runtime_config=first.runtime_config)
+    assert first.request.rendered_prompt.rendered_prompt_hash == second.request.rendered_prompt.rendered_prompt_hash
+    assert first.request_identity == second.request_identity
+
+    changed_schema = dict(first.output_schema.schema)
+    changed_schema["title"] = "changed proposal contract"
+    schema_variant = OutputSchema.create(schema_id=first.output_schema.schema_id, schema_version=2, schema=changed_schema)
+    assert build_b12_semantic_preparation(packet_prep, output_schema=schema_variant, runtime_config=first.runtime_config).request_identity != first.request_identity
+
+    prompt_root = tmp_path / "prompts"
+    shutil.copytree(B12_PROMPTS_DIR, prompt_root)
+    version_dir = prompt_root / "b12.adaptation-strategy" / "v1"
+    system = (version_dir / "system.txt").read_text(encoding="utf-8") + "\n版本化变更。\n"
+    (version_dir / "system.txt").write_text(system, encoding="utf-8")
+    metadata = json.loads(json.dumps(__import__("yaml").safe_load((version_dir / "prompt.yaml").read_text(encoding="utf-8"))))
+    metadata["content_hash"] = compute_prompt_content_hash(
+        prompt_id="b12.adaptation-strategy", version=1, system_template=system,
+        user_template=(version_dir / "user.txt").read_text(encoding="utf-8"), required_variables=["semantic_view_json"],
+    )
+    (version_dir / "prompt.yaml").write_text(__import__("yaml").safe_dump(metadata, sort_keys=False), encoding="utf-8")
+    assert build_b12_semantic_preparation(packet_prep, prompts=PromptRegistry(prompt_root), runtime_config=first.runtime_config).request_identity != first.request_identity
+
+
+def test_b12_identity_ignores_runtime_only_budget_and_b4_guidance(tmp_path):
+    from short_drama.adaptation import (
+        AdaptationTarget, AdaptationSourceSnapshot, B12SemanticBudget, build_b12_semantic_preparation,
+        resolve_adaptation_target,
+    )
+    from short_drama.guidance import (
+        DirectionCategory, DirectionOrigin, DirectionStage, DirectionStrength, TargetScope,
+        UserDirection, UserDirectionSet, persist_user_direction,
+    )
+    tree, publication = _published_a6(tmp_path)
+    source = AdaptationSourceSnapshot.from_store(tree.store, tree.pointers, publication.story_analysis_manifest_ref)
+    target = resolve_adaptation_target(AdaptationTarget("identity-directions"), source_snapshot=source)
+    project_id = tree.store.get_ref(publication.story_analysis_manifest_ref).payload["project_id"]
+    empty = prepare_b12_packet(tree.store, tree.pointers, target, UserDirectionSet(project_id, "directions", 1, ()))
+    camera = UserDirection("camera", project_id, 1, DirectionOrigin.USER, DirectionCategory.CAMERA,
+        DirectionStrength.PREFER, DirectionStage.B4_SHOT, TargetScope.PROJECT, (), "多用近景。")
+    camera_ref = persist_user_direction(tree.store, camera)
+    b4 = prepare_b12_packet(tree.store, tree.pointers, target, UserDirectionSet(project_id, "directions", 2, (camera_ref,)))
+    narrative = UserDirection("narrative", project_id, 1, DirectionOrigin.USER, DirectionCategory.CHARACTER_NARRATIVE,
+        DirectionStrength.PREFER, DirectionStage.B1_ADAPTATION, TargetScope.PROJECT, (), "强化主角能动性。")
+    narrative_ref = persist_user_direction(tree.store, narrative)
+    b1 = prepare_b12_packet(tree.store, tree.pointers, target, UserDirectionSet(project_id, "directions", 3, (camera_ref, narrative_ref)))
+    runtime = _b12_test_runtime_config()
+    identity_empty = build_b12_semantic_preparation(empty, runtime_config=runtime).request_identity
+    assert identity_empty == build_b12_semantic_preparation(b4, runtime_config=runtime).request_identity
+    assert identity_empty != build_b12_semantic_preparation(b1, runtime_config=runtime).request_identity
+    # Budget/runtime values are execution guards, deliberately not semantic input.
+    B12SemanticBudget("qwen-a", 200_000, 180_000)
+    B12SemanticBudget("qwen-b", 300_000, 280_000)
+    assert build_b12_semantic_preparation(empty, runtime_config=runtime).request_identity == identity_empty
+
+
+def test_b12_budget_fails_closed_before_provider_and_reserves_output_headroom(tmp_path):
+    from short_drama.adaptation import B12SemanticBudget, B12SemanticBudgetError
+    _tree, _packet, semantic = _semantic_preparation(tmp_path)
+    provider_calls = 0
+    with pytest.raises(B12SemanticBudgetError, match="requires an explicit"):
+        semantic.enforce_budget(None)
+    assert provider_calls == 0
+    model = semantic.runtime_config.request_model
+    with pytest.raises(B12SemanticBudgetError, match="input ceiling"):
+        semantic.enforce_budget(B12SemanticBudget(model, 999_999, semantic.measurement.provider_request_estimated_tokens - 1))
+    required = semantic.measurement.provider_request_estimated_tokens + semantic.measurement.reserved_output_tokens
+    with pytest.raises(B12SemanticBudgetError, match="reserved output"):
+        semantic.enforce_budget(B12SemanticBudget(model, required - 1, semantic.measurement.provider_request_estimated_tokens))
+    semantic.enforce_budget(B12SemanticBudget(model, required, semantic.measurement.provider_request_estimated_tokens))
+    assert provider_calls == 0
+
+
+def test_b12_wire_budget_matches_shared_adapter_without_network_and_never_understates(tmp_path):
+    from short_drama.adaptation import B12SemanticBudget, B12SemanticBudgetError, build_b12_semantic_preparation
+    from short_drama.llm import GenerationExecutionOptions, OpenAICompatibleLLMClient
+
+    _tree, packet_prep, semantic = _semantic_preparation(tmp_path)
+    adapter = OpenAICompatibleLLMClient(semantic.runtime_config)
+    mapped = adapter.build_request_body(
+        semantic.request.rendered_prompt, semantic.output_schema, semantic.semantic_profile,
+    )
+    expected = json.dumps(mapped, ensure_ascii=False).encode("utf-8")
+    assert semantic.provider_request_bytes == expected
+    assert semantic.measurement.provider_request_bytes == len(expected)
+    assert semantic.measurement.provider_request_estimated_tokens == (len(expected) + 2) // 3
+
+    disabled = build_b12_semantic_preparation(
+        packet_prep, runtime_config=semantic.runtime_config,
+        execution_options=GenerationExecutionOptions(prompt_context_reuse="disabled"),
+    )
+    disabled_body = adapter.build_request_body(
+        disabled.request.rendered_prompt, disabled.output_schema, disabled.semantic_profile,
+        execution_options=disabled.execution_options,
+    )
+    assert json.loads(disabled.provider_request_bytes) == disabled_body
+    assert disabled.provider_request_bytes == json.dumps(disabled_body, ensure_ascii=False).encode("utf-8")
+    assert json.loads(disabled.provider_request_bytes)["cache_prompt"] is False
+    assert disabled.measurement.provider_request_estimated_tokens > semantic.measurement.provider_request_estimated_tokens
+    with pytest.raises(B12SemanticBudgetError, match="input ceiling"):
+        disabled.enforce_budget(B12SemanticBudget(
+            disabled.runtime_config.request_model, 999_999,
+            semantic.measurement.provider_request_estimated_tokens,
+        ))
+
+
+def test_b12_requires_json_schema_mode_and_runtime_mapping_does_not_change_identity(tmp_path):
+    from short_drama.adaptation import AdaptationStrategyError, build_b12_semantic_preparation
+
+    _tree, packet_prep, semantic = _semantic_preparation(tmp_path)
+    other_runtime = replace(semantic.runtime_config, request_model="offline-qwen-test-model")
+    remapped = build_b12_semantic_preparation(packet_prep, runtime_config=other_runtime)
+    assert remapped.request_identity == semantic.request_identity
+    assert remapped.provider_request_bytes != semantic.provider_request_bytes
+    with pytest.raises(AdaptationStrategyError, match="structured_output_mode=json_schema"):
+        build_b12_semantic_preparation(
+            packet_prep, runtime_config=semantic.runtime_config,
+            semantic_profile=replace(semantic.semantic_profile, structured_output_mode="json_object"),
+        )
+    with pytest.raises(AdaptationStrategyError, match="requires an explicit exact RuntimeConfig"):
+        build_b12_semantic_preparation(packet_prep)
+
+
+def test_provider_proposal_schema_is_strict_and_acceptance_attaches_exact_preparation(tmp_path):
+    from short_drama.llm import validate_against_output_schema
+    from short_drama.llm.errors import LLMStructuredOutputError
+    _tree, packet_prep, semantic = _semantic_preparation(tmp_path)
+    valid = _proposal(_context_strategy(packet_prep.packet.resolved_target, packet_prep.packet.plotlines))
+    assert "resolved_target" not in semantic.output_schema.schema["properties"]
+    validate_against_output_schema(valid, semantic.output_schema)
+    accepted = semantic.decode_and_validate_proposal(valid)
+    assert accepted.resolved_target == packet_prep.packet.resolved_target
+    invalid_shape = dict(valid, resolved_target=packet_prep.packet.resolved_target.to_dict())
+    with pytest.raises(LLMStructuredOutputError):
+        validate_against_output_schema(invalid_shape, semantic.output_schema)
+    unknown = json.loads(json.dumps(valid))
+    unknown["series_climax_source_refs"] = [{"kind": "event", "canonical_id": "evt_999999"}]
+    with pytest.raises(AdaptationStrategyError, match="absent"):
+        semantic.decode_and_validate_proposal(unknown)
+    adapted_ending = json.loads(json.dumps(valid))
+    adapted_ending["ending_disposition"] = "adapted_ending"
+    with pytest.raises(AdaptationStrategyError, match="deliberate divergence"):
+        semantic.decode_and_validate_proposal(adapted_ending)

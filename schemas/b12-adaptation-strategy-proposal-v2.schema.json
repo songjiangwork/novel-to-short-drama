@@ -1,0 +1,387 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/b12-adaptation-strategy-proposal-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "adaptation_thesis_zh",
+    "dramatic_promise_zh",
+    "primary_dramatic_question_zh",
+    "plotline_strategies",
+    "character_strategies",
+    "relationship_strategies",
+    "reveal_strategies",
+    "series_climax_target_zh",
+    "series_climax_source_refs",
+    "ending_disposition",
+    "ending_strategy_zh",
+    "preservation_priorities",
+    "deliberate_divergences",
+    "explicit_conflicts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "adaptation_thesis_zh": {
+      "$ref": "#/$defs/text"
+    },
+    "dramatic_promise_zh": {
+      "$ref": "#/$defs/text"
+    },
+    "primary_dramatic_question_zh": {
+      "$ref": "#/$defs/text"
+    },
+    "plotline_strategies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/plotlineStrategy"
+      }
+    },
+    "character_strategies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/characterStrategy"
+      }
+    },
+    "relationship_strategies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relationshipStrategy"
+      }
+    },
+    "reveal_strategies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/revealStrategy"
+      }
+    },
+    "series_climax_target_zh": {
+      "$ref": "#/$defs/text"
+    },
+    "series_climax_source_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/sourceRef"
+      }
+    },
+    "ending_disposition": {
+      "enum": [
+        "source_ending_retained",
+        "source_ending_compressed",
+        "source_ending_reframed",
+        "adapted_ending"
+      ]
+    },
+    "ending_strategy_zh": {
+      "$ref": "#/$defs/text"
+    },
+    "preservation_priorities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/priority"
+      }
+    },
+    "deliberate_divergences": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/divergence"
+      }
+    },
+    "explicit_conflicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/conflict"
+      }
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?=.*\\S)[^\\u0000]+$"
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "canonical_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "character",
+            "location",
+            "fact",
+            "event",
+            "relationship",
+            "arc",
+            "turning_point",
+            "reveal",
+            "payoff"
+          ]
+        },
+        "canonical_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "plotlineStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plotline_handle",
+        "disposition",
+        "rationale_zh",
+        "merge_into_handle"
+      ],
+      "properties": {
+        "plotline_handle": {
+          "type": "string",
+          "pattern": "^a6pl_"
+        },
+        "disposition": {
+          "enum": [
+            "preserve",
+            "preserve_core",
+            "compress",
+            "merge_into",
+            "omit"
+          ]
+        },
+        "rationale_zh": {
+          "$ref": "#/$defs/text"
+        },
+        "merge_into_handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "characterStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref",
+        "disposition",
+        "rationale_zh"
+      ],
+      "properties": {
+        "source_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "canonical_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "character"
+            },
+            "canonical_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "disposition": {
+          "enum": [
+            "retain",
+            "reduce",
+            "omit",
+            "composite",
+            "retain_function"
+          ]
+        },
+        "rationale_zh": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "relationshipStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref",
+        "disposition",
+        "rationale_zh"
+      ],
+      "properties": {
+        "source_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "canonical_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "relationship"
+            },
+            "canonical_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "disposition": {
+          "enum": [
+            "preserve",
+            "preserve_core",
+            "compress",
+            "simplify",
+            "omit"
+          ]
+        },
+        "rationale_zh": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "revealStrategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref",
+        "disposition",
+        "rationale_zh"
+      ],
+      "properties": {
+        "source_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "canonical_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "reveal"
+            },
+            "canonical_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "disposition": {
+          "enum": [
+            "preserve",
+            "advance",
+            "delay",
+            "merge",
+            "omit",
+            "replace_mechanism"
+          ]
+        },
+        "rationale_zh": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "priority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref",
+        "priority"
+      ],
+      "properties": {
+        "source_ref": {
+          "$ref": "#/$defs/sourceRef"
+        },
+        "priority": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      }
+    },
+    "divergence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description_zh",
+        "source_refs",
+        "provenance"
+      ],
+      "properties": {
+        "description_zh": {
+          "$ref": "#/$defs/text"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "artifact_type": {
+          "const": "user_direction"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description_zh",
+        "source_refs",
+        "user_direction_refs"
+      ],
+      "properties": {
+        "description_zh": {
+          "$ref": "#/$defs/text"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          }
+        },
+        "user_direction_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          }
+        }
+      }
+    }
+  }
+}

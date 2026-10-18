@@ -572,6 +572,59 @@ def test_a3_chunk_extraction_v4_preserves_v3_rules():
     assert "OUTPUT FORMAT" in sys_text
 
 
+# ---------------------------------------------------------------------------
+# Tracked a3.chunk-extraction v5 (relationship endpoint attribution)
+# ---------------------------------------------------------------------------
+
+
+def test_a3_chunk_extraction_v5_loads_with_correct_hash():
+    """v5 has a new, independently pinned prompt identity."""
+    reg = PromptRegistry(PROMPTS_DIR)
+    spec = reg.load("a3.chunk-extraction", version=5)
+    assert spec.version == 5
+    assert spec.content_hash == "60cf3b91ad9ddd6a3da8be91217e236afa06b62f094068c2bd45fc26e05c76b3"
+    assert spec.required_variables == (
+        "chunk_id",
+        "left_context_json",
+        "ownership_json",
+        "right_context_json",
+    )
+    assert spec.content_hash == compute_prompt_content_hash(
+        prompt_id="a3.chunk-extraction",
+        version=5,
+        system_template=spec.system_template,
+        user_template=spec.user_template,
+        required_variables=list(spec.required_variables),
+    )
+
+
+def test_a3_chunk_extraction_v5_relationship_endpoint_attribution_examples():
+    """Regression: reported relationships must not bind to a mere listener."""
+    spec = PromptRegistry(PROMPTS_DIR).load("a3.chunk-extraction", version=5)
+    sys_text = spec.system_template
+    assert "RELATIONSHIP ENDPOINT ATTRIBUTION" in sys_text
+    assert "current communication" in sys_text
+    assert "relationship proposition" in sys_text
+    # Positive: the reported relationship has the reporter and third person.
+    assert "The teacher/student relationship is Mira–Oren; Ren is only the listener." in sys_text
+    # Negative: dialogue participation alone cannot create the relationship.
+    assert "Do NOT emit a teacher/student relationship between Mira and Ren" in sys_text
+    # Ambiguous: do not guess that the listener belongs to an unresolved "our".
+    assert "If “our” or the teacher cannot be resolved reliably" in sys_text
+    assert "do not make Ren an endpoint" in sys_text
+
+
+def test_a3_chunk_extraction_v5_preserves_v4_relationship_constraints():
+    """Endpoint attribution extends v4 rather than weakening its safeguards."""
+    sys_text = PromptRegistry(PROMPTS_DIR).load(
+        "a3.chunk-extraction", version=5
+    ).system_template
+    assert "RELATIONSHIPS CONNECT TWO DISTINCT ENTITIES" in sys_text
+    assert "source_ref` and `target_ref` MUST reference different candidate IDs" in sys_text
+    assert "Never emit a self-referential relationship" in sys_text
+    assert "UNRESOLVED IS VALID" in sys_text
+
+
 def test_tracked_semantic_profile_max_output_tokens():
     """Tracked story-extraction semantic profile has max_output_tokens == 32768."""
     from short_drama.llm import load_semantic_profile

@@ -125,7 +125,7 @@ def test_b13_requires_exhaustive_disposition_and_mapping_integrity():
     with pytest.raises(B13DispositionError, match="cover exactly"):
         replace(plan, event_dispositions=plan.event_dispositions[:-1])
     mappings_without_keep = tuple(item for item in plan.adaptation_mappings if item.source_ref.canonical_id != "evt_000001")
-    with pytest.raises(B13DispositionError, match="requires an active mapping"):
+    with pytest.raises(B13DispositionError, match="active event mapping"):
         replace(plan, adaptation_mappings=mappings_without_keep)
     omitted = next(item for item in plan.event_dispositions if item.source_event_ref.canonical_id == "evt_000004")
     omitted_beat = AdaptedStoryBeat("omitted-event", "不应被采用的事件。", "source_direct", "compatible", (omitted.source_event_ref,))
@@ -133,11 +133,33 @@ def test_b13_requires_exhaustive_disposition_and_mapping_integrity():
         omitted.source_event_ref, AdaptedEndpoint("story_beat", omitted_beat.adapted_story_beat_id),
         "supporting", "保留。", "借用。", "错误输入。",
     )
-    with pytest.raises(B13DispositionError, match="omit event forbids"):
+    with pytest.raises(B13DispositionError, match="omit event"):
         replace(plan, adapted_story_beats=(*plan.adapted_story_beats, omitted_beat), adaptation_mappings=(*plan.adaptation_mappings, extra_active))
 
 
-def test_b13_merge_requires_multi_source_composite_and_participants_resolve():
+def test_b13_rejects_omitted_event_materialized_without_active_mapping():
+    plan = _plan()
+    omitted = next(item for item in plan.event_dispositions if item.source_event_ref.canonical_id == "evt_000004")
+    omitted_beat = AdaptedStoryBeat("omitted-without-mapping", "错误地具象化已删除事件。", "source_direct", "compatible", (omitted.source_event_ref,))
+    with pytest.raises(B13DispositionError, match="omit event must not be materialized"):
+        replace(plan, adapted_story_beats=(*plan.adapted_story_beats, omitted_beat))
+
+
+def test_b13_requires_active_mapping_for_each_source_backed_beat_membership():
+    plan = _plan()
+    kept = next(item for item in plan.event_dispositions if item.source_event_ref.canonical_id == "evt_000001")
+    split_beat = AdaptedStoryBeat("kept-split", "同一事件的第二个改编落点。", "source_direct", "compatible", (kept.source_event_ref,))
+    with pytest.raises(B13DispositionError, match="corresponding active event mapping"):
+        replace(plan, adapted_story_beats=(*plan.adapted_story_beats, split_beat))
+    inactive = AdaptationMapping(
+        kept.source_event_ref, AdaptedEndpoint("story_beat", split_beat.adapted_story_beat_id),
+        "supporting", "保留后果。", "拆分呈现。", "保留的历史映射。", active=False,
+    )
+    with pytest.raises(B13DispositionError, match="corresponding active event mapping"):
+        replace(plan, adapted_story_beats=(*plan.adapted_story_beats, split_beat), adaptation_mappings=(*plan.adaptation_mappings, inactive))
+
+
+def test_b13_merge_member_rejects_independent_active_beat_and_participants_resolve():
     plan = _plan()
     merge_event = next(item for item in plan.event_dispositions if item.source_event_ref.canonical_id == "evt_000002")
     wrong_beat = AdaptedStoryBeat("wrong-merge", "未合并的错误版本。", "source_direct", "compatible", (merge_event.source_event_ref,))
@@ -145,12 +167,29 @@ def test_b13_merge_requires_multi_source_composite_and_participants_resolve():
         merge_event.source_event_ref, AdaptedEndpoint("story_beat", wrong_beat.adapted_story_beat_id),
         "primary", "保留。", "错误地未合并。", "错误输入。",
     )
-    with pytest.raises(B13DispositionError, match="multi-source source_composite"):
-        replace(plan, adapted_story_beats=(*plan.adapted_story_beats, wrong_beat), adaptation_mappings=tuple(item for item in plan.adaptation_mappings if item.source_ref != merge_event.source_event_ref) + (wrong_target,))
+    with pytest.raises(B13DispositionError, match="must map only to multi-source source_composite"):
+        replace(plan, adapted_story_beats=(*plan.adapted_story_beats, wrong_beat), adaptation_mappings=(*plan.adaptation_mappings, wrong_target))
     broken = copy.deepcopy(plan)
     object.__setattr__(broken.adapted_story_beats[0], "participants", (BeatParticipant("adapted_character", "adapted_char_missing"),))
     with pytest.raises(B13DispositionError, match="does not resolve"):
         broken.validate()
+
+
+def test_b13_allows_multiple_composite_destinations_and_invented_anchors():
+    plan = _plan()
+    refs = {(item.kind, item.canonical_id): item for item in plan.source_snapshot.canonical_references}
+    second_composite = AdaptedStoryBeat(
+        "confrontation-echo", "同一对冲突在另一段改编节拍中回响。", "source_composite", "compatible",
+        (refs["event", "evt_000002"], refs["event", "evt_000003"]),
+    )
+    second_mappings = (
+        AdaptationMapping(refs["event", "evt_000002"], AdaptedEndpoint("story_beat", second_composite.adapted_story_beat_id), "supporting", "保留冲突作用。", "拆分为第二个复合节拍。", "B1.3 一对多映射。"),
+        AdaptationMapping(refs["event", "evt_000003"], AdaptedEndpoint("story_beat", second_composite.adapted_story_beat_id), "supporting", "保留冲突作用。", "拆分为第二个复合节拍。", "B1.3 一对多映射。"),
+    )
+    split = replace(plan, adapted_story_beats=(*plan.adapted_story_beats, second_composite), adaptation_mappings=(*plan.adaptation_mappings, *second_mappings))
+    assert len([item for item in split.adaptation_mappings if item.source_ref == refs["event", "evt_000002"] and item.active]) == 2
+    invented = next(item for item in split.adapted_story_beats if item.origin.value == "adaptation_invented")
+    assert invented.canonical_anchor_refs == (refs["event", "evt_000001"], refs["fact", "fact_000001"])
 
 
 def test_b13_rejects_invalid_anonymous_role_lifetime_and_overlay_refs():

@@ -540,6 +540,7 @@ class B13DispositionPlan:
         if any(count != 1 for count in anonymous_uses.values()):
             raise B13DispositionError("AnonymousRole must resolve exactly one material beat participant")
         active_event_mappings: dict[CanonicalTargetReference, list[AdaptationMapping]] = {ref: [] for ref in event_refs}
+        active_event_destinations: set[tuple[CanonicalTargetReference, str]] = set()
         for mapping in self.adaptation_mappings:
             if mapping.source_ref not in snapshot_refs:
                 raise B13DispositionError("mapping source_ref is absent from exact source snapshot")
@@ -553,6 +554,8 @@ class B13DispositionPlan:
                 if mapping.source_ref.kind != "event" and mapping.source_ref not in beat.canonical_anchor_refs:
                     raise B13DispositionError("non-event beat mapping must be declared by a canonical anchor")
             else:
+                if mapping.source_ref.kind == "event":
+                    raise B13DispositionError("event mapping must target an adapted story beat")
                 character = characters.get(endpoint.adapted_id)
                 if character is None:
                     raise B13DispositionError("mapping adapted character endpoint does not resolve")
@@ -560,6 +563,14 @@ class B13DispositionPlan:
                     raise B13DispositionError("character mapping must be backed by character function provenance")
             if mapping.active and mapping.source_ref.kind == "event":
                 active_event_mappings[mapping.source_ref].append(mapping)
+                active_event_destinations.add((mapping.source_ref, endpoint.adapted_id))
+        for beat in beats.values():
+            for event_ref in beat.source_event_refs:
+                disposition = dispositions[event_ref].disposition
+                if disposition is CanonicalEventDisposition.OMIT:
+                    raise B13DispositionError("omit event must not be materialized in an adapted story beat")
+                if (event_ref, beat.adapted_story_beat_id) not in active_event_destinations:
+                    raise B13DispositionError("source-backed adapted story beat requires a corresponding active event mapping")
         for event_ref, disposition in dispositions.items():
             active = active_event_mappings[event_ref]
             if disposition.disposition is CanonicalEventDisposition.OMIT:
@@ -569,8 +580,8 @@ class B13DispositionPlan:
             if not active:
                 raise B13DispositionError("keep/compress/merge_member event requires an active mapping")
             if disposition.disposition is CanonicalEventDisposition.MERGE_MEMBER:
-                if not any(beats[mapping.adapted_endpoint.adapted_id].origin is AdaptedStoryBeatOrigin.SOURCE_COMPOSITE and len(beats[mapping.adapted_endpoint.adapted_id].source_event_refs) >= 2 for mapping in active):
-                    raise B13DispositionError("merge_member event requires an active mapping to a multi-source source_composite beat")
+                if any(beats[mapping.adapted_endpoint.adapted_id].origin is not AdaptedStoryBeatOrigin.SOURCE_COMPOSITE or len(beats[mapping.adapted_endpoint.adapted_id].source_event_refs) < 2 for mapping in active):
+                    raise B13DispositionError("merge_member event must map only to multi-source source_composite beats")
         overlay = self.continuity_overlay
         if any(item.source_fact_ref not in snapshot_refs for item in overlay.factual_divergences):
             raise B13DispositionError("continuity factual divergence references source outside exact snapshot")

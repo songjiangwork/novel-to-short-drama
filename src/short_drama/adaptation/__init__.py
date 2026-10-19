@@ -1,7 +1,7 @@
 """B1 adaptation-domain contracts.
 
-Only B1.1 target normalization belongs here.  This package deliberately does
-not plan events, episodes, or publish an AdaptationPlan.
+This package deliberately does not plan chronology, presentation entries,
+episodes, or publish an AdaptationPlan.
 """
 
 from .target import (
@@ -42,6 +42,16 @@ from .strategy_execution import (
     B12StrategyPublication, b12_strategy_artifact_id,
     b12_strategy_pointer_id, execute_b12_strategy,
 )
+from .disposition import (
+    B13_DISPOSITION_SCHEMA_VERSION, B13DispositionError, B13DispositionPlan,
+    AdaptationMapping, AdaptedCharacter, AdaptedCharacterOrigin,
+    AdaptedContinuityOverlay, AdaptedEndpoint, AdaptedEndpointKind,
+    AdaptedFactDivergence, AdaptedStoryBeat, AdaptedStoryBeatOrigin,
+    AnonymousRole, AnonymousRoleKind, BeatParticipant, CanonCompatibility,
+    CanonicalEventDisposition, CharacterFunctionProvenance, ContinuityStoryState,
+    EventDisposition, InventedBeatPurpose, MappingContributionRole,
+    ParticipantKind, RelationshipArcRequirement,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -61,4 +71,12 @@ __all__ = [
     "B12SemanticGenerationPolicy", "B12SemanticProvenanceError", "B12StrategyArtifact",
     "B12StrategyPublication", "b12_strategy_artifact_id",
     "b12_strategy_pointer_id", "execute_b12_strategy",
+    "B13_DISPOSITION_SCHEMA_VERSION", "B13DispositionError", "B13DispositionPlan",
+    "AdaptationMapping", "AdaptedCharacter", "AdaptedCharacterOrigin",
+    "AdaptedContinuityOverlay", "AdaptedEndpoint", "AdaptedEndpointKind",
+    "AdaptedFactDivergence", "AdaptedStoryBeat", "AdaptedStoryBeatOrigin",
+    "AnonymousRole", "AnonymousRoleKind", "BeatParticipant", "CanonCompatibility",
+    "CanonicalEventDisposition", "CharacterFunctionProvenance", "ContinuityStoryState",
+    "EventDisposition", "InventedBeatPurpose", "MappingContributionRole",
+    "ParticipantKind", "RelationshipArcRequirement",
 ]

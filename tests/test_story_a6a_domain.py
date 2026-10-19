@@ -113,7 +113,7 @@ def test_semantic_profile_and_four_prompts_are_tracked_and_backend_neutral():
         "a6.character-analysis": ("character_context_json", "3e8b1ed4a1b5981c31a4e4caadcb482dde4af8ed32f045ad918c5af4878c0e0d"),
         "a6.plot-window-analysis": ("window_context_json", "41a4b489a3745ae3f8bc96f478bbc4a3d97a9a05665b3ea930c31ae0d7c1c22a"),
         "a6.global-skeleton": ("global_context_json", "b4f89fbd52e57bd4102cdaa40ffca9d1acfb62452c1e0133a8891985c51cf218"),
-        "a6.story-bible-synthesis": ("story_context_json", "bdeb964ac8408b95de5946677cedb6a97f607685c2afe002a3ab1a8d34972bc9"),
+        "a6.story-bible-synthesis": ("story_context_json", "9bca8a085f1064d2b3cb997d3f185959dff3bbe515237b9ab784f254243c3be8"),
     }
     for prompt_id, (variable, expected_hash) in expected.items():
         asset = registry.load(prompt_id, version=1)

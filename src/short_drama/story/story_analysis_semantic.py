@@ -97,6 +97,23 @@ from .story_analysis_planning import (
 #: The exact A6C character semantic pass prompt (frozen, reviewed).
 A6C_CHARACTER_PROMPT_ID = "a6.character-analysis"
 A6C_CHARACTER_PROMPT_VERSION = 1
+#: The separately versioned A6C attribution-fidelity prompt.
+A6C_CHARACTER_PROMPT_V2_VERSION = 2
+#: Closed set of reviewed orchestration-profile / A6C-prompt selections.
+#:
+#: This deliberately is not a general "accept any prompt version" escape
+#: hatch.  Profile v1 remains exactly pinned to prompt v1, while the new
+#: profile v2 is the only approved route to the reviewed prompt v2.
+_A6C_PROFILE_PROMPT_SELECTIONS: dict[str, tuple[str, int]] = {
+    "global-story-analysis-v1": (
+        A6C_CHARACTER_PROMPT_ID,
+        A6C_CHARACTER_PROMPT_VERSION,
+    ),
+    "global-story-analysis-v2": (
+        A6C_CHARACTER_PROMPT_ID,
+        A6C_CHARACTER_PROMPT_V2_VERSION,
+    ),
+}
 #: The exact A6C character analysis output schema (frozen, reviewed).
 A6C_CHARACTER_OUTPUT_SCHEMA_ID = "a6-character-analysis-output"
 A6C_CHARACTER_OUTPUT_SCHEMA_VERSION = 1
@@ -227,18 +244,21 @@ def _verify_character_profile(
             f"got {profile.max_generation_rounds}"
         )
     ca = profile.character_analysis
+    expected_prompt = _A6C_PROFILE_PROMPT_SELECTIONS.get(profile.profile_id)
+    if expected_prompt is None:
+        raise StoryAnalysisSemanticError(
+            "unsupported A6C orchestration profile "
+            f"{profile.profile_id!r}; refusing unconstrained prompt selection"
+        )
     if ca.semantic_profile_id != A6C_SEMANTIC_PROFILE_ID:
         raise StoryAnalysisSemanticError(
             f"character_analysis.semantic_profile_id must be "
             f"{A6C_SEMANTIC_PROFILE_ID!r}, got {ca.semantic_profile_id!r}"
         )
-    if (
-        ca.prompt_id != A6C_CHARACTER_PROMPT_ID
-        or ca.prompt_version != A6C_CHARACTER_PROMPT_VERSION
-    ):
+    if (ca.prompt_id, ca.prompt_version) != expected_prompt:
         raise StoryAnalysisSemanticError(
             f"character_analysis prompt must be "
-            f"{A6C_CHARACTER_PROMPT_ID!r} v{A6C_CHARACTER_PROMPT_VERSION}, got "
+            f"{expected_prompt[0]!r} v{expected_prompt[1]}, got "
             f"{ca.prompt_id!r} v{ca.prompt_version}"
         )
     if (
@@ -333,7 +353,8 @@ def build_character_semantic_preparation(
     """
     _verify_character_profile(profile, semantic_profile)
     prompt_spec = prompts.load(
-        A6C_CHARACTER_PROMPT_ID, version=A6C_CHARACTER_PROMPT_VERSION
+        profile.character_analysis.prompt_id,
+        version=profile.character_analysis.prompt_version,
     )
     output_schema = load_character_output_schema()
     prompt_identity = PromptAssetIdentity(

@@ -1,0 +1,2 @@
+Character canonical context:
+{{character_context_json}}

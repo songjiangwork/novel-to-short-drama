@@ -45,16 +45,20 @@ class B12SemanticAssetSelection:
     output_schema: OutputSchema
 
 
-_B12_SEMANTIC_ASSET_PATHS: dict[int, tuple[str, str, str]] = {
+_B12_SEMANTIC_ASSET_IDENTITIES: dict[int, tuple[str, str, str, str, str]] = {
     1: (
         "adaptation_strategy_llm_v1.yaml",
         "b12-adaptation-strategy-proposal.schema.json",
         "b12-adaptation-strategy-llm-v1",
+        "28d1b8c937b3a99871be6ec499c95fb5cc0a77d79b051af685b255092a76d850",
+        "3669b0d9759ab604c10459ad5cd720c51397fd5f76ef404c856612e20c204e94",
     ),
     2: (
         "adaptation_strategy_llm_v2.yaml",
         "b12-adaptation-strategy-proposal-v2.schema.json",
         "b12-adaptation-strategy-llm-v2",
+        "eae73f144708002eb9d6da652fc26fe6d684d0eae3ad600f7bba01ca1ea41018",
+        "2148703d5cc06bf44b137baa86447f1af4206bb7133dda14114df1745591ed2b",
     ),
 }
 
@@ -172,7 +176,13 @@ def load_b12_semantic_assets(*, version: int = 1) -> B12SemanticAssetSelection:
     an unsupported version is an operator error before request construction.
     """
     try:
-        profile_name, schema_name, expected_profile_id = _B12_SEMANTIC_ASSET_PATHS[version]
+        (
+            profile_name,
+            schema_name,
+            expected_profile_id,
+            expected_profile_hash,
+            expected_schema_hash,
+        ) = _B12_SEMANTIC_ASSET_IDENTITIES[version]
     except (KeyError, TypeError):
         raise AdaptationStrategyError(
             f"unsupported B1.2 semantic asset version {version!r}; supported versions are 1 and 2"
@@ -190,6 +200,10 @@ def load_b12_semantic_assets(*, version: int = 1) -> B12SemanticAssetSelection:
     if profile.profile_id != expected_profile_id:
         raise AdaptationStrategyError(
             f"B1.2 semantic profile ID is not the pinned v{version} asset"
+        )
+    if profile.semantic_profile_hash != expected_profile_hash:
+        raise AdaptationStrategyError(
+            f"B1.2 semantic profile content hash does not match the pinned v{version} asset"
         )
     if profile.structured_output_mode != "json_schema":
         raise AdaptationStrategyError(
@@ -210,6 +224,10 @@ def load_b12_semantic_assets(*, version: int = 1) -> B12SemanticAssetSelection:
         schema_version=version,
         schema=data,
     )
+    if output_schema.schema_hash != expected_schema_hash:
+        raise AdaptationStrategyError(
+            f"B1.2 provider proposal schema content hash does not match the pinned v{version} asset"
+        )
     return B12SemanticAssetSelection(version, profile, output_schema)
 
 

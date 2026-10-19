@@ -9,10 +9,12 @@ from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import json
+import shutil
 
 import pytest
 from jsonschema import Draft202012Validator
 
+import short_drama.adaptation.strategy_semantic as strategy_semantic
 from short_drama.adaptation import (
     AdaptationStrategyError, B12SemanticBudget, B12SemanticBudgetError,
     build_b12_semantic_preparation, load_b12_semantic_assets,
@@ -27,7 +29,10 @@ from test_adaptation_strategy import _semantic_preparation
 
 V1_SCHEMA = "b12-adaptation-strategy-proposal.schema.json"
 V2_SCHEMA = "b12-adaptation-strategy-proposal-v2.schema.json"
+V1_SCHEMA_HASH = "3669b0d9759ab604c10459ad5cd720c51397fd5f76ef404c856612e20c204e94"
 V2_SCHEMA_HASH = "2148703d5cc06bf44b137baa86447f1af4206bb7133dda14114df1745591ed2b"
+V1_PROFILE_HASH = "28d1b8c937b3a99871be6ec499c95fb5cc0a77d79b051af685b255092a76d850"
+V2_PROFILE_HASH = "eae73f144708002eb9d6da652fc26fe6d684d0eae3ad600f7bba01ca1ea41018"
 V2_PROFILE_FILE_SHA256 = "b0e1db9901eb2d419039de29eabe231d32bbfeb4b25c6892da9a492b6d5dc586"
 TYPED_REFS = (
     ("characterStrategy", "character"),
@@ -38,6 +43,13 @@ TYPED_REFS = (
 
 def _v2_schema() -> dict:
     return load_json(SCHEMAS_DIR / V2_SCHEMA)
+
+
+def _temporary_b12_asset_root(tmp_path):
+    root = tmp_path / "asset-root"
+    shutil.copytree(PROFILES_DIR, root / "profiles")
+    shutil.copytree(SCHEMAS_DIR, root / "schemas")
+    return root
 
 
 def test_v2_schema_is_exactly_three_flattened_refs_and_new_id():
@@ -126,6 +138,10 @@ def test_closed_selection_loads_only_the_matching_v1_or_v2_pair():
     )
     assert v1.semantic_profile.semantic_profile_hash != v2.semantic_profile.semantic_profile_hash
     assert v1.output_schema.schema_hash != v2.output_schema.schema_hash
+    assert v1.semantic_profile.semantic_profile_hash == V1_PROFILE_HASH
+    assert v1.output_schema.schema_hash == V1_SCHEMA_HASH
+    assert v2.semantic_profile.semantic_profile_hash == V2_PROFILE_HASH
+    assert v2.output_schema.schema_hash == V2_SCHEMA_HASH
 
 
 @pytest.mark.parametrize("version", (0, 3, True, "2", None))
@@ -153,6 +169,59 @@ def test_preparation_rejects_missing_cross_version_or_altered_assets(tmp_path):
             v1.preparation, runtime_config=v1.runtime_config,
             semantic_profile=replace(v1_assets.semantic_profile, max_output_tokens=8193),
             output_schema=v1_assets.output_schema,
+        )
+
+
+@pytest.mark.parametrize(
+    ("version", "profile_name", "old_output_ceiling", "new_output_ceiling"),
+    (
+        (1, "adaptation_strategy_llm_v1.yaml", 8192, 8193),
+        (2, "adaptation_strategy_llm_v2.yaml", 57344, 57343),
+    ),
+)
+def test_profile_content_tampering_at_canonical_filename_fails_before_request(
+    tmp_path, monkeypatch, version, profile_name, old_output_ceiling, new_output_ceiling,
+):
+    _tree, _prepared, semantic = _semantic_preparation(tmp_path / "preparation")
+    root = _temporary_b12_asset_root(tmp_path)
+    profile_path = root / "profiles" / profile_name
+    profile_path.write_text(
+        profile_path.read_text(encoding="utf-8").replace(
+            f"max_output_tokens: {old_output_ceiling}",
+            f"max_output_tokens: {new_output_ceiling}",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strategy_semantic, "REPO_ROOT", root)
+    with pytest.raises(AdaptationStrategyError, match="semantic profile content hash"):
+        load_b12_semantic_assets(version=version)
+    with pytest.raises(AdaptationStrategyError, match="semantic profile content hash"):
+        build_b12_semantic_preparation(
+            semantic.preparation, semantic_asset_version=version,
+            runtime_config=semantic.runtime_config,
+        )
+
+
+@pytest.mark.parametrize(
+    ("version", "schema_name"),
+    ((1, V1_SCHEMA), (2, V2_SCHEMA)),
+)
+def test_schema_content_tampering_at_canonical_filename_fails_before_request(
+    tmp_path, monkeypatch, version, schema_name,
+):
+    _tree, _prepared, semantic = _semantic_preparation(tmp_path / "preparation")
+    root = _temporary_b12_asset_root(tmp_path)
+    schema_path = root / "schemas" / schema_name
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema["properties"]["schema_version"]["const"] = 99
+    schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(strategy_semantic, "REPO_ROOT", root)
+    with pytest.raises(AdaptationStrategyError, match="schema content hash"):
+        load_b12_semantic_assets(version=version)
+    with pytest.raises(AdaptationStrategyError, match="schema content hash"):
+        build_b12_semantic_preparation(
+            semantic.preparation, semantic_asset_version=version,
+            runtime_config=semantic.runtime_config,
         )
 
 

@@ -291,7 +291,7 @@ def test_versioned_story_extraction_profiles_preserve_v1_and_select_v5():
     prompt = PromptRegistry(PROMPTS_STORY_DIR).load(
         v2.prompt_id, version=v2.prompt_version
     )
-    assert prompt.content_hash == "60cf3b91ad9ddd6a3da8be91217e236afa06b62f094068c2bd45fc26e05c76b3"
+    assert prompt.content_hash == "87c8908bb0ccefcf5dde3e8b98a3e7493444ee606f56911e7ea6d23945193bdf"
     assert _validate(v2.to_dict(), _schema("story-extraction-profile.schema.json")) == []
 
 

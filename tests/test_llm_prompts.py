@@ -582,7 +582,7 @@ def test_a3_chunk_extraction_v5_loads_with_correct_hash():
     reg = PromptRegistry(PROMPTS_DIR)
     spec = reg.load("a3.chunk-extraction", version=5)
     assert spec.version == 5
-    assert spec.content_hash == "60cf3b91ad9ddd6a3da8be91217e236afa06b62f094068c2bd45fc26e05c76b3"
+    assert spec.content_hash == "87c8908bb0ccefcf5dde3e8b98a3e7493444ee606f56911e7ea6d23945193bdf"
     assert spec.required_variables == (
         "chunk_id",
         "left_context_json",
@@ -623,6 +623,17 @@ def test_a3_chunk_extraction_v5_preserves_v4_relationship_constraints():
     assert "source_ref` and `target_ref` MUST reference different candidate IDs" in sys_text
     assert "Never emit a self-referential relationship" in sys_text
     assert "UNRESOLVED IS VALID" in sys_text
+
+
+def test_a3_chunk_extraction_v5_changes_v4_system_text_only_by_rule_6c():
+    """v4 wording, including 5d, is immutable inside the v5 successor."""
+    registry = PromptRegistry(PROMPTS_DIR)
+    v4 = registry.load("a3.chunk-extraction", version=4).system_template
+    v5 = registry.load("a3.chunk-extraction", version=5).system_template
+
+    before_rule_6c, rule_and_suffix = v5.split("\n6c.", maxsplit=1)
+    _rule_6c, after_rule_6c = rule_and_suffix.split("\n7.", maxsplit=1)
+    assert before_rule_6c + "\n7." + after_rule_6c == v4
 
 
 def test_tracked_semantic_profile_max_output_tokens():

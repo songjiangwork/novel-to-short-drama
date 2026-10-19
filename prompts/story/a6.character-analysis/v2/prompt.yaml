@@ -1,0 +1,5 @@
+schema_version: 1
+prompt_id: a6.character-analysis
+version: 2
+required_variables: [character_context_json]
+content_hash: 620d4fd753ef0437d7bd0d74d52b9649fb94ce33cb77a200b61f38a0414accf7

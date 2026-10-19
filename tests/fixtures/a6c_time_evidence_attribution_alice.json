@@ -1,0 +1,109 @@
+{
+  "fixture_version": 1,
+  "source_snapshot": {
+    "a5_manifest": {
+      "artifact_type": "consolidation_manifest",
+      "artifact_id": "a3e-real-novel.src_001.a5.consolidation-v1.manifest",
+      "revision": 1,
+      "content_hash": "02973505f6a499e075d003120ad83305a42f315e5fe1b313a786e8182581903a"
+    },
+    "saved_character_analysis": {
+      "archive": "alice-100k-out32k-quality-v3",
+      "character_ref": "char_0033",
+      "request_identity_hash": "2fe9717d7ec2597b4510e2bcc3a23634e4e388ae7e462d26ae8e4aaa28521d86",
+      "incorrect_explicit_claim": "Time 在去年三月与疯帽匠发生了争吵，随后 Time 'went mad'（发疯）。",
+      "incorrect_explicit_trait": "疯（went mad）"
+    }
+  },
+  "character_evidence_package": {
+    "character_ref": "char_0033",
+    "character": {
+      "canonical_id": "char_0033",
+      "entity_type": "character",
+      "display_name_original": "Time",
+      "aliases_original": ["Time"],
+      "candidate_refs": ["CH007_C001:cand_char_005"],
+      "first_appearance_candidate_ref": "CH007_C001:cand_char_005"
+    },
+    "related_facts": [
+      {
+        "fact_id": "fact_000113",
+        "fact_type": "world_fact",
+        "statement_zh": "自从疯帽匠与时间争吵后，时间不再配合他，现在总是六点。",
+        "subject_refs": ["char_0033"],
+        "object_refs": ["char_0033"],
+        "candidate_fact_refs": ["CH007_C001:cand_fact_005"],
+        "evidence_refs": [
+          {
+            "paragraph_id": "CH007_P0057",
+            "role": "primary",
+            "strength": "explicit",
+            "excerpt": "“And ever since that,” the Hatter went on in a mournful tone, “he won’t do a thing I ask! It’s always six o’clock now.”"
+          }
+        ],
+        "first_source_order": "000007:000000361:01:000000005:CH007_C001:cand_fact_005",
+        "continuity_relevant": false
+      }
+    ],
+    "participating_events": [
+      {
+        "event_id": "evt_000116",
+        "narrative_order": 116,
+        "summary_zh": "疯帽匠讲述了他去年三月与时间争吵的经历，当时是在红心女王举办的音乐会上。",
+        "participants": ["char_0030", "char_0033", "char_0026"],
+        "locations": ["loc_0015"],
+        "temporal_mode": "flashback",
+        "candidate_event_refs": ["CH007_C001:cand_evt_007"],
+        "evidence_refs": [
+          {
+            "paragraph_id": "CH007_P0048",
+            "role": "primary",
+            "strength": "explicit",
+            "excerpt": "“We quarrelled last March—just before he went mad, you know—” (pointing with his tea spoon at the March Hare,) “—it was at the great concert given by the Queen of Hearts, and I had to sing"
+          }
+        ],
+        "first_source_order": "000007:000000352:02:000000007:CH007_C001:cand_evt_007"
+      }
+    ],
+    "relationships": [
+      {
+        "relationship_id": "rel_000032",
+        "source_entity_ref": "char_0030",
+        "target_entity_ref": "char_0033",
+        "direction": "directed",
+        "relationship_type_zh": "冲突/争吵",
+        "candidate_relationship_refs": ["CH007_C001:cand_rel_005"],
+        "state_history": [
+          {
+            "state_zh": "疯帽匠与时间在去年三月发生了争吵。",
+            "candidate_relationship_refs": ["CH007_C001:cand_rel_005"],
+            "evidence_refs": [
+              {
+                "paragraph_id": "CH007_P0048",
+                "role": "primary",
+                "strength": "explicit",
+                "excerpt": "“We quarrelled last March—just before he went mad, you know—”"
+              }
+            ],
+            "narrative_order": 87
+          }
+        ],
+        "first_source_order": "000007:000000352:03:000000005:CH007_C001:cand_rel_005"
+      }
+    ],
+    "state_transitions": [],
+    "story_conflicts": [],
+    "linked_unresolved": []
+  },
+  "character_evidence_package_content_hash": "d2112571807541ab12e1ec0bd2c0d672f141696596db5bfbbebd39e668a82c56",
+  "expected_subject_attribution": {
+    "event_ref": "evt_000116",
+    "event_proposition": "疯帽匠与时间争吵",
+    "reported_action": "went mad",
+    "reported_action_subject": "char_0026",
+    "reason": "CH007_P0048 的括号说明明确指向 March Hare（char_0026）。",
+    "separate_fact_ref": "fact_000113",
+    "separate_fact_proposition": "Time 不再配合疯帽匠；这不支持 Time 发疯。"
+  },
+  "test_limit": "该 fixture 和零提供方测试只能验证输入证据、版本选择与提示词内容；它们不能证明任何实际 Qwen 运行一定遵守该语义指导。"
+}

@@ -30,6 +30,8 @@ bindings, not mocks).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,13 @@ from short_drama.llm.errors import (
     LLMTransportError,
 )
 from short_drama.llm.openai_compatible import validate_against_output_schema
+from short_drama.artifacts import content_hash
+from short_drama.story.consolidation import (
+    CanonicalEvent,
+    CanonicalFact,
+    CanonicalRelationship,
+)
+from short_drama.story.reconciliation import CanonicalEntity
 from test_story_a5f2_current_publication import (
     CONSOLIDATION_PROFILE_ID,
     DOCUMENT,
@@ -900,6 +909,184 @@ def test_request_identity_changes_when_semantic_field_changes(tmp_path: Path) ->
     assert base_prep.character_request_hashes != other_prep.character_request_hashes
     # But the character refs and packet hashes are unchanged (input-driven).
     assert base_prep.character_refs == other_prep.character_refs
+
+
+# ---------------------------------------------------------------------------
+# Issue #129 — saved Alice A6C attribution evidence and v2 selection.
+# ---------------------------------------------------------------------------
+
+
+_ISSUE_129_FIXTURE = (
+    REPO_ROOT / "tests" / "fixtures" / "a6c_time_evidence_attribution_alice.json"
+)
+
+
+def _issue_129_fixture() -> dict:
+    return json.loads(_ISSUE_129_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _fixture_character_package(fixture: dict) -> CharacterEvidencePackage:
+    package = fixture["character_evidence_package"]
+    return CharacterEvidencePackage(
+        character_ref=package["character_ref"],
+        character=CanonicalEntity.from_dict(package["character"]),
+        related_facts=tuple(
+            CanonicalFact.from_dict(item) for item in package["related_facts"]
+        ),
+        participating_events=tuple(
+            CanonicalEvent.from_dict(item)
+            for item in package["participating_events"]
+        ),
+        relationships=tuple(
+            CanonicalRelationship.from_dict(item)
+            for item in package["relationships"]
+        ),
+        state_transitions=(),
+        story_conflicts=(),
+        linked_unresolved=(),
+    )
+
+
+def test_issue_129_alice_fixture_preserves_exact_a5_attribution_evidence() -> None:
+    fixture = _issue_129_fixture()
+    package = fixture["character_evidence_package"]
+    event = package["participating_events"][0]
+    fact = package["related_facts"][0]
+    relationship = package["relationships"][0]
+    expected = fixture["expected_subject_attribution"]
+
+    # The fixture is an exact, canonicalizable saved A6C package from the
+    # Alice A5 manifest, not a newly retrieved source fragment.
+    assert content_hash(package) == fixture["character_evidence_package_content_hash"]
+    assert fixture["source_snapshot"]["a5_manifest"]["content_hash"] == (
+        "02973505f6a499e075d003120ad83305a42f315e5fe1b313a786e8182581903a"
+    )
+    assert event["event_id"] == expected["event_ref"] == "evt_000116"
+    assert event["evidence_refs"][0]["paragraph_id"] == "CH007_P0048"
+    assert "pointing with his tea spoon at the March Hare" in event["evidence_refs"][0]["excerpt"]
+    assert event["participants"] == ["char_0030", "char_0033", "char_0026"]
+    assert relationship["relationship_id"] == "rel_000032"
+    assert relationship["source_entity_ref"] == "char_0030"
+    assert relationship["target_entity_ref"] == "char_0033"
+    assert fact["fact_id"] == expected["separate_fact_ref"] == "fact_000113"
+    assert fact["subject_refs"] == fact["object_refs"] == ["char_0033"]
+    assert fact["evidence_refs"][0]["paragraph_id"] == "CH007_P0057"
+
+    # The archived v1 output made the false explicit claim.  The parenthetical
+    # resolves the reported action to char_0026; fact_000113 is a distinct
+    # non-cooperation proposition about char_0033.
+    saved = fixture["source_snapshot"]["saved_character_analysis"]
+    assert "Time 'went mad'" in saved["incorrect_explicit_claim"]
+    assert expected["reported_action"] == "went mad"
+    assert expected["reported_action_subject"] == "char_0026"
+    assert "不支持 Time 发疯" in expected["separate_fact_proposition"]
+
+
+def test_issue_129_fixture_records_legacy_false_explicit_as_reference_valid() -> None:
+    """Reference membership is necessary, not proof of textual attribution."""
+    fixture = _issue_129_fixture()
+    package = _fixture_character_package(fixture)
+    false_v1_shape = _analysis_payload(
+        package,
+        traits=[
+            _interp(
+                fixture["source_snapshot"]["saved_character_analysis"]["incorrect_explicit_trait"],
+                "explicit",
+                supporting_event_refs=("evt_000116",),
+            )
+        ],
+    )
+    legacy_analysis = CharacterAnalysis.from_dict(false_v1_shape)
+
+    # Existing A6C validation correctly accepts this *reference* because the
+    # event belongs to the package; it deliberately does not perform semantic
+    # coreference judgment in Python.  Prompt v2 addresses that Qwen task.
+    assert validate_character_evidence(legacy_analysis, package) is None
+    validate_character_coverage([legacy_analysis], ["char_0033"])
+    assert "不能证明任何实际 Qwen" in fixture["test_limit"]
+
+
+def test_issue_129_prompt_v1_and_profile_v1_are_immutable() -> None:
+    prompts = _prompts()
+    v1 = prompts.load("a6.character-analysis", version=1)
+    profile_v1 = _profile()
+
+    assert v1.content_hash == "3e8b1ed4a1b5981c31a4e4caadcb482dde4af8ed32f045ad918c5af4878c0e0d"
+    assert profile_v1.profile_id == "global-story-analysis-v1"
+    assert profile_v1.content_hash() == "bd29fb893b21f790f324e5f6f76fe99498e202c8f73256ab010b370b0450d4eb"
+    assert hashlib.sha256(
+        (REPO_ROOT / "profiles" / "global_story_analysis_v1.yaml").read_bytes()
+    ).hexdigest() == "5601eace7c4cbaa6b32d5b121b7b76227882dfb0c87963039f11630e5252dbcc"
+
+
+def test_issue_129_v2_selection_separates_identity_preserves_budgets_and_current(
+    tmp_path: Path,
+) -> None:
+    tree, _planning, _pub, snap = _snapshot(tmp_path)
+    profile_v1 = _profile()
+    profile_v2 = load_story_analysis_profile(
+        REPO_ROOT / "profiles" / "global_story_analysis_v2.yaml"
+    )
+    plan_v1 = _plan(snap, profile_v1)
+    plan_v2 = _plan(snap, profile_v2)
+    before_current = _a5_current_ref(tree)
+    before_files = _store_file_count(tree)
+    prep_v1 = build_character_semantic_preparation(
+        plan_v1, profile_v1, _semantic_profile(), prompts=_prompts()
+    )
+    prep_v2 = build_character_semantic_preparation(
+        plan_v2, profile_v2, _semantic_profile(), prompts=_prompts()
+    )
+
+    # Same frozen planning policy/evidence packet, but a reviewed v2 profile
+    # selects only A6C v2 and produces a distinct request identity.
+    assert plan_v1.plan_hash == plan_v2.plan_hash
+    assert prep_v1.packet_token_estimates == prep_v2.packet_token_estimates
+    assert prep_v1.prompt_identity.prompt_version == 1
+    assert prep_v2.prompt_identity.prompt_version == 2
+    assert prep_v2.prompt_identity.prompt_content_hash == (
+        "620d4fd753ef0437d7bd0d74d52b9649fb94ce33cb77a200b61f38a0414accf7"
+    )
+    assert profile_v1.character_analysis.output_schema_id == profile_v2.character_analysis.output_schema_id
+    assert profile_v1.character_analysis.output_schema_version == profile_v2.character_analysis.output_schema_version
+    assert profile_v2.plot_window_analysis == profile_v1.plot_window_analysis
+    assert profile_v2.global_skeleton == profile_v1.global_skeleton
+    assert profile_v2.story_bible == profile_v1.story_bible
+    assert prep_v1.character_request_hashes != prep_v2.character_request_hashes
+    assert prep_v1.character_request_identity_hashes != prep_v2.character_request_identity_hashes
+    assert _a5_current_ref(tree) == before_current
+    assert _store_file_count(tree) == before_files
+
+
+def test_issue_129_unreviewed_character_prompt_selection_fails_closed(
+    tmp_path: Path,
+) -> None:
+    _tree, _planning, _pub, snap = _snapshot(tmp_path)
+    profile_v2 = load_story_analysis_profile(
+        REPO_ROOT / "profiles" / "global_story_analysis_v2.yaml"
+    )
+    unreviewed = dataclasses.replace(
+        profile_v2, profile_id="global-story-analysis-v3"
+    )
+    with pytest.raises(StoryAnalysisSemanticError, match="unconstrained prompt"):
+        build_character_semantic_preparation(
+            _plan(snap, unreviewed),
+            unreviewed,
+            _semantic_profile(),
+            prompts=_prompts(),
+        )
+
+
+def test_issue_129_prompt_v2_contains_generic_attribution_and_ambiguity_rules() -> None:
+    system = _prompts().load("a6.character-analysis", version=2).system_template
+    assert "解析代词和省略主语的先行词" in system
+    assert "说话者、听话者、被谈论/被指称者、关系参与者" in system
+    assert "括号说明、指向动作、说话标签" in system
+    assert "比较同一包中的全部相关事实、事件和关系" in system
+    assert "不得把任何候选角色“离开”标为 explicit" in system
+    assert "甲与乙争吵" in system
+    assert "Alice" not in system
+    assert "March Hare" not in system
 
 
 # ---------------------------------------------------------------------------

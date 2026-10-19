@@ -175,6 +175,36 @@ def test_b13_merge_member_rejects_independent_active_beat_and_participants_resol
         broken.validate()
 
 
+def test_b13_compress_requires_an_independent_adapted_beat():
+    plan = _plan()
+    compressed = next(item for item in plan.event_dispositions if item.source_event_ref.canonical_id == "evt_000002")
+    dispositions = tuple(replace(item, disposition="compress", rationale_zh="保留事件但压缩过程。") if item == compressed else item for item in plan.event_dispositions)
+    with pytest.raises(B13DispositionError, match="compress event requires an active mapping to a single-source adapted beat"):
+        replace(plan, event_dispositions=dispositions)
+
+
+def test_b13_compress_allows_independent_beat_plus_composite_destination():
+    plan = _plan()
+    refs = {(item.kind, item.canonical_id): item for item in plan.source_snapshot.canonical_references}
+    compressed = next(item for item in plan.event_dispositions if item.source_event_ref == refs["event", "evt_000002"])
+    condensed = AdaptedStoryBeat(
+        "compressed-confrontation", "将事件过程压缩为一个简短的对峙。", "source_condensed", "compatible",
+        (compressed.source_event_ref,),
+    )
+    independent_mapping = AdaptationMapping(
+        compressed.source_event_ref, AdaptedEndpoint("story_beat", condensed.adapted_story_beat_id),
+        "primary", "保留事件的因果作用。", "显著压缩内部过程。", "B1.3 压缩决策。",
+    )
+    dispositions = tuple(replace(item, disposition="compress", rationale_zh="保留事件但压缩过程。") if item == compressed else item for item in plan.event_dispositions)
+    compressed_plan = replace(plan, event_dispositions=dispositions, adapted_story_beats=(*plan.adapted_story_beats, condensed), adaptation_mappings=(*plan.adaptation_mappings, independent_mapping))
+    active_destinations = [item for item in compressed_plan.adaptation_mappings if item.source_ref == compressed.source_event_ref and item.active]
+    assert len(active_destinations) == 2
+    assert {item.adapted_endpoint.adapted_id for item in active_destinations} == {
+        condensed.adapted_story_beat_id,
+        next(item for item in plan.adapted_story_beats if item.origin.value == "source_composite").adapted_story_beat_id,
+    }
+
+
 def test_b13_allows_multiple_composite_destinations_and_invented_anchors():
     plan = _plan()
     refs = {(item.kind, item.canonical_id): item for item in plan.source_snapshot.canonical_references}

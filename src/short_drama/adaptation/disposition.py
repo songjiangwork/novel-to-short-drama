@@ -579,6 +579,9 @@ class B13DispositionPlan:
                 continue
             if not active:
                 raise B13DispositionError("keep/compress/merge_member event requires an active mapping")
+            if disposition.disposition is CanonicalEventDisposition.COMPRESS:
+                if not any(beats[mapping.adapted_endpoint.adapted_id].origin in {AdaptedStoryBeatOrigin.SOURCE_DIRECT, AdaptedStoryBeatOrigin.SOURCE_CONDENSED} for mapping in active):
+                    raise B13DispositionError("compress event requires an active mapping to a single-source adapted beat")
             if disposition.disposition is CanonicalEventDisposition.MERGE_MEMBER:
                 if any(beats[mapping.adapted_endpoint.adapted_id].origin is not AdaptedStoryBeatOrigin.SOURCE_COMPOSITE or len(beats[mapping.adapted_endpoint.adapted_id].source_event_refs) < 2 for mapping in active):
                     raise B13DispositionError("merge_member event must map only to multi-source source_composite beats")

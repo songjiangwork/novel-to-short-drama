@@ -322,7 +322,10 @@ def test_b12_prompt_schema_and_request_identity_are_deterministic_and_versioned(
     changed_schema = dict(first.output_schema.schema)
     changed_schema["title"] = "changed proposal contract"
     schema_variant = OutputSchema.create(schema_id=first.output_schema.schema_id, schema_version=2, schema=changed_schema)
-    assert build_b12_semantic_preparation(packet_prep, output_schema=schema_variant, runtime_config=first.runtime_config).request_identity != first.request_identity
+    with pytest.raises(AdaptationStrategyError, match="supplied together"):
+        build_b12_semantic_preparation(
+            packet_prep, output_schema=schema_variant, runtime_config=first.runtime_config,
+        )
 
     prompt_root = tmp_path / "prompts"
     shutil.copytree(B12_PROMPTS_DIR, prompt_root)
@@ -428,10 +431,11 @@ def test_b12_requires_json_schema_mode_and_runtime_mapping_does_not_change_ident
     remapped = build_b12_semantic_preparation(packet_prep, runtime_config=other_runtime)
     assert remapped.request_identity == semantic.request_identity
     assert remapped.provider_request_bytes != semantic.provider_request_bytes
-    with pytest.raises(AdaptationStrategyError, match="structured_output_mode=json_schema"):
+    with pytest.raises(AdaptationStrategyError, match="pinned v1 profile/schema pair"):
         build_b12_semantic_preparation(
             packet_prep, runtime_config=semantic.runtime_config,
             semantic_profile=replace(semantic.semantic_profile, structured_output_mode="json_object"),
+            output_schema=semantic.output_schema,
         )
     with pytest.raises(AdaptationStrategyError, match="requires an explicit exact RuntimeConfig"):
         build_b12_semantic_preparation(packet_prep)

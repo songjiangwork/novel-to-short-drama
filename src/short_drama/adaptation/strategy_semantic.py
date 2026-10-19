@@ -27,10 +27,40 @@ from .strategy_packet import B12Preparation
 B12_STRATEGY_PROMPT_ID = "b12.adaptation-strategy"
 B12_STRATEGY_PROMPT_VERSION = 1
 B12_STRATEGY_OUTPUT_SCHEMA_ID = "b12-adaptation-strategy-proposal"
-B12_STRATEGY_OUTPUT_SCHEMA_VERSION = 1
 B12_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
-B12_SEMANTIC_PROFILE_PATH = REPO_ROOT / "profiles" / "adaptation_strategy_llm_v1.yaml"
-B12_OUTPUT_SCHEMA_PATH = REPO_ROOT / "schemas" / "b12-adaptation-strategy-proposal.schema.json"
+
+
+@dataclass(frozen=True, slots=True)
+class B12SemanticAssetSelection:
+    """One supported, exact B1.2 semantic profile/schema pair.
+
+    ``version`` is the B1.2 provider-proposal asset version, not the shared
+    ``SemanticLLMProfile.schema_version`` file-format version.  The registry
+    below is deliberately closed: production may select a known pair, but may
+    not compose independently supplied profile and schema assets.
+    """
+
+    version: int
+    semantic_profile: SemanticLLMProfile
+    output_schema: OutputSchema
+
+
+_B12_SEMANTIC_ASSET_IDENTITIES: dict[int, tuple[str, str, str, str, str]] = {
+    1: (
+        "adaptation_strategy_llm_v1.yaml",
+        "b12-adaptation-strategy-proposal.schema.json",
+        "b12-adaptation-strategy-llm-v1",
+        "28d1b8c937b3a99871be6ec499c95fb5cc0a77d79b051af685b255092a76d850",
+        "3669b0d9759ab604c10459ad5cd720c51397fd5f76ef404c856612e20c204e94",
+    ),
+    2: (
+        "adaptation_strategy_llm_v2.yaml",
+        "b12-adaptation-strategy-proposal-v2.schema.json",
+        "b12-adaptation-strategy-llm-v2",
+        "eae73f144708002eb9d6da652fc26fe6d684d0eae3ad600f7bba01ca1ea41018",
+        "2148703d5cc06bf44b137baa86447f1af4206bb7133dda14114df1745591ed2b",
+    ),
+}
 
 
 class B12SemanticBudgetError(AdaptationStrategyError):
@@ -139,25 +169,99 @@ class B12SemanticPreparation:
         return strategy
 
 
-def load_b12_semantic_profile() -> SemanticLLMProfile:
-    profile = load_semantic_profile(B12_SEMANTIC_PROFILE_PATH)
-    if profile.profile_id != "b12-adaptation-strategy-llm-v1":
-        raise AdaptationStrategyError("B1.2 semantic profile ID is not the pinned asset")
-    return profile
+def load_b12_semantic_assets(*, version: int = 1) -> B12SemanticAssetSelection:
+    """Load exactly one supported B1.2 profile/schema asset pair.
 
-
-def load_b12_output_schema() -> OutputSchema:
+    There is no implicit latest asset and no v1 fallback.  A missing asset or
+    an unsupported version is an operator error before request construction.
+    """
     try:
-        data = load_json(B12_OUTPUT_SCHEMA_PATH)
+        (
+            profile_name,
+            schema_name,
+            expected_profile_id,
+            expected_profile_hash,
+            expected_schema_hash,
+        ) = _B12_SEMANTIC_ASSET_IDENTITIES[version]
+    except (KeyError, TypeError):
+        raise AdaptationStrategyError(
+            f"unsupported B1.2 semantic asset version {version!r}; supported versions are 1 and 2"
+        ) from None
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise AdaptationStrategyError(
+            f"unsupported B1.2 semantic asset version {version!r}; supported versions are 1 and 2"
+        )
+    try:
+        profile = load_semantic_profile(REPO_ROOT / "profiles" / profile_name)
     except Exception as exc:  # noqa: BLE001
-        raise AdaptationStrategyError("cannot load B1.2 provider proposal schema") from exc
+        raise AdaptationStrategyError(
+            f"cannot load B1.2 semantic profile for asset version {version}"
+        ) from exc
+    if profile.profile_id != expected_profile_id:
+        raise AdaptationStrategyError(
+            f"B1.2 semantic profile ID is not the pinned v{version} asset"
+        )
+    if profile.semantic_profile_hash != expected_profile_hash:
+        raise AdaptationStrategyError(
+            f"B1.2 semantic profile content hash does not match the pinned v{version} asset"
+        )
+    if profile.structured_output_mode != "json_schema":
+        raise AdaptationStrategyError(
+            f"B1.2 semantic profile v{version} requires structured_output_mode=json_schema"
+        )
+    try:
+        data = load_json(REPO_ROOT / "schemas" / schema_name)
+    except Exception as exc:  # noqa: BLE001
+        raise AdaptationStrategyError(
+            f"cannot load B1.2 provider proposal schema for asset version {version}"
+        ) from exc
     if not isinstance(data, dict):
-        raise AdaptationStrategyError("B1.2 provider proposal schema must be an object")
-    return OutputSchema.create(
+        raise AdaptationStrategyError(
+            f"B1.2 provider proposal schema v{version} must be an object"
+        )
+    output_schema = OutputSchema.create(
         schema_id=B12_STRATEGY_OUTPUT_SCHEMA_ID,
-        schema_version=B12_STRATEGY_OUTPUT_SCHEMA_VERSION,
+        schema_version=version,
         schema=data,
     )
+    if output_schema.schema_hash != expected_schema_hash:
+        raise AdaptationStrategyError(
+            f"B1.2 provider proposal schema content hash does not match the pinned v{version} asset"
+        )
+    return B12SemanticAssetSelection(version, profile, output_schema)
+
+
+def load_b12_semantic_profile(*, version: int = 1) -> SemanticLLMProfile:
+    """Compatibility accessor for the profile in one closed asset pair."""
+    return load_b12_semantic_assets(version=version).semantic_profile
+
+
+def load_b12_output_schema(*, version: int = 1) -> OutputSchema:
+    """Compatibility accessor for the schema in one closed asset pair."""
+    return load_b12_semantic_assets(version=version).output_schema
+
+
+def _resolve_b12_semantic_assets(
+    *,
+    version: int,
+    semantic_profile: SemanticLLMProfile | None,
+    output_schema: OutputSchema | None,
+) -> B12SemanticAssetSelection:
+    """Reject absent, cross-version, or altered injected B1.2 assets."""
+    selected = load_b12_semantic_assets(version=version)
+    if (semantic_profile is None) != (output_schema is None):
+        raise AdaptationStrategyError(
+            "B1.2 semantic profile and output schema must be supplied together or selected by version"
+        )
+    if semantic_profile is None:
+        return selected
+    if not isinstance(semantic_profile, SemanticLLMProfile) or not isinstance(output_schema, OutputSchema):
+        raise AdaptationStrategyError("B1.2 semantic assets must be SemanticLLMProfile and OutputSchema")
+    if semantic_profile != selected.semantic_profile or output_schema != selected.output_schema:
+        raise AdaptationStrategyError(
+            f"B1.2 semantic assets do not match the pinned v{version} profile/schema pair"
+        )
+    return selected
 
 
 def b12_request_identity_from_components(
@@ -246,6 +350,7 @@ def build_b12_semantic_preparation(
     preparation: B12Preparation,
     *,
     prompts: PromptRegistry | None = None,
+    semantic_asset_version: int = 1,
     semantic_profile: SemanticLLMProfile | None = None,
     output_schema: OutputSchema | None = None,
     runtime_config: RuntimeConfig | None = None,
@@ -255,10 +360,12 @@ def build_b12_semantic_preparation(
     if not isinstance(preparation, B12Preparation):
         raise AdaptationStrategyError("B1.2 semantic preparation requires B12Preparation")
     prompts = PromptRegistry(B12_PROMPTS_DIR) if prompts is None else prompts
-    semantic_profile = load_b12_semantic_profile() if semantic_profile is None else semantic_profile
-    output_schema = load_b12_output_schema() if output_schema is None else output_schema
-    if semantic_profile.structured_output_mode != "json_schema":
-        raise AdaptationStrategyError("B1.2 adaptation strategy requires structured_output_mode=json_schema")
+    assets = _resolve_b12_semantic_assets(
+        version=semantic_asset_version,
+        semantic_profile=semantic_profile,
+        output_schema=output_schema,
+    )
+    semantic_profile, output_schema = assets.semantic_profile, assets.output_schema
     if not isinstance(runtime_config, RuntimeConfig):
         raise AdaptationStrategyError(
             "B1.2 semantic preparation requires an explicit exact RuntimeConfig; "

@@ -6,13 +6,17 @@ issue with allOf(ref(sourceRef), kind const) emitting duplicate kind keys.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 
 import pytest
 from jsonschema import Draft202012Validator
 
-from short_drama.adaptation import build_b12_semantic_preparation
+from short_drama.adaptation import (
+    AdaptationStrategyError, B12SemanticBudget, B12SemanticBudgetError,
+    build_b12_semantic_preparation, load_b12_semantic_assets,
+)
 from short_drama.artifacts import CanonicalSerializationError, content_hash, strict_json_loads
 from short_drama.io import load_json
 from short_drama.llm import OutputSchema, load_semantic_profile
@@ -97,20 +101,80 @@ def test_v2_profile_is_exactly_the_live_accepted_version():
 
 def test_v2_semantic_identity_is_distinct_from_frozen_v1(tmp_path):
     _tree, _prepared, v1 = _semantic_preparation(tmp_path)
-    v2_profile = load_semantic_profile(PROFILES_DIR / "adaptation_strategy_llm_v2.yaml")
-    v2_schema = OutputSchema.create(
-        schema_id="b12-adaptation-strategy-proposal",
-        schema_version=2, schema=_v2_schema(),
-    )
+    v2_assets = load_b12_semantic_assets(version=2)
     v2 = build_b12_semantic_preparation(
-        v1.preparation, semantic_profile=v2_profile,
-        output_schema=v2_schema, runtime_config=v1.runtime_config,
+        v1.preparation, semantic_asset_version=2,
+        semantic_profile=v2_assets.semantic_profile,
+        output_schema=v2_assets.output_schema,
+        runtime_config=v1.runtime_config,
     )
     assert v2.request_identity != v1.request_identity
     assert v2.request.output_schema.schema_version == 2
     assert v2.measurement.reserved_output_tokens == 57344
     assert v2.output_schema.schema_hash == V2_SCHEMA_HASH
     assert v2.preparation.packet.source_snapshot == v1.preparation.packet.source_snapshot
+
+
+def test_closed_selection_loads_only_the_matching_v1_or_v2_pair():
+    v1 = load_b12_semantic_assets(version=1)
+    v2 = load_b12_semantic_assets(version=2)
+    assert (v1.version, v1.semantic_profile.profile_id, v1.output_schema.schema_version) == (
+        1, "b12-adaptation-strategy-llm-v1", 1,
+    )
+    assert (v2.version, v2.semantic_profile.profile_id, v2.output_schema.schema_version) == (
+        2, "b12-adaptation-strategy-llm-v2", 2,
+    )
+    assert v1.semantic_profile.semantic_profile_hash != v2.semantic_profile.semantic_profile_hash
+    assert v1.output_schema.schema_hash != v2.output_schema.schema_hash
+
+
+@pytest.mark.parametrize("version", (0, 3, True, "2", None))
+def test_closed_selection_rejects_unsupported_versions(version):
+    with pytest.raises(AdaptationStrategyError, match="unsupported B1.2 semantic asset version"):
+        load_b12_semantic_assets(version=version)
+
+
+def test_preparation_rejects_missing_cross_version_or_altered_assets(tmp_path):
+    _tree, _prepared, v1 = _semantic_preparation(tmp_path)
+    v1_assets = load_b12_semantic_assets(version=1)
+    v2_assets = load_b12_semantic_assets(version=2)
+    with pytest.raises(AdaptationStrategyError, match="supplied together"):
+        build_b12_semantic_preparation(
+            v1.preparation, runtime_config=v1.runtime_config,
+            semantic_profile=v2_assets.semantic_profile,
+        )
+    with pytest.raises(AdaptationStrategyError, match="pinned v2 profile/schema pair"):
+        build_b12_semantic_preparation(
+            v1.preparation, semantic_asset_version=2, runtime_config=v1.runtime_config,
+            semantic_profile=v1_assets.semantic_profile, output_schema=v2_assets.output_schema,
+        )
+    with pytest.raises(AdaptationStrategyError, match="pinned v1 profile/schema pair"):
+        build_b12_semantic_preparation(
+            v1.preparation, runtime_config=v1.runtime_config,
+            semantic_profile=replace(v1_assets.semantic_profile, max_output_tokens=8193),
+            output_schema=v1_assets.output_schema,
+        )
+
+
+def test_v2_budget_reserves_ceiling_but_requires_actual_runtime_capacity(tmp_path):
+    _tree, _prepared, v1 = _semantic_preparation(tmp_path)
+    v2 = build_b12_semantic_preparation(
+        v1.preparation, semantic_asset_version=2, runtime_config=v1.runtime_config,
+    )
+    assert v2.measurement.reserved_output_tokens == 57_344
+    required = (
+        v2.measurement.provider_request_estimated_tokens
+        + v2.measurement.reserved_output_tokens
+    )
+    with pytest.raises(B12SemanticBudgetError, match="reserved output"):
+        v2.enforce_budget(B12SemanticBudget(
+            v2.runtime_config.request_model, required - 1,
+            v2.measurement.provider_request_estimated_tokens,
+        ))
+    v2.enforce_budget(B12SemanticBudget(
+        v2.runtime_config.request_model, required,
+        v2.measurement.provider_request_estimated_tokens,
+    ))
 
 
 def test_duplicate_kind_remains_strictly_rejected_locally():

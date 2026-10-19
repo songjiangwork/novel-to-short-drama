@@ -31,8 +31,9 @@ from .strategy import (
 )
 from .strategy_packet import B12Packet, B12PacketMeasurement, B12Preparation, B12SemanticView, derive_snapshot_local_plotlines, prepare_b12_packet
 from .strategy_semantic import (
-    B12SemanticBudget, B12SemanticBudgetError, B12SemanticMeasurement, B12SemanticPreparation,
-    b12_request_identity, build_b12_semantic_preparation, load_b12_output_schema, load_b12_semantic_profile,
+    B12SemanticAssetSelection, B12SemanticBudget, B12SemanticBudgetError, B12SemanticMeasurement,
+    B12SemanticPreparation, b12_request_identity, build_b12_semantic_preparation,
+    load_b12_output_schema, load_b12_semantic_assets, load_b12_semantic_profile,
 )
 from .strategy_execution import (
     B12_MAX_SEMANTIC_GENERATION_ROUNDS, B12_STRATEGY_ARTIFACT_TYPE,
@@ -53,8 +54,8 @@ __all__ = [
     "PreservationPriority", "PriorityEntry", "RelationshipDisposition", "RelationshipStrategy",
     "RevealDisposition", "RevealStrategy", "SnapshotLocalPlotline", "StrategyConflict",
     "B12Packet", "B12PacketMeasurement", "B12Preparation", "B12SemanticView", "derive_snapshot_local_plotlines", "prepare_b12_packet",
-    "B12SemanticBudget", "B12SemanticBudgetError", "B12SemanticMeasurement", "B12SemanticPreparation",
-    "b12_request_identity", "build_b12_semantic_preparation", "load_b12_output_schema", "load_b12_semantic_profile",
+    "B12SemanticAssetSelection", "B12SemanticBudget", "B12SemanticBudgetError", "B12SemanticMeasurement", "B12SemanticPreparation",
+    "b12_request_identity", "build_b12_semantic_preparation", "load_b12_output_schema", "load_b12_semantic_assets", "load_b12_semantic_profile",
     "B12_MAX_SEMANTIC_GENERATION_ROUNDS", "B12_STRATEGY_ARTIFACT_TYPE",
     "B12SemanticExecutionError", "B12SemanticGenerationExhaustedError",
     "B12SemanticGenerationPolicy", "B12SemanticProvenanceError", "B12StrategyArtifact",

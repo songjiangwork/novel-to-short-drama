@@ -137,6 +137,38 @@ def test_valid_execution_persists_then_exactly_reuses_without_provider_call(tmp_
     assert reused_client.calls == []
 
 
+def test_v2_is_a_cross_version_cache_miss_then_exactly_reuses_its_own_identity(tmp_path):
+    tree, packet, v1 = _semantic_preparation(tmp_path)
+    v1_publication = execute_b12_strategy(
+        store=tree.store, pointers=tree.pointers, semantic=v1,
+        runtime_config=v1.runtime_config, budget=_budget(v1),
+        llm_client=_FakeClient([(_valid_proposal(v1), False)], v1.runtime_config),
+    )
+    v2 = build_b12_semantic_preparation(
+        packet, semantic_asset_version=2, runtime_config=v1.runtime_config,
+    )
+    assert v2.request_identity != v1.request_identity
+    v2_client = _FakeClient([(_valid_proposal(v2), False)], v2.runtime_config)
+    v2_publication = execute_b12_strategy(
+        store=tree.store, pointers=tree.pointers, semantic=v2,
+        runtime_config=v2.runtime_config, budget=_budget(v2), llm_client=v2_client,
+    )
+    assert v2_publication.reused is False
+    assert v2_publication.strategy_ref.revision == v1_publication.strategy_ref.revision + 1
+    assert len(v2_client.calls) == 1
+    assert v2_publication.artifact.output_schema_identity["schema_version"] == 2
+    assert v2_publication.artifact.semantic_profile_identity["profile_id"] == "b12-adaptation-strategy-llm-v2"
+
+    no_call = _FakeClient([], v2.runtime_config)
+    reused = execute_b12_strategy(
+        store=tree.store, pointers=tree.pointers, semantic=v2,
+        runtime_config=v2.runtime_config, budget=_budget(v2), llm_client=no_call,
+    )
+    assert reused.reused is True
+    assert reused.strategy_ref == v2_publication.strategy_ref
+    assert no_call.calls == []
+
+
 def test_changed_b1_direction_is_a_healthy_cache_miss_and_publishes_new_revision(tmp_path):
     tree, _packet, semantic = _semantic_preparation(tmp_path)
     first = execute_b12_strategy(

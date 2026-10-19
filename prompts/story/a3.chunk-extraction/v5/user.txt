@@ -1,0 +1,16 @@
+Extract chunk-local story candidates for the source chunk identified by:
+
+chunk_id = {{chunk_id}}
+
+The three sections below are canonical JSON arrays of source paragraphs, in source order. Each element has the form: {"paragraph_id": "CH###_P####", "text_original": "..."}.
+
+LEFT CONTEXT (may aid interpretation only; must NOT own primary evidence):
+{{left_context_json}}
+
+OWNERSHIP SPAN (the chunk to extract; PRIMARY evidence must come from here):
+{{ownership_json}}
+
+RIGHT CONTEXT (may aid interpretation only; must NOT own primary evidence):
+{{right_context_json}}
+
+Return ONLY the JSON object required by the output schema.

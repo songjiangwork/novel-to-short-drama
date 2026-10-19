@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "fixture_id": "a3-issue-128-ch009-c001-cand-rel-009",
+  "verification_scope": {
+    "source_evidence": "verified_against_tracked_alice_source",
+    "prompt_instruction": "verified_against_a3_prompt_v5",
+    "model_behavior": "not_verified_no_provider_call"
+  },
+  "chunk_id": "CH009_C001",
+  "saved_candidate": {
+    "candidate_id": "cand_rel_009",
+    "relationship_type_zh": "师生/过去关系",
+    "source_entity_original": "the Mock Turtle",
+    "target_entity_original": "Alice"
+  },
+  "source_paragraphs": [
+    {
+      "paragraph_id": "CH009_P0055",
+      "text_original": "“When we were little,” the Mock Turtle went on at last, more calmly, though still sobbing a little now and then, “we went to school in the sea. The master was an old Turtle—we used to call him Tortoise—”"
+    },
+    {
+      "paragraph_id": "CH009_P0056",
+      "text_original": "“Why did you call him Tortoise, if he wasn’t one?” Alice asked."
+    },
+    {
+      "paragraph_id": "CH009_P0057",
+      "text_original": "“We called him Tortoise because he taught us,” said the Mock Turtle angrily: “really you are very dull!”"
+    }
+  ],
+  "primary_evidence": {
+    "paragraph_id": "CH009_P0057",
+    "role": "primary",
+    "strength": "explicit",
+    "excerpt": "“We called him Tortoise because he taught us,” said the Mock Turtle angrily: “really you are very dull!”"
+  },
+  "source_backed_endpoint_interpretation": {
+    "relationship_type_zh": "师生/过去关系",
+    "source_entity_original": "the Mock Turtle",
+    "target_entity_original": "Tortoise",
+    "current_conversation_participant_not_an_endpoint_original": "Alice"
+  }
+}

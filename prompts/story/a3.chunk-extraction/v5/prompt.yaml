@@ -1,0 +1,19 @@
+# v5 A3A Prompt Registry — a3.chunk-extraction v5 (TRACKED).
+#
+# v5 adds relationship endpoint-attribution guidance. A relationship reported
+# inside dialogue must bind its endpoints to the people asserted to be in that
+# relationship, not merely to the people speaking or listening now. All v4
+# rules (distinct entities and null-preferred excerpts) are preserved.
+#
+# The pinned content_hash is computed over the exact semantic prompt material
+# (system.txt + user.txt + sorted required_variables) via the A-I3 canonical
+# prompt hash helper, NOT over this metadata file.
+schema_version: 1
+prompt_id: a3.chunk-extraction
+version: 5
+required_variables:
+  - chunk_id
+  - left_context_json
+  - ownership_json
+  - right_context_json
+content_hash: 87c8908bb0ccefcf5dde3e8b98a3e7493444ee606f56911e7ea6d23945193bdf

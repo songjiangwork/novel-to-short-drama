@@ -266,6 +266,35 @@ def test_tracked_story_extraction_profile_loads_and_round_trips():
     assert StoryExtractionProfile.from_dict(profile.to_dict()) == profile
 
 
+def test_versioned_story_extraction_profiles_preserve_v1_and_select_v5():
+    """v1 remains historical while v2 selects the endpoint-attribution prompt."""
+    v1 = load_story_extraction_profile(PROFILES_DIR / "story_extraction_v1.yaml")
+    v2 = load_story_extraction_profile(PROFILES_DIR / "story_extraction_v2.yaml")
+
+    # Historical identity is pinned: existing v1 artifacts keep exact reuse.
+    assert (v1.profile_id, v1.prompt_id, v1.prompt_version) == (
+        "story-extraction-v1",
+        "a3.chunk-extraction",
+        4,
+    )
+    assert v1.profile_hash == "5cc7bb66ec141d8f7a2fdd11984c929e2ed19e0bdc53fa746ea9f84ec20e99bc"
+
+    # The new tracked profile is explicitly selectable by A3's
+    # --extraction-profile path and carries a distinct reuse identity.
+    assert (v2.profile_id, v2.prompt_id, v2.prompt_version) == (
+        "story-extraction-v2",
+        "a3.chunk-extraction",
+        5,
+    )
+    assert v2.profile_hash == "f8c2465ce4d800ee98fef9428f36605b45c5f72b4e8de28add24262f58701b77"
+    assert v2.profile_hash != v1.profile_hash
+    prompt = PromptRegistry(PROMPTS_STORY_DIR).load(
+        v2.prompt_id, version=v2.prompt_version
+    )
+    assert prompt.content_hash == "87c8908bb0ccefcf5dde3e8b98a3e7493444ee606f56911e7ea6d23945193bdf"
+    assert _validate(v2.to_dict(), _schema("story-extraction-profile.schema.json")) == []
+
+
 def test_profile_hash_uses_canonical_content_hash():
     profile = load_story_extraction_profile(
         PROFILES_DIR / "story_extraction_v1.yaml"

@@ -1,0 +1,2 @@
+Exact B1.3 window packet (including authoritative ownership and advisory overlap context):
+{{window_packet_json}}

@@ -81,6 +81,10 @@ from .disposition_reconciliation import (
     B13ReconciliationReview, build_b13_reconciliation_inventory,
     review_b13_reconciliation,
 )
+from .disposition_assembly import (
+    B13DispositionAssemblyError, B13GlobalIdentityBinding, B13AssemblyWindowAudit,
+    B13DispositionAssemblyResult, assemble_b13_disposition_plan,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -129,4 +133,6 @@ __all__ = [
     "B13ReconciliationDecision", "B13ReconciliationDecisionSet",
     "B13ReconciliationReview", "build_b13_reconciliation_inventory",
     "review_b13_reconciliation",
+    "B13DispositionAssemblyError", "B13GlobalIdentityBinding", "B13AssemblyWindowAudit",
+    "B13DispositionAssemblyResult", "assemble_b13_disposition_plan",
 ]

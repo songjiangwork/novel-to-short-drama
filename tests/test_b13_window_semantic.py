@@ -17,7 +17,7 @@ from short_drama.adaptation import (
 )
 from short_drama.adaptation.target import CanonicalTargetReference
 from short_drama.artifacts import canonical_json_bytes
-from short_drama.llm import PromptRegistry
+from short_drama.llm import PromptRegistry, compute_prompt_content_hash
 from short_drama.paths import PROFILES_DIR, SCHEMAS_DIR
 
 from test_adaptation_strategy import _b12_test_runtime_config
@@ -59,6 +59,7 @@ def _proposal(packet):
             "local_key": key, "summary_zh": f"保留 {event_id} 的核心冲突。",
             "origin": "source_direct", "canon_compatibility": "compatible",
             "source_event_refs": [{"kind": "event", "canonical_id": event_id}],
+            "participants": [],
             "canonical_anchor_refs": [], "invention_purpose": None,
             "invention_rationale_zh": None, "invention_provenance_zh": None,
         })
@@ -69,7 +70,7 @@ def _proposal(packet):
             {"source_event_id": event_id, "disposition": "keep", "rationale_zh": "保留核心冲突。"}
             for event_id in owned
         ],
-        "adapted_characters": [], "adapted_story_beats": beats,
+        "adapted_characters": [], "anonymous_roles": [], "adapted_story_beats": beats,
         "adaptation_mappings": mappings,
         "continuity_overlay_candidates": {
             "factual_divergences": [], "relationship_requirements": [],
@@ -152,6 +153,17 @@ def test_context_event_cannot_receive_authoritative_decision(tmp_path):
     })
     with pytest.raises(B13WindowSemanticError, match="owned events"):
         semantic.decode_and_validate_proposal(proposal)
+    # The same context reference may be a cross-window advisory beat source;
+    # it never becomes this window's authoritative disposition.
+    proposal = _proposal(contextual)
+    proposal["adapted_story_beats"].append({
+        "local_key": "advisory", "summary_zh": "保留跨窗口上下文供 B3 调和。",
+        "origin": "source_direct", "canon_compatibility": "uncertain",
+        "source_event_refs": [{"kind": "event", "canonical_id": context_id}],
+        "participants": [], "canonical_anchor_refs": [], "invention_purpose": None,
+        "invention_rationale_zh": None, "invention_provenance_zh": None,
+    })
+    semantic.decode_and_validate_proposal(proposal)
 
 
 def test_rejects_unknown_refs_invalid_local_links_and_inconsistent_mappings(tmp_path):
@@ -175,6 +187,29 @@ def test_rejects_unknown_refs_invalid_local_links_and_inconsistent_mappings(tmp_
         semantic.decode_and_validate_proposal(omitted)
 
 
+def test_owned_omit_and_orphan_source_backed_beats_fail_closed(tmp_path):
+    semantic = _semantic(tmp_path)
+    proposal = _proposal(semantic.packet)
+    # The reviewed counterexample: the source_direct beat remains, but its
+    # owned source is omitted and has no active edge.
+    proposal["event_dispositions"][0]["disposition"] = "omit"
+    proposal["adaptation_mappings"] = []
+    with pytest.raises(B13WindowSemanticError, match="must not materialize"):
+        semantic.decode_and_validate_proposal(proposal)
+
+    proposal = _proposal(semantic.packet)
+    event_id = proposal["event_dispositions"][0]["source_event_id"]
+    proposal["adapted_story_beats"].append({
+        "local_key": "orphan", "summary_zh": "没有对应 mapping 的错误节拍。",
+        "origin": "source_direct", "canon_compatibility": "compatible",
+        "source_event_refs": [{"kind": "event", "canonical_id": event_id}],
+        "participants": [], "canonical_anchor_refs": [], "invention_purpose": None,
+        "invention_rationale_zh": None, "invention_provenance_zh": None,
+    })
+    with pytest.raises(B13WindowSemanticError, match="corresponding active mapping"):
+        semantic.decode_and_validate_proposal(proposal)
+
+
 def test_preserves_one_to_many_mapping_candidates_and_compress_merge_distinction(tmp_path):
     semantic = _semantic(tmp_path)
     proposal = _proposal(semantic.packet)
@@ -183,6 +218,7 @@ def test_preserves_one_to_many_mapping_candidates_and_compress_merge_distinction
         "local_key": "echo", "summary_zh": "在另一节拍中保留同一后果。",
         "origin": "source_direct", "canon_compatibility": "compatible",
         "source_event_refs": [{"kind": "event", "canonical_id": event_id}],
+        "participants": [],
         "canonical_anchor_refs": [], "invention_purpose": None,
         "invention_rationale_zh": None, "invention_provenance_zh": None,
     })
@@ -194,6 +230,50 @@ def test_preserves_one_to_many_mapping_candidates_and_compress_merge_distinction
     proposal["event_dispositions"][0]["disposition"] = "merge_member"
     with pytest.raises(B13WindowSemanticError, match="source_composite"):
         semantic.decode_and_validate_proposal(proposal)
+
+
+def test_beat_participants_use_only_resolved_local_candidates(tmp_path):
+    semantic = _semantic(tmp_path)
+    proposal = _proposal(semantic.packet)
+    source_character = next(
+        ref for ref in semantic.packet.source_snapshot.canonical_references if ref.kind == "character"
+    )
+    proposal["adapted_characters"] = [{
+        "local_key": "lead", "display_name_zh": "主角", "origin": "source_single",
+        "function_provenance": [{
+            "source_character_ref": source_character.to_dict(), "function_zh": "承担核心行动。",
+            "provenance_zh": "来自 source character 的功能转移。",
+        }], "invention_rationale_zh": None,
+    }]
+    proposal["anonymous_roles"] = [{
+        "local_key": "guard", "role_kind": "guard", "function_zh": "阻拦主角。",
+    }]
+    proposal["adapted_story_beats"][0]["participants"] = [
+        {"kind": "adapted_character", "local_key": "lead"},
+        {"kind": "anonymous_role", "local_key": "guard"},
+    ]
+    semantic.decode_and_validate_proposal(proposal)
+
+    duplicate = deepcopy(proposal)
+    duplicate["adapted_story_beats"][0]["participants"].append(
+        {"kind": "anonymous_role", "local_key": "guard"}
+    )
+    with pytest.raises(B13WindowSemanticError, match="participants must not be duplicated"):
+        semantic.decode_and_validate_proposal(duplicate)
+    unresolved = deepcopy(proposal)
+    unresolved["adapted_story_beats"][0]["participants"][0]["local_key"] = "missing"
+    with pytest.raises(B13WindowSemanticError, match="does not resolve"):
+        semantic.decode_and_validate_proposal(unresolved)
+    invalid_kind = deepcopy(proposal)
+    invalid_kind["adapted_story_beats"][0]["participants"][0]["kind"] = "final_adapted_id"
+    with pytest.raises(B13WindowSemanticError, match="violates the selected output schema"):
+        semantic.decode_and_validate_proposal(invalid_kind)
+    unused = deepcopy(proposal)
+    unused["adapted_story_beats"][0]["participants"] = [
+        {"kind": "adapted_character", "local_key": "lead"},
+    ]
+    with pytest.raises(B13WindowSemanticError, match="exactly one beat"):
+        semantic.decode_and_validate_proposal(unused)
 
 
 def test_identity_binds_window_and_strategy_but_not_runtime_routing(tmp_path):
@@ -264,6 +344,44 @@ def test_prompt_registry_rejects_modified_version(tmp_path):
     shutil.copytree(semantic_module.B13_WINDOW_PROMPTS_DIR, prompt_root)
     system = prompt_root / "b13.window-disposition" / "v1" / "system.txt"
     system.write_text(system.read_text(encoding="utf-8") + "\n篡改。", encoding="utf-8")
+    manifest = prompt_root / "b13.window-disposition" / "v1" / "prompt.yaml"
+    updated_hash = compute_prompt_content_hash(
+        prompt_id="b13.window-disposition", version=1,
+        system_template=system.read_text(encoding="utf-8"),
+        user_template=(prompt_root / "b13.window-disposition" / "v1" / "user.txt").read_text(encoding="utf-8"),
+        required_variables=["window_packet_json"],
+    )
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "01052d4b6a202506851b7e560bb8cb9fadc209aa24fb1272b5d86cd2bf0e0c04", updated_hash,
+        ), encoding="utf-8",
+    )
     packet = _packet(tmp_path / "fixture")
-    with pytest.raises(Exception, match="content_hash"):
+    with pytest.raises(B13WindowSemanticError, match="pinned v1 asset"):
         build_b13_window_semantic_preparation(packet, prompts=PromptRegistry(prompt_root), runtime_config=_b12_test_runtime_config())
+
+
+def test_schema_patterns_stay_within_llama_cpp_gbnf_safe_subset():
+    """Offline guard for llama.cpp's JSON-Schema-to-GBNF pattern converter.
+
+    The converter supports the basic anchored character-class/repetition syntax
+    used by ``localKey``; it does not support lookaround or Unicode escapes in
+    regexes.  Whitespace/NUL checks intentionally live in Python ``_text``.
+    """
+    patterns = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            if "pattern" in value:
+                patterns.append(value["pattern"])
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    schema = load_b13_window_semantic_assets().output_schema.schema
+    visit(schema)
+    assert patterns == ["^[a-z][a-z0-9_-]{0,63}$"]
+    assert all(token not in patterns[0] for token in ("(?", "\\u", "\\S", "\\d", "\\w"))
+    assert b'"allOf"' not in canonical_json_bytes(schema)

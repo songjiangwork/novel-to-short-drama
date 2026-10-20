@@ -25,7 +25,7 @@ from short_drama.story.chunking import estimate_tokens
 from .disposition import (
     AdaptedCharacterOrigin, AdaptedEndpointKind, AdaptedStoryBeatOrigin,
     CanonCompatibility, CanonicalEventDisposition, InventedBeatPurpose,
-    MappingContributionRole,
+    MappingContributionRole, AnonymousRoleKind, ParticipantKind,
 )
 from .disposition_preparation import B13DispositionWindowPacket, B13PreparationError
 from .target import CanonicalTargetReference
@@ -35,6 +35,7 @@ B13_WINDOW_PROMPT_ID = "b13.window-disposition"
 B13_WINDOW_PROMPT_VERSION = 1
 B13_WINDOW_OUTPUT_SCHEMA_ID = "b13-window-disposition-proposal"
 B13_WINDOW_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
+B13_WINDOW_PROMPT_CONTENT_HASH_V1 = "01052d4b6a202506851b7e560bb8cb9fadc209aa24fb1272b5d86cd2bf0e0c04"
 _LOCAL_KEY = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _RESERVED_LOCAL_PREFIXES = ("adapted_", "adaptation_", "anonymous_", "char_")
 
@@ -63,7 +64,7 @@ _B13_WINDOW_ASSETS: dict[int, tuple[str, str, str, str, str]] = {
         "b13-window-disposition-proposal-v1.schema.json",
         "b13-window-disposition-llm-v1",
         "680ea8b52a5d0a04cee995b08156debe9dc199483c8e6fe6ac733a75d9745d85",
-        "4b20bbdc527f827c4b2affbea6c2d936670b601ff477a82b20e81a3bb6957972",
+        "59fdff8bbfb7633c6a3a4a9296eb1c0513daa2f8ee52e01fa8abd824cc23c0b3",
     ),
 }
 
@@ -133,10 +134,10 @@ class B13WindowProposal:
 
     @staticmethod
     def _validate(packet: B13DispositionWindowPacket, value: dict[str, Any]) -> None:
-        _exact(value, {"schema_version", "event_dispositions", "adapted_characters", "adapted_story_beats", "adaptation_mappings", "continuity_overlay_candidates"}, "window proposal")
+        _exact(value, {"schema_version", "event_dispositions", "adapted_characters", "anonymous_roles", "adapted_story_beats", "adaptation_mappings", "continuity_overlay_candidates"}, "window proposal")
         if value["schema_version"] != 1:
             raise B13WindowSemanticError("unsupported B1.3 window proposal schema_version")
-        for name in ("event_dispositions", "adapted_characters", "adapted_story_beats", "adaptation_mappings"):
+        for name in ("event_dispositions", "adapted_characters", "anonymous_roles", "adapted_story_beats", "adaptation_mappings"):
             if not isinstance(value[name], list):
                 raise B13WindowSemanticError(f"{name} must be an array")
         if not isinstance(value["continuity_overlay_candidates"], dict):
@@ -190,9 +191,20 @@ class B13WindowProposal:
                 raise B13WindowSemanticError("invention_rationale_zh is only permitted for adaptation_invented characters")
             characters[key] = refs
 
+        anonymous_roles: dict[str, str] = {}
+        for item in value["anonymous_roles"]:
+            item = _exact(item, {"local_key", "role_kind", "function_zh"}, "anonymous role candidate")
+            key = _local_key(item["local_key"], "anonymous role local_key")
+            if key in anonymous_roles or key in characters:
+                raise B13WindowSemanticError("anonymous role local_key must be unique across local participants")
+            anonymous_roles[key] = _enum(item["role_kind"], AnonymousRoleKind, "anonymous role kind")
+            _text(item["function_zh"], "anonymous role function_zh")
+
         beats: dict[str, tuple[str, set[CanonicalTargetReference], set[CanonicalTargetReference]]] = {}
+        owned_beat_memberships: dict[str, set[str]] = {event_id: set() for event_id in owned}
+        anonymous_role_uses: dict[str, int] = {key: 0 for key in anonymous_roles}
         for item in value["adapted_story_beats"]:
-            fields = {"local_key", "summary_zh", "origin", "canon_compatibility", "source_event_refs", "canonical_anchor_refs", "invention_purpose", "invention_rationale_zh", "invention_provenance_zh"}
+            fields = {"local_key", "summary_zh", "origin", "canon_compatibility", "source_event_refs", "participants", "canonical_anchor_refs", "invention_purpose", "invention_rationale_zh", "invention_provenance_zh"}
             item = _exact(item, fields, "adapted story beat candidate")
             key = _local_key(item["local_key"], "adapted story beat local_key")
             if key in beats:
@@ -200,8 +212,8 @@ class B13WindowProposal:
             _text(item["summary_zh"], "adapted story beat summary_zh")
             origin = _enum(item["origin"], AdaptedStoryBeatOrigin, "adapted story beat origin")
             _enum(item["canon_compatibility"], CanonCompatibility, "canon compatibility")
-            if not isinstance(item["source_event_refs"], list) or not isinstance(item["canonical_anchor_refs"], list):
-                raise B13WindowSemanticError("beat source references must be arrays")
+            if not isinstance(item["source_event_refs"], list) or not isinstance(item["canonical_anchor_refs"], list) or not isinstance(item["participants"], list):
+                raise B13WindowSemanticError("beat source references and participants must be arrays")
             event_refs = {_canonical_ref(ref, "source_event_ref", allowed, kind="event") for ref in item["source_event_refs"]}
             anchors = {_canonical_ref(ref, "canonical_anchor_ref", allowed) for ref in item["canonical_anchor_refs"]}
             if len(event_refs) != len(item["source_event_refs"]) or len(anchors) != len(item["canonical_anchor_refs"]):
@@ -219,9 +231,27 @@ class B13WindowProposal:
                 _text(item["invention_provenance_zh"], "invented beat provenance")
             elif any(part is not None for part in invented):
                 raise B13WindowSemanticError("invention fields are only permitted for adaptation_invented beats")
+            seen_participants: set[tuple[str, str]] = set()
+            for participant in item["participants"]:
+                participant = _exact(participant, {"kind", "local_key"}, "beat participant")
+                kind = _enum(participant["kind"], ParticipantKind, "beat participant kind")
+                participant_key = _local_key(participant["local_key"], "beat participant local_key")
+                if (kind, participant_key) in seen_participants:
+                    raise B13WindowSemanticError("beat participants must not be duplicated")
+                seen_participants.add((kind, participant_key))
+                if kind == "adapted_character":
+                    if participant_key not in characters:
+                        raise B13WindowSemanticError("adapted character participant local_key does not resolve")
+                else:
+                    if participant_key not in anonymous_roles:
+                        raise B13WindowSemanticError("anonymous role participant local_key does not resolve")
+                    anonymous_role_uses[participant_key] += 1
+            for ref in event_refs:
+                if ref.canonical_id in owned_beat_memberships:
+                    owned_beat_memberships[ref.canonical_id].add(key)
             beats[key] = (origin, event_refs, anchors)
 
-        active_owned: dict[str, list[tuple[str, str]]] = {event_id: [] for event_id in owned}
+        active_owned: dict[str, set[tuple[str, str]]] = {event_id: set() for event_id in owned}
         seen_mappings: set[bytes] = set()
         for item in value["adaptation_mappings"]:
             item = _exact(item, {"source_ref", "adapted_endpoint", "contribution_role", "retained_semantics_zh", "transformed_semantics_zh", "provenance_zh", "active"}, "adaptation mapping candidate")
@@ -250,20 +280,27 @@ class B13WindowProposal:
                 if key not in characters or ref.kind != "character" or ref not in characters[key]:
                     raise B13WindowSemanticError("character mapping must be backed by function provenance")
             if item["active"] and ref.kind == "event" and ref.canonical_id in active_owned:
-                active_owned[ref.canonical_id].append((kind, key))
+                active_owned[ref.canonical_id].add((kind, key))
         disposition_by_event = {item["source_event_id"]: item["disposition"] for item in value["event_dispositions"]}
         for event_id, disposition in disposition_by_event.items():
             active = active_owned[event_id]
+            memberships = owned_beat_memberships[event_id]
             if disposition == "omit" and active:
                 raise B13WindowSemanticError("omit owned event forbids active mapping candidates")
+            if disposition == "omit" and memberships:
+                raise B13WindowSemanticError("omit owned event must not materialize in a beat candidate")
             if disposition != "omit" and not active:
                 raise B13WindowSemanticError("kept/compressed/merged owned event requires an active mapping candidate")
+            if any(("story_beat", beat_key) not in active for beat_key in memberships):
+                raise B13WindowSemanticError("owned source-backed beat candidate requires its corresponding active mapping")
             if disposition == "compress" and not any(beats[key][0] in {"source_direct", "source_condensed"} for kind, key in active if kind == "story_beat"):
                 raise B13WindowSemanticError("compress owned event requires a single-source beat candidate")
             if disposition == "merge_member" and not active:
                 raise B13WindowSemanticError("merge_member owned event requires an active mapping candidate")
             if disposition == "merge_member" and any(kind != "story_beat" or beats[key][0] != "source_composite" for kind, key in active):
                 raise B13WindowSemanticError("merge_member owned event must map only to source_composite beat candidates")
+        if any(uses != 1 for uses in anonymous_role_uses.values()):
+            raise B13WindowSemanticError("anonymous role candidate must participate in exactly one beat")
 
         overlay = _exact(value["continuity_overlay_candidates"], {"factual_divergences", "relationship_requirements", "story_state_requirements"}, "continuity_overlay_candidates")
         for name in overlay:
@@ -421,6 +458,10 @@ def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *,
     assets = _resolve_assets(semantic_asset_version, semantic_profile, output_schema)
     prompts = PromptRegistry(B13_WINDOW_PROMPTS_DIR) if prompts is None else prompts
     prompt = prompts.load(B13_WINDOW_PROMPT_ID, version=B13_WINDOW_PROMPT_VERSION)
+    if prompt.content_hash != B13_WINDOW_PROMPT_CONTENT_HASH_V1:
+        raise B13WindowSemanticError(
+            "B1.3 window prompt content hash does not match pinned v1 asset"
+        )
     rendered = prompt.render({"window_packet_json": packet.canonical_bytes().decode("utf-8")})
     request = build_structured_request(rendered_prompt=rendered, output_schema=assets.output_schema, semantic_profile=assets.semantic_profile)
     provider_bytes = _mapped_provider_request_bytes(request, runtime_config, execution_options)
@@ -430,6 +471,7 @@ def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *,
 
 __all__ = [
     "B13_WINDOW_PROMPT_ID", "B13_WINDOW_PROMPT_VERSION", "B13_WINDOW_OUTPUT_SCHEMA_ID",
+    "B13_WINDOW_PROMPT_CONTENT_HASH_V1",
     "B13WindowSemanticError", "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
     "B13WindowProposal", "B13WindowSemanticBudget", "B13WindowSemanticMeasurement",
     "B13WindowSemanticPreparation", "load_b13_window_semantic_assets",

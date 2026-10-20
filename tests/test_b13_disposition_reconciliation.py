@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from short_drama.adaptation import (
-    B13CandidateKind, B13CandidateRef, B13DispositionExecutionResult,
+    B12StrategySelection, B13CandidateKind, B13CandidateRef, B13DispositionExecutionResult,
     B13DispositionPacketMeasurement, B13DispositionPreparation,
     B13DispositionWindowPacket,
     B13ReconciliationDecision, B13ReconciliationDecisionKind,
@@ -15,6 +15,7 @@ from short_drama.adaptation import (
     build_b13_reconciliation_inventory, build_b13_window_semantic_preparation,
     review_b13_reconciliation,
 )
+from short_drama.adaptation.target import CanonicalTargetReference
 from short_drama.artifacts import canonical_json_bytes, content_hash
 from short_drama.llm import LLMInvocationProvenance
 
@@ -89,6 +90,50 @@ def _result(tmp_path, first_value=None, second_value=None, *, second_context_fir
     return B13DispositionExecutionResult(
         preparation.source_snapshot, preparation.strategy_selection, preparation.preparation_identity,
         (_accepted(requests[0], first_value), _accepted(requests[1], second_value)),
+    )
+
+
+def _three_window_preparation(tmp_path):
+    _tree, original, _requests, _budgets, runtime, first, _second = _two_window_inputs(tmp_path)
+    source = replace(
+        first.source_snapshot,
+        canonical_references=(*first.source_snapshot.canonical_references, CanonicalTargetReference("event", "evt_000003")),
+    )
+    strategy = replace(
+        first.strategy_selection.artifact.strategy,
+        resolved_target=replace(first.strategy_selection.artifact.strategy.resolved_target, source_snapshot=source),
+    )
+    selection = B12StrategySelection(
+        first.strategy_selection.strategy_ref,
+        replace(first.strategy_selection.artifact, source_snapshot=source, strategy=strategy),
+        first.strategy_selection.current_pointer_ref,
+    )
+
+    def packet_for(event_id, ordinal):
+        payload = first.to_dict()
+        payload["source_snapshot"] = source.to_dict()
+        payload["global_adaptation_strategy"]["strategy"] = strategy.to_dict()
+        payload["global_adaptation_strategy"]["strategy_hash"] = strategy.content_hash()
+        payload["window"] = {"window_id": f"window_{ordinal:04d}", "window_ordinal": ordinal, "owned_event_refs": [event_id], "context_event_refs": []}
+        payload["owned_source_events"] = [{"event_id": event_id, "narrative_order": ordinal}]
+        payload["context_source_events"] = []
+        return B13DispositionWindowPacket(source, selection, f"window_{ordinal:04d}", ordinal, canonical_json_bytes(payload))
+
+    packets = tuple(packet_for(f"evt_{ordinal:06d}", ordinal) for ordinal in range(1, 4))
+    preparation = B13DispositionPreparation(
+        source, selection, packets,
+        tuple(B13DispositionPacketMeasurement(packet.window_id, len(packet.canonical_bytes()), 1, packet.content_hash()) for packet in packets),
+        ("evt_000001", "evt_000002", "evt_000003"), "0" * 64,
+    )
+    return replace(preparation, preparation_identity=_preparation_identity(preparation)), runtime
+
+
+def _three_window_result(tmp_path, values):
+    preparation, runtime = _three_window_preparation(tmp_path)
+    requests = tuple(build_b13_window_semantic_preparation(packet, runtime_config=runtime) for packet in preparation.packets)
+    return B13DispositionExecutionResult(
+        preparation.source_snapshot, preparation.strategy_selection, preparation.preparation_identity,
+        tuple(_accepted(request, value) for request, value in zip(requests, values)),
     )
 
 
@@ -238,3 +283,93 @@ def test_inventory_ordering_and_hashes_are_stable_across_repeated_runs(tmp_path)
     assert first.inventory_identity == second.inventory_identity
     assert first.to_dict() == second.to_dict()
     assert [item.ref for item in first.candidates] == sorted(item.ref for item in first.candidates)
+
+
+def test_inventory_identity_rejects_erased_or_modified_derived_evidence(tmp_path):
+    preparation, _runtime = _two_window_preparation(tmp_path, second_context_first=True)
+    first = _proposal(preparation.packets[0])
+    first["event_dispositions"][0]["disposition"] = "omit"
+    first["adapted_story_beats"], first["adaptation_mappings"] = [], []
+    second = _proposal(preparation.packets[1])
+    second["adapted_story_beats"].append({
+        "local_key": "context-beat", "summary_zh": "上下文候选。", "origin": "source_direct",
+        "canon_compatibility": "uncertain", "source_event_refs": [{"kind": "event", "canonical_id": "evt_000001"}],
+        "participants": [], "canonical_anchor_refs": [], "invention_purpose": None,
+        "invention_rationale_zh": None, "invention_provenance_zh": None,
+    })
+    inventory = build_b13_reconciliation_inventory(_result(tmp_path, first, second, second_context_first=True))
+    with pytest.raises(B13ReconciliationError, match="identity|findings"):
+        replace(inventory, findings=())
+    changed = next(item for item in inventory.candidates if item.ref.local_key == "context-beat")
+    altered_payload = changed.payload()
+    altered_payload["summary_zh"] = "被篡改的候选。"
+    altered = replace(changed, _canonical_payload=canonical_json_bytes(altered_payload))
+    with pytest.raises(B13ReconciliationError, match="candidates|identity"):
+        replace(inventory, candidates=tuple(altered if item == changed else item for item in inventory.candidates))
+    with pytest.raises(B13ReconciliationError, match="findings|identity"):
+        replace(inventory, findings=(replace(inventory.findings[0], detail="被篡改的 finding。"),))
+
+
+def test_three_way_overlay_conflicts_require_all_but_one_contribution_rejected(tmp_path):
+    preparation, _runtime = _three_window_preparation(tmp_path)
+    fact = next(item for item in preparation.source_snapshot.canonical_references if item.kind == "fact")
+    relationship = next(item for item in preparation.source_snapshot.canonical_references if item.kind == "relationship")
+    values = []
+    for ordinal, packet in enumerate(preparation.packets, 1):
+        value = _proposal(packet)
+        value["continuity_overlay_candidates"] = {
+            "factual_divergences": [{"source_fact_ref": fact.to_dict(), "adapted_assertion_zh": f"事实偏离候选 {ordinal}。", "provenance_zh": "跨窗口候选。"}],
+            "relationship_requirements": [{"source_relationship_ref": relationship.to_dict(), "requirement_zh": f"关系要求候选 {ordinal}。", "provenance_zh": "跨窗口候选。"}],
+            "story_state_requirements": [],
+        }
+        values.append(value)
+    inventory = build_b13_reconciliation_inventory(_three_window_result(tmp_path, values))
+    findings = {item.kind: item for item in inventory.findings}
+    fact_finding = findings[B13ReconciliationFindingKind.COMPETING_FACTUAL_DIVERGENCES]
+    relationship_finding = findings[B13ReconciliationFindingKind.COMPETING_RELATIONSHIP_REQUIREMENTS]
+
+    def reject(ref, finding):
+        return B13ReconciliationDecision(B13ReconciliationDecisionKind.REJECT_CONTRIBUTION, (ref,), (finding.finding_id,), "拒绝该冲突贡献。", "跨窗口审阅。")
+
+    one_each = (reject(fact_finding.candidate_refs[0], fact_finding), reject(relationship_finding.candidate_refs[0], relationship_finding))
+    partial = review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, one_each))
+    assert {fact_finding.finding_id, relationship_finding.finding_id} <= set(partial.unresolved_finding_ids)
+
+    two_each = (*one_each, reject(fact_finding.candidate_refs[1], fact_finding), reject(relationship_finding.candidate_refs[1], relationship_finding))
+    assert review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, two_each)).is_resolved
+
+
+def test_transitive_equivalence_cannot_contradict_keep_distinct(tmp_path):
+    result = _result(tmp_path)
+    source = _source_character(result)
+    preparation, _runtime = _two_window_preparation(tmp_path)
+    first, second = (_proposal(packet) for packet in preparation.packets)
+    first["adapted_characters"] = [_character("lead-a", source), _character("lead-c", source)]
+    second["adapted_characters"] = [_character("lead-b", source)]
+    inventory = build_b13_reconciliation_inventory(_result(tmp_path, first, second))
+    a = B13CandidateRef("window_0001", B13CandidateKind.ADAPTED_CHARACTER, "lead-a")
+    b = B13CandidateRef("window_0002", B13CandidateKind.ADAPTED_CHARACTER, "lead-b")
+    c = B13CandidateRef("window_0001", B13CandidateKind.ADAPTED_CHARACTER, "lead-c")
+    same_ab = B13ReconciliationDecision(B13ReconciliationDecisionKind.IDENTIFY_EQUIVALENT, (a, b), (), "确认相同。", "审阅。")
+    same_bc = B13ReconciliationDecision(B13ReconciliationDecisionKind.IDENTIFY_EQUIVALENT, (b, c), (), "确认相同。", "审阅。")
+    distinct_ac = B13ReconciliationDecision(B13ReconciliationDecisionKind.KEEP_DISTINCT, (a, c), (), "确认不同。", "审阅。")
+    with pytest.raises(B13ReconciliationError, match="transitively"):
+        review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, (same_ab, same_bc, distinct_ac)))
+
+
+def test_incompatible_explicit_equivalence_fails_immediately_without_dynamic_finding(tmp_path):
+    result = _result(tmp_path)
+    source = _source_character(result)
+    preparation, _runtime = _two_window_preparation(tmp_path)
+    first, second = (_proposal(packet) for packet in preparation.packets)
+    first["adapted_characters"] = [_character("lead-a", source)]
+    second["adapted_characters"] = [_character("lead-b", source)]
+    second["adapted_characters"][0]["function_provenance"][0]["function_zh"] = "不兼容的另一项功能。"
+    inventory = build_b13_reconciliation_inventory(_result(tmp_path, first, second))
+    decision = B13ReconciliationDecision(
+        B13ReconciliationDecisionKind.IDENTIFY_EQUIVALENT,
+        (B13CandidateRef("window_0001", B13CandidateKind.ADAPTED_CHARACTER, "lead-a"), B13CandidateRef("window_0002", B13CandidateKind.ADAPTED_CHARACTER, "lead-b")),
+        (), "错误地要求等同。", "审阅。",
+    )
+    with pytest.raises(B13ReconciliationError, match="incompatible"):
+        review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, (decision,)))

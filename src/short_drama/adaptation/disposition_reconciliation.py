@@ -41,9 +41,6 @@ class B13ReconciliationFindingKind(str, Enum):
     OWNER_OMIT_CONTEXT_MEMBERSHIP = "owner_omit_context_membership"
     COMPETING_FACTUAL_DIVERGENCES = "competing_factual_divergences"
     COMPETING_RELATIONSHIP_REQUIREMENTS = "competing_relationship_requirements"
-    COMPETING_STORY_STATE_REQUIREMENTS = "competing_story_state_requirements"
-    INCOMPATIBLE_CHARACTER_EQUIVALENCE = "incompatible_character_equivalence"
-    INCOMPATIBLE_BEAT_EQUIVALENCE = "incompatible_beat_equivalence"
 
 
 class B13ReconciliationDecisionKind(str, Enum):
@@ -165,6 +162,29 @@ class B13InventoryWindow:
     output_schema_identity: dict[str, Any]
     invocation_provenance: dict[str, Any]
     rejected_round_provenance: tuple[dict[str, Any], ...]
+    _canonical_proposal: bytes
+
+    def __post_init__(self) -> None:
+        _key(self.window_id, "inventory window_id")
+        if not isinstance(self.window_ordinal, int) or self.window_ordinal < 1:
+            raise B13ReconciliationError("inventory window ordinal is invalid")
+        for name in ("packet_hash", "request_identity", "semantic_request_hash", "rendered_prompt_hash", "proposal_hash"):
+            _hash(getattr(self, name), name)
+        if not isinstance(self._canonical_proposal, bytes):
+            raise B13ReconciliationError("inventory window proposal must be canonical bytes")
+        try:
+            proposal = strict_json_loads(self._canonical_proposal)
+        except Exception as exc:
+            raise B13ReconciliationError("inventory window proposal is invalid") from exc
+        if not isinstance(proposal, dict) or canonical_json_bytes(proposal) != self._canonical_proposal:
+            raise B13ReconciliationError("inventory window proposal must be a canonical object")
+        if content_hash(proposal) != self.proposal_hash:
+            raise B13ReconciliationError("inventory window proposal hash is mismatched")
+
+    def proposal(self) -> dict[str, Any]:
+        proposal = strict_json_loads(self._canonical_proposal)
+        assert isinstance(proposal, dict)
+        return proposal
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -180,6 +200,7 @@ class B13InventoryWindow:
             "output_schema_identity": self.output_schema_identity,
             "invocation_provenance": self.invocation_provenance,
             "rejected_round_provenance": list(self.rejected_round_provenance),
+            "proposal": self.proposal(),
         }
 
 
@@ -233,7 +254,8 @@ class B13ReconciliationInventory:
         windows = tuple(self.windows)
         candidates = tuple(self.candidates)
         findings = tuple(self.findings)
-        if not windows or tuple(item.window_ordinal for item in windows) != tuple(range(1, len(windows) + 1)):
+        if (not windows or any(not isinstance(item, B13InventoryWindow) for item in windows)
+                or tuple(item.window_ordinal for item in windows) != tuple(range(1, len(windows) + 1))):
             raise B13ReconciliationError("inventory windows must retain exact deterministic order")
         if len({item.window_id for item in windows}) != len(windows):
             raise B13ReconciliationError("inventory windows must not repeat")
@@ -252,12 +274,17 @@ class B13ReconciliationInventory:
             raise B13ReconciliationError("inventory candidate has an unknown local link")
         if any(not set(item.candidate_refs) <= candidate_refs for item in findings):
             raise B13ReconciliationError("finding references an unknown candidate")
-        expected_identity = content_hash({
-            "stage": "B1.3-B3A", "source_snapshot": self.source_snapshot.to_dict(),
-            "strategy_ref": self.strategy_ref, "strategy_hash": self.strategy_hash,
-            "preparation_identity": self.preparation_identity,
-            "windows": [item.to_dict() for item in windows],
-        })
+        expected_candidates = tuple(candidate for window in windows for candidate in _proposal_candidates(window.window_id, window.proposal()))
+        if tuple(sorted(candidates, key=lambda item: item.ref)) != tuple(sorted(expected_candidates, key=lambda item: item.ref)):
+            raise B13ReconciliationError("inventory candidates do not match exact window proposals")
+        evidence_identity = _inventory_evidence_identity(
+            self.source_snapshot, self.strategy_ref, self.strategy_hash,
+            self.preparation_identity, windows, candidates,
+        )
+        expected_findings = _static_findings(evidence_identity, tuple(sorted(candidates, key=lambda item: item.ref)))
+        if tuple(sorted(findings, key=lambda item: item.finding_id)) != expected_findings:
+            raise B13ReconciliationError("inventory findings do not match exact candidate inventory")
+        expected_identity = _inventory_identity(evidence_identity, candidates, findings)
         if self.inventory_identity != expected_identity:
             raise B13ReconciliationError("inventory identity does not bind its exact execution result")
         object.__setattr__(self, "windows", tuple(sorted(windows, key=lambda item: item.window_ordinal)))
@@ -403,12 +430,11 @@ def _window_from_accepted(accepted: B13WindowAcceptedProposal) -> B13InventoryWi
         tuple({"semantic_round": item.semantic_round, "provider_attempts": item.provider_attempts,
                "diagnostic": item.diagnostic, "invocation_provenance": item.invocation_provenance.to_dict()}
               for item in accepted.rejected_semantic_rounds),
+        accepted.proposal.canonical_bytes(),
     )
 
 
-def _proposal_candidates(accepted: B13WindowAcceptedProposal) -> tuple[B13ReconciliationCandidate, ...]:
-    window_id = accepted.window_id
-    proposal = accepted.proposal.to_dict()
+def _proposal_candidates(window_id: str, proposal: dict[str, Any]) -> tuple[B13ReconciliationCandidate, ...]:
     candidates: list[B13ReconciliationCandidate] = []
     for item in proposal["event_dispositions"]:
         candidates.append(_candidate(window_id, B13CandidateKind.EVENT_DISPOSITION, item["source_event_id"], item, (_ref({"kind": "event", "canonical_id": item["source_event_id"]}),)))
@@ -447,6 +473,31 @@ def _proposal_candidates(accepted: B13WindowAcceptedProposal) -> tuple[B13Reconc
         candidates.append(_candidate(window_id, B13CandidateKind.STORY_STATE_REQUIREMENT,
                                      f"state-{item['adapted_story_beat_local_key']}", item, (), (beat_ref,)))
     return tuple(candidates)
+
+
+def _inventory_evidence_identity(
+    source_snapshot: AdaptationSourceSnapshot, strategy_ref: dict[str, Any], strategy_hash: str,
+    preparation_identity: str, windows: tuple[B13InventoryWindow, ...],
+    candidates: tuple[B13ReconciliationCandidate, ...],
+) -> str:
+    return content_hash({
+        "stage": "B1.3-B3A-evidence", "source_snapshot": source_snapshot.to_dict(),
+        "strategy_ref": strategy_ref, "strategy_hash": strategy_hash,
+        "preparation_identity": preparation_identity,
+        "windows": [item.to_dict() for item in windows],
+        "candidates": [item.to_dict() for item in sorted(candidates, key=lambda item: item.ref)],
+    })
+
+
+def _inventory_identity(
+    evidence_identity: str, candidates: tuple[B13ReconciliationCandidate, ...],
+    findings: tuple[B13ReconciliationFinding, ...],
+) -> str:
+    return content_hash({
+        "stage": "B1.3-B3A", "evidence_identity": evidence_identity,
+        "candidates": [item.to_dict() for item in sorted(candidates, key=lambda item: item.ref)],
+        "findings": [item.to_dict() for item in sorted(findings, key=lambda item: item.finding_id)],
+    })
 
 
 def _finding(inventory_identity: str, kind: B13ReconciliationFindingKind, candidates: Iterable[B13CandidateRef], sources: Iterable[CanonicalTargetReference], detail: str) -> B13ReconciliationFinding:
@@ -512,20 +563,17 @@ def build_b13_reconciliation_inventory(result: B13DispositionExecutionResult) ->
     expected_events = tuple(sorted((ref.canonical_id for ref in result.source_snapshot.canonical_references if ref.kind == "event")))
     if len(owned) != len(set(owned)) or set(owned) != set(expected_events):
         raise B13ReconciliationError("accepted windows do not provide complete exact-one event ownership")
-    candidates = tuple(candidate for item in accepted for candidate in _proposal_candidates(item))
+    candidates = tuple(candidate for window in windows for candidate in _proposal_candidates(window.window_id, window.proposal()))
     if len({item.ref for item in candidates}) != len(candidates):
         raise B13ReconciliationError("accepted proposals duplicate a scoped candidate reference")
     if any(not set(candidate.source_refs) <= set(result.source_snapshot.canonical_references) for candidate in candidates):
         raise B13ReconciliationError("candidate references source outside exact snapshot")
-    identity_material = {
-        "stage": "B1.3-B3A", "source_snapshot": result.source_snapshot.to_dict(),
-        "strategy_ref": result.strategy_selection.strategy_ref.to_dict(),
-        "strategy_hash": result.strategy_selection.strategy_hash,
-        "preparation_identity": result.preparation_identity,
-        "windows": [item.to_dict() for item in windows],
-    }
-    inventory_identity = content_hash(identity_material)
-    findings = _static_findings(inventory_identity, candidates)
+    evidence_identity = _inventory_evidence_identity(
+        result.source_snapshot, result.strategy_selection.strategy_ref.to_dict(),
+        result.strategy_selection.strategy_hash, result.preparation_identity, windows, candidates,
+    )
+    findings = _static_findings(evidence_identity, candidates)
+    inventory_identity = _inventory_identity(evidence_identity, candidates, findings)
     return B13ReconciliationInventory(result.source_snapshot, result.strategy_selection.strategy_ref.to_dict(),
                                       result.strategy_selection.strategy_hash, result.preparation_identity,
                                       windows, candidates, findings, inventory_identity)
@@ -535,40 +583,73 @@ def _identity_pair(decision: B13ReconciliationDecision) -> tuple[B13CandidateRef
     return decision.candidate_refs[0], decision.candidate_refs[1]
 
 
-def _equivalence_finding(inventory: B13ReconciliationInventory, decision: B13ReconciliationDecision) -> B13ReconciliationFinding | None:
+def _require_compatible_equivalence(inventory: B13ReconciliationInventory, decision: B13ReconciliationDecision) -> None:
     left, right = (inventory.candidate(ref) for ref in _identity_pair(decision))
     if left.ref.candidate_kind is B13CandidateKind.ADAPTED_CHARACTER:
         compatible = left.payload()["origin"] == right.payload()["origin"] and left.payload()["function_provenance"] == right.payload()["function_provenance"]
-        kind = B13ReconciliationFindingKind.INCOMPATIBLE_CHARACTER_EQUIVALENCE
-        detail = "explicit character equivalence has incompatible origin or function provenance"
     elif left.ref.candidate_kind is B13CandidateKind.ADAPTED_STORY_BEAT:
         compatible = (left.payload()["origin"] == right.payload()["origin"]
                       and left.payload()["source_event_refs"] == right.payload()["source_event_refs"]
                       and left.payload()["canonical_anchor_refs"] == right.payload()["canonical_anchor_refs"])
-        kind = B13ReconciliationFindingKind.INCOMPATIBLE_BEAT_EQUIVALENCE
-        detail = "explicit beat equivalence has incompatible origin or source membership"
     else:
-        return None
+        return
     if compatible:
-        return None
-    return _finding(inventory.inventory_identity, kind, (left.ref, right.ref),
-                    (*left.source_refs, *right.source_refs), detail)
-
-
-def _story_state_equivalence_findings(inventory: B13ReconciliationInventory, decision: B13ReconciliationDecision) -> tuple[B13ReconciliationFinding, ...]:
-    """State candidates only compete after an explicit beat-identity decision."""
-    left, right = _identity_pair(decision)
-    if left.candidate_kind is not B13CandidateKind.ADAPTED_STORY_BEAT:
-        return ()
-    state_candidates = [item for item in inventory.candidates if item.ref.candidate_kind is B13CandidateKind.STORY_STATE_REQUIREMENT]
-    left_states = [item for item in state_candidates if left in item.local_links]
-    right_states = [item for item in state_candidates if right in item.local_links]
-    return tuple(
-        _finding(inventory.inventory_identity, B13ReconciliationFindingKind.COMPETING_STORY_STATE_REQUIREMENTS,
-                 (first.ref, second.ref), (),
-                 "state candidates target explicitly equivalent beats; Python does not compare their assertions")
-        for first in left_states for second in right_states
+        if left.ref.candidate_kind is not B13CandidateKind.ADAPTED_STORY_BEAT:
+            return
+        state_candidates = [item for item in inventory.candidates if item.ref.candidate_kind is B13CandidateKind.STORY_STATE_REQUIREMENT]
+        if not any(left.ref in item.local_links for item in state_candidates) or not any(right.ref in item.local_links for item in state_candidates):
+            return
+    raise B13ReconciliationError(
+        "explicit candidate equivalence is incompatible; choose distinct identities or corrected candidates"
     )
+
+
+def _validate_equivalence_closure(
+    decisions: dict[tuple[B13CandidateRef, B13CandidateRef], B13ReconciliationDecisionKind],
+) -> None:
+    """Check only caller-declared identity edges; no semantic identity inference."""
+    parent: dict[B13CandidateRef, B13CandidateRef] = {}
+
+    def find(ref: B13CandidateRef) -> B13CandidateRef:
+        parent.setdefault(ref, ref)
+        if parent[ref] != ref:
+            parent[ref] = find(parent[ref])
+        return parent[ref]
+
+    for (left, right), kind in decisions.items():
+        if kind is B13ReconciliationDecisionKind.IDENTIFY_EQUIVALENT:
+            left_root, right_root = find(left), find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+    for (left, right), kind in decisions.items():
+        if kind is B13ReconciliationDecisionKind.KEEP_DISTINCT and find(left) == find(right):
+            raise B13ReconciliationError("transitively equivalent candidates cannot also be kept distinct")
+
+
+def _finding_is_resolved(
+    finding: B13ReconciliationFinding,
+    decisions: dict[B13CandidateRef, B13ReconciliationDecisionKind],
+) -> bool:
+    rejected = {ref for ref in finding.candidate_refs if decisions.get(ref) is B13ReconciliationDecisionKind.REJECT_CONTRIBUTION}
+    if finding.kind in {
+        B13ReconciliationFindingKind.COMPETING_FACTUAL_DIVERGENCES,
+        B13ReconciliationFindingKind.COMPETING_RELATIONSHIP_REQUIREMENTS,
+    }:
+        # AdaptedContinuityOverlay permits at most one retained item for the
+        # source fact/relationship.  Contributions not explicitly rejected
+        # remain candidates; one rejection of a three-way group is insufficient.
+        return len(set(finding.candidate_refs) - rejected) <= 1
+    if finding.kind is B13ReconciliationFindingKind.OWNER_OMIT_CONTEXT_MEMBERSHIP:
+        owner_refs = {
+            ref for ref in finding.candidate_refs
+            if ref.candidate_kind is B13CandidateKind.EVENT_DISPOSITION
+        }
+        if len(owner_refs) != 1:
+            raise B13ReconciliationError("owner-omit finding does not retain one authoritative disposition")
+        # The owner disposition is not rejectable.  Every conflicting advisory
+        # materialization must be explicitly removed before B3B can proceed.
+        return set(finding.candidate_refs) - owner_refs <= rejected
+    raise B13ReconciliationError("unsupported reconciliation finding kind")
 
 
 def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: B13ReconciliationDecisionSet) -> B13ReconciliationReview:
@@ -581,7 +662,6 @@ def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: 
     static = {item.finding_id: item for item in inventory.findings}
     identity_decisions: dict[tuple[B13CandidateRef, B13CandidateRef], B13ReconciliationDecisionKind] = {}
     contribution_decisions: dict[B13CandidateRef, B13ReconciliationDecisionKind] = {}
-    dynamic: list[B13ReconciliationFinding] = []
     for decision in decisions.decisions:
         if any(ref not in candidates for ref in decision.candidate_refs):
             raise B13ReconciliationError("decision references an unknown candidate")
@@ -597,10 +677,7 @@ def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: 
                 raise B13ReconciliationError("duplicate or contradictory identity decision")
             identity_decisions[pair] = decision.kind
             if decision.kind is B13ReconciliationDecisionKind.IDENTIFY_EQUIVALENT:
-                finding = _equivalence_finding(inventory, decision)
-                if finding is not None:
-                    dynamic.append(finding)
-                dynamic.extend(_story_state_equivalence_findings(inventory, decision))
+                _require_compatible_equivalence(inventory, decision)
         elif decision.kind in {B13ReconciliationDecisionKind.ACCEPT_CONTRIBUTION, B13ReconciliationDecisionKind.REJECT_CONTRIBUTION}:
             ref = decision.candidate_refs[0]
             if ref.candidate_kind is B13CandidateKind.EVENT_DISPOSITION and decision.kind is B13ReconciliationDecisionKind.REJECT_CONTRIBUTION:
@@ -612,15 +689,15 @@ def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: 
                 if ref not in static[finding_id].candidate_refs:
                     raise B13ReconciliationError("contribution decision does not affect its claimed finding")
             contribution_decisions[ref] = decision.kind
-    all_findings = tuple(sorted((*inventory.findings, *dynamic), key=lambda item: item.finding_id))
+    _validate_equivalence_closure(identity_decisions)
+    all_findings = inventory.findings
     unresolved: list[str] = []
     marked = {finding_id for decision in decisions.decisions if decision.kind is B13ReconciliationDecisionKind.MARK_UNRESOLVED for finding_id in decision.finding_ids}
     for finding in all_findings:
-        # Dynamic equivalence findings cannot be claimed by a stale static finding ID.
         if finding.finding_id in marked:
             unresolved.append(finding.finding_id)
             continue
-        if not any(contribution_decisions.get(ref) is B13ReconciliationDecisionKind.REJECT_CONTRIBUTION for ref in finding.candidate_refs):
+        if not _finding_is_resolved(finding, contribution_decisions):
             unresolved.append(finding.finding_id)
     return B13ReconciliationReview(inventory, decisions, all_findings, tuple(sorted(unresolved)))
 

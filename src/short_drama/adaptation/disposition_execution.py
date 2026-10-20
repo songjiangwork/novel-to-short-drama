@@ -71,6 +71,33 @@ class B13WindowSemanticGenerationPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class B13WindowRejectedSemanticRound:
+    """Minimal audit record for one schema-valid rejected semantic proposal.
+
+    It deliberately excludes the rejected raw proposal.  The accepted window
+    record instead retains its exact provider provenance, while this record
+    makes the prior completed invocation and its adapter cost unambiguous.
+    """
+
+    semantic_round: int
+    provider_attempts: int
+    invocation_provenance: LLMInvocationProvenance
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        if self.semantic_round not in (1, 2):
+            raise B13WindowExecutionError("rejected semantic round number is invalid")
+        if (isinstance(self.provider_attempts, bool)
+                or not isinstance(self.provider_attempts, int)
+                or self.provider_attempts < 1):
+            raise B13WindowExecutionError("rejected semantic round provider attempts are invalid")
+        if not isinstance(self.invocation_provenance, LLMInvocationProvenance):
+            raise B13WindowExecutionError("rejected semantic round provenance is invalid")
+        if not isinstance(self.diagnostic, str) or not self.diagnostic or len(self.diagnostic) > 500:
+            raise B13WindowExecutionError("rejected semantic round diagnostic is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class B13WindowAcceptedProposal:
     """One accepted local proposal and the exact invocation that produced it."""
 
@@ -84,8 +111,11 @@ class B13WindowAcceptedProposal:
     rendered_prompt_hash: str
     invocation_provenance: LLMInvocationProvenance
     semantic_rounds: int
+    # Cumulative across every completed semantic invocation for this window.
     provider_attempts: int
+    accepted_round_provider_attempts: int
     semantic_failures: tuple[str, ...]
+    rejected_semantic_rounds: tuple[B13WindowRejectedSemanticRound, ...]
     proposal: B13WindowProposal
 
     def __post_init__(self) -> None:
@@ -96,8 +126,24 @@ class B13WindowAcceptedProposal:
             self.request_identity, self.semantic_request_hash, self.rendered_prompt_hash,
         )):
             raise B13WindowExecutionError("accepted request identities must be SHA-256 hashes")
-        if self.semantic_rounds not in (1, 2) or self.provider_attempts < 1:
+        if self.semantic_rounds not in (1, 2):
             raise B13WindowExecutionError("accepted window attempt accounting is invalid")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in (
+            self.provider_attempts, self.accepted_round_provider_attempts,
+        )):
+            raise B13WindowExecutionError("accepted window provider attempt accounting is invalid")
+        rejected = tuple(self.rejected_semantic_rounds)
+        if any(not isinstance(item, B13WindowRejectedSemanticRound) for item in rejected):
+            raise B13WindowExecutionError("accepted window rejected semantic rounds are invalid")
+        if (self.semantic_rounds != len(rejected) + 1
+                or tuple(item.semantic_round for item in rejected) != tuple(range(1, self.semantic_rounds))
+                or self.provider_attempts != self.accepted_round_provider_attempts + sum(
+                    item.provider_attempts for item in rejected
+                )):
+            raise B13WindowExecutionError("accepted window provider attempt accounting is inconsistent")
+        failures = tuple(self.semantic_failures)
+        if failures != tuple(item.diagnostic for item in rejected):
+            raise B13WindowExecutionError("accepted window semantic failure diagnostics are inconsistent")
         if not isinstance(self.proposal, B13WindowProposal):
             raise B13WindowExecutionError("accepted window requires B13WindowProposal")
         if (self.proposal.packet.window_id != self.window_id
@@ -205,6 +251,13 @@ def _verify_provenance(
         raise B13WindowProvenanceError(
             "B1.3 provider provenance does not match the exact prepared request"
         )
+
+
+def _provider_attempts(value: Any) -> int:
+    """Validate one completed adapter invocation's local retry count."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise B13WindowExecutionError("LLMClient returned invalid provider attempt accounting")
+    return value
 
 
 def _revalidate_authority(
@@ -322,6 +375,8 @@ def execute_b13_disposition_windows(
     retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
     for semantic, budget in zip(semantic_preparations, budgets):
         failures: list[str] = []
+        rejected_rounds: list[B13WindowRejectedSemanticRound] = []
+        cumulative_provider_attempts = 0
         for round_number in range(1, policy.max_rounds + 1):
             options = semantic.execution_options if round_number == 1 else retry_options
             _verify_budget(semantic, runtime_config, options, budget)
@@ -330,13 +385,22 @@ def execute_b13_disposition_windows(
                 semantic.request.rendered_prompt, semantic.output_schema,
                 semantic.semantic_profile, execution_options=options,
             )
+            round_provider_attempts = _provider_attempts(result.attempts)
+            cumulative_provider_attempts += round_provider_attempts
             # Authority races win over proposal acceptance or retry decisions.
             _revalidate_authority(store, pointers, preparation)
             _verify_provenance(result.provenance, semantic, runtime_config)
             try:
                 proposal = semantic.decode_and_validate_proposal(result.parsed_json)
             except B13WindowProposalError as exc:
-                failures.append(str(exc)[:500])
+                diagnostic = str(exc)[:500]
+                failures.append(diagnostic)
+                rejected_rounds.append(B13WindowRejectedSemanticRound(
+                    semantic_round=round_number,
+                    provider_attempts=round_provider_attempts,
+                    invocation_provenance=result.provenance,
+                    diagnostic=diagnostic,
+                ))
                 continue
             except B13WindowSchemaError:
                 raise
@@ -362,8 +426,10 @@ def execute_b13_disposition_windows(
                 rendered_prompt_hash=semantic.request.rendered_prompt.rendered_prompt_hash,
                 invocation_provenance=result.provenance,
                 semantic_rounds=round_number,
-                provider_attempts=result.attempts,
-                semantic_failures=tuple(failures), proposal=proposal,
+                provider_attempts=cumulative_provider_attempts,
+                accepted_round_provider_attempts=round_provider_attempts,
+                semantic_failures=tuple(failures),
+                rejected_semantic_rounds=tuple(rejected_rounds), proposal=proposal,
             ))
             break
         else:
@@ -381,6 +447,7 @@ def execute_b13_disposition_windows(
 __all__ = [
     "B13_MAX_SEMANTIC_GENERATION_ROUNDS", "B13WindowExecutionError",
     "B13WindowProvenanceError", "B13WindowGenerationExhaustedError",
-    "B13WindowSemanticGenerationPolicy", "B13WindowAcceptedProposal",
+    "B13WindowSemanticGenerationPolicy", "B13WindowRejectedSemanticRound",
+    "B13WindowAcceptedProposal",
     "B13DispositionExecutionResult", "execute_b13_disposition_windows",
 ]

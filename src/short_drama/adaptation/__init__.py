@@ -68,7 +68,8 @@ from .disposition_semantic import (
 from .disposition_execution import (
     B13_MAX_SEMANTIC_GENERATION_ROUNDS, B13WindowExecutionError,
     B13WindowProvenanceError, B13WindowGenerationExhaustedError,
-    B13WindowSemanticGenerationPolicy, B13WindowAcceptedProposal,
+    B13WindowSemanticGenerationPolicy, B13WindowRejectedSemanticRound,
+    B13WindowAcceptedProposal,
     B13DispositionExecutionResult, execute_b13_disposition_windows,
 )
 
@@ -109,6 +110,7 @@ __all__ = [
     "b13_window_request_identity", "build_b13_window_semantic_preparation",
     "B13_MAX_SEMANTIC_GENERATION_ROUNDS", "B13WindowExecutionError",
     "B13WindowProvenanceError", "B13WindowGenerationExhaustedError",
-    "B13WindowSemanticGenerationPolicy", "B13WindowAcceptedProposal",
+    "B13WindowSemanticGenerationPolicy", "B13WindowRejectedSemanticRound",
+    "B13WindowAcceptedProposal",
     "B13DispositionExecutionResult", "execute_b13_disposition_windows",
 ]

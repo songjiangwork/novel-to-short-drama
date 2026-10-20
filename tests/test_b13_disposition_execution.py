@@ -19,6 +19,8 @@ from short_drama.adaptation.target import CanonicalTargetReference
 from short_drama.artifacts import ImmutableArtifactEnvelope, canonical_json_bytes
 from short_drama.foundation import PointerKind
 from short_drama.llm import LLMTransportError
+from short_drama.llm import GenerationExecutionOptions
+from short_drama.story.chunking import estimate_tokens
 from short_drama.story.story_analysis import StoryAnalysisManifest
 from short_drama.story.story_analysis_persistence import a6_pointer_id
 
@@ -62,6 +64,17 @@ def _tree_bytes(root: Path):
     }
 
 
+class _AttemptCountingFakeClient(_FakeClient):
+    """Fake adapter results with explicit per-invocation retry counts."""
+
+    def __init__(self, results, runtime, attempts):
+        super().__init__(results, runtime)
+        self._attempts = iter(attempts)
+
+    def generate_structured(self, *args, **kwargs):
+        return replace(super().generate_structured(*args, **kwargs), attempts=next(self._attempts))
+
+
 def test_preflight_checks_both_mapped_attempt_budgets_before_any_call(tmp_path):
     tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
     insufficient = (replace(budgets[0], input_ceiling_tokens=1),)
@@ -83,7 +96,10 @@ def test_valid_execution_retains_exact_window_proposal_and_provenance_in_memory(
     assert accepted.semantic_request_hash == requests[0].request.request_hash
     assert accepted.proposal.to_dict() == _proposal(requests[0].packet)
     assert accepted.semantic_rounds == 1
+    assert accepted.provider_attempts == 1
+    assert accepted.accepted_round_provider_attempts == 1
     assert accepted.semantic_failures == ()
+    assert accepted.rejected_semantic_rounds == ()
     assert _tree_bytes(tree.store.root) == store_before
     assert _tree_bytes(tree.pointers.root) == pointers_before
 
@@ -99,7 +115,25 @@ def test_schema_valid_semantic_invalidity_gets_one_cache_disabled_regeneration(t
     assert fake.calls[0] is None
     assert fake.calls[1].prompt_context_reuse == "disabled"
     assert accepted.semantic_rounds == 2
+    assert accepted.provider_attempts == 2
+    assert accepted.accepted_round_provider_attempts == 1
     assert len(accepted.semantic_failures) == 1
+    assert accepted.rejected_semantic_rounds[0].provider_attempts == 1
+    assert accepted.rejected_semantic_rounds[0].invocation_provenance.request_hash == requests[0].request.request_hash
+
+
+def test_provider_attempts_accumulate_non_unit_adapter_attempts_across_regeneration(tmp_path):
+    tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
+    invalid = _proposal(requests[0].packet)
+    invalid["event_dispositions"][0]["disposition"] = "omit"
+    fake = _AttemptCountingFakeClient(
+        [(invalid, False), (_proposal(requests[0].packet), False)], runtime, attempts=(3, 2),
+    )
+    accepted = _execute(tree, preparation, requests, budgets, runtime, fake).accepted_windows[0]
+    assert accepted.semantic_rounds == 2
+    assert accepted.provider_attempts == 5
+    assert accepted.accepted_round_provider_attempts == 2
+    assert accepted.rejected_semantic_rounds[0].provider_attempts == 3
 
 
 def test_semantic_regeneration_exhaustion_does_not_return_partial_result(tmp_path):
@@ -194,8 +228,8 @@ def test_explicit_historical_b12_pin_does_not_require_it_to_remain_current(tmp_p
     assert result.strategy_selection.current_pointer_ref is None
 
 
-def test_multiple_in_memory_windows_execute_in_deterministic_ordinal_order(tmp_path, monkeypatch):
-    """The executor serializes all preflight-approved windows by ordinal."""
+def _two_window_inputs(tmp_path):
+    """Synthetic B2B-only two-window fixture; B1/B2A coverage is tested elsewhere."""
     tree, _semantic, _publication, preparation, _requests, _budgets, runtime = _execution_inputs(tmp_path)
     base_packet = preparation.packets[0]
     source = replace(
@@ -243,12 +277,39 @@ def test_multiple_in_memory_windows_execute_in_deterministic_ordinal_order(tmp_p
     )
     requests = tuple(build_b13_window_semantic_preparation(packet, runtime_config=runtime) for packet in packets)
     budgets = tuple(B13WindowSemanticBudget(runtime.request_model, 1_000_000, 1_000_000) for _ in packets)
+    return tree, two, requests, budgets, runtime, first, second
+
+
+def _allow_synthetic_two_window_preflight(monkeypatch, two):
     # Source/strategy races and full A6 ownership have dedicated real-store
     # tests above.  This fixture isolates only the two-window execution order.
     import short_drama.adaptation.disposition_execution as execution_module
     monkeypatch.setattr(execution_module, "prepare_b13_disposition_windows", lambda **_kwargs: two)
     monkeypatch.setattr(execution_module, "_revalidate_authority", lambda *_args: None)
+
+
+def test_multiple_in_memory_windows_execute_in_deterministic_ordinal_order(tmp_path, monkeypatch):
+    """The executor serializes all preflight-approved windows by ordinal."""
+    tree, two, requests, budgets, runtime, first, second = _two_window_inputs(tmp_path)
+    _allow_synthetic_two_window_preflight(monkeypatch, two)
     fake = _FakeClient([(_proposal(first), False), (_proposal(second), False)], runtime)
     result = _execute(tree, two, requests, budgets, runtime, fake)
     assert [item.window_id for item in result.accepted_windows] == ["window_0001", "window_0002"]
     assert len(fake.calls) == 2
+
+
+def test_second_window_retry_budget_failure_stops_all_provider_calls(tmp_path, monkeypatch):
+    tree, two, requests, budgets, runtime, _first, _second = _two_window_inputs(tmp_path)
+    _allow_synthetic_two_window_preflight(monkeypatch, two)
+    from short_drama.adaptation.disposition_semantic import _mapped_provider_request_bytes
+
+    retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
+    retry_tokens = estimate_tokens(_mapped_provider_request_bytes(
+        requests[1].request, runtime, retry_options,
+    ).decode("utf-8"))
+    assert retry_tokens > requests[1].measurement.provider_request_estimated_tokens
+    insufficient_second = replace(budgets[1], input_ceiling_tokens=retry_tokens - 1)
+    fake = _FakeClient([], runtime)
+    with pytest.raises(B13WindowSemanticBudgetError, match="input ceiling"):
+        _execute(tree, two, requests, (budgets[0], insufficient_second), runtime, fake)
+    assert fake.calls == []

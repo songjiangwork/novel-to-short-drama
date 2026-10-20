@@ -59,10 +59,18 @@ from .disposition_preparation import (
     B13DispositionPreparation, prepare_b13_disposition_windows,
 )
 from .disposition_semantic import (
-    B13WindowSemanticError, B13WindowSemanticBudgetError, B13WindowSemanticAssetSelection,
+    B13WindowSemanticError, B13WindowSchemaError, B13WindowProposalError,
+    B13WindowSemanticBudgetError, B13WindowSemanticAssetSelection,
     B13WindowProposal, B13WindowSemanticBudget, B13WindowSemanticMeasurement,
     B13WindowSemanticPreparation, load_b13_window_semantic_assets,
     b13_window_request_identity, build_b13_window_semantic_preparation,
+)
+from .disposition_execution import (
+    B13_MAX_SEMANTIC_GENERATION_ROUNDS, B13WindowExecutionError,
+    B13WindowProvenanceError, B13WindowGenerationExhaustedError,
+    B13WindowSemanticGenerationPolicy, B13WindowRejectedSemanticRound,
+    B13WindowAcceptedProposal,
+    B13DispositionExecutionResult, execute_b13_disposition_windows,
 )
 
 __all__ = [
@@ -95,8 +103,14 @@ __all__ = [
     "B12StrategySelection", "resolve_b12_strategy_selection",
     "B13DispositionWindowPacket", "B13DispositionPacketMeasurement",
     "B13DispositionPreparation", "prepare_b13_disposition_windows",
-    "B13WindowSemanticError", "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
+    "B13WindowSemanticError", "B13WindowSchemaError", "B13WindowProposalError",
+    "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
     "B13WindowProposal", "B13WindowSemanticBudget", "B13WindowSemanticMeasurement",
     "B13WindowSemanticPreparation", "load_b13_window_semantic_assets",
     "b13_window_request_identity", "build_b13_window_semantic_preparation",
+    "B13_MAX_SEMANTIC_GENERATION_ROUNDS", "B13WindowExecutionError",
+    "B13WindowProvenanceError", "B13WindowGenerationExhaustedError",
+    "B13WindowSemanticGenerationPolicy", "B13WindowRejectedSemanticRound",
+    "B13WindowAcceptedProposal",
+    "B13DispositionExecutionResult", "execute_b13_disposition_windows",
 ]

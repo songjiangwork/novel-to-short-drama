@@ -44,6 +44,19 @@ class B13WindowSemanticError(B13PreparationError):
     """A B1.3 window semantic asset, proposal, or budget is invalid."""
 
 
+class B13WindowSchemaError(B13WindowSemanticError):
+    """A provider value did not satisfy the pinned output JSON Schema.
+
+    This is deliberately distinct from a schema-valid proposal which violates
+    a B1.3 semantic invariant.  The common adapter owns retry of malformed
+    structured output; B1.3 only regenerates the latter.
+    """
+
+
+class B13WindowProposalError(B13WindowSemanticError):
+    """A schema-valid window proposal violates a B1.3 semantic invariant."""
+
+
 class B13WindowSemanticBudgetError(B13WindowSemanticError):
     """An explicit future provider context declaration is insufficient."""
 
@@ -128,12 +141,21 @@ class B13WindowProposal:
         try:
             validate_against_output_schema(value, schema)
         except Exception as exc:
-            raise B13WindowSemanticError("window proposal violates the selected output schema") from exc
+            raise B13WindowSchemaError("window proposal violates the selected output schema") from exc
         cls._validate(packet, value)
         return cls(packet, canonical_json_bytes(value))
 
     @staticmethod
     def _validate(packet: B13DispositionWindowPacket, value: dict[str, Any]) -> None:
+        # All failures below occur after JSON Schema acceptance.  Keeping the
+        # classification explicit lets B2B retry only semantic invalidity.
+        try:
+            B13WindowProposal._validate_semantics(packet, value)
+        except B13WindowSemanticError as exc:
+            raise B13WindowProposalError(str(exc)) from exc
+
+    @staticmethod
+    def _validate_semantics(packet: B13DispositionWindowPacket, value: dict[str, Any]) -> None:
         _exact(value, {"schema_version", "event_dispositions", "adapted_characters", "anonymous_roles", "adapted_story_beats", "adaptation_mappings", "continuity_overlay_candidates"}, "window proposal")
         if value["schema_version"] != 1:
             raise B13WindowSemanticError("unsupported B1.3 window proposal schema_version")
@@ -472,7 +494,8 @@ def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *,
 __all__ = [
     "B13_WINDOW_PROMPT_ID", "B13_WINDOW_PROMPT_VERSION", "B13_WINDOW_OUTPUT_SCHEMA_ID",
     "B13_WINDOW_PROMPT_CONTENT_HASH_V1",
-    "B13WindowSemanticError", "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
+    "B13WindowSemanticError", "B13WindowSchemaError", "B13WindowProposalError",
+    "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
     "B13WindowProposal", "B13WindowSemanticBudget", "B13WindowSemanticMeasurement",
     "B13WindowSemanticPreparation", "load_b13_window_semantic_assets",
     "b13_window_request_identity", "build_b13_window_semantic_preparation",

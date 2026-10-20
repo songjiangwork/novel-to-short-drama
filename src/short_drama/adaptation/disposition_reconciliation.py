@@ -376,11 +376,23 @@ class B13ReconciliationReview:
     findings: tuple[B13ReconciliationFinding, ...]
     unresolved_finding_ids: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        self._validate_derivation()
+
+    def _validate_derivation(self) -> None:
+        findings, unresolved = _derive_b13_reconciliation_review(self.inventory, self.decisions)
+        if tuple(self.findings) != findings:
+            raise B13ReconciliationError("review findings do not match the authoritative reconciliation derivation")
+        if tuple(self.unresolved_finding_ids) != unresolved:
+            raise B13ReconciliationError("review unresolved finding IDs do not match the authoritative reconciliation derivation")
+
     @property
     def is_resolved(self) -> bool:
+        self._validate_derivation()
         return not self.unresolved_finding_ids
 
     def require_resolved(self) -> None:
+        self._validate_derivation()
         if self.unresolved_finding_ids:
             raise B13ReconciliationError("cross-window reconciliation contains unresolved findings")
 
@@ -652,12 +664,31 @@ def _finding_is_resolved(
     raise B13ReconciliationError("unsupported reconciliation finding kind")
 
 
-def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: B13ReconciliationDecisionSet) -> B13ReconciliationReview:
-    """Validate explicit decisions and expose every unresolved conflict to B3B."""
+def _validated_review_inputs(
+    inventory: B13ReconciliationInventory, decisions: B13ReconciliationDecisionSet,
+) -> tuple[B13ReconciliationInventory, B13ReconciliationDecisionSet]:
     if not isinstance(inventory, B13ReconciliationInventory) or not isinstance(decisions, B13ReconciliationDecisionSet):
         raise B13ReconciliationError("review requires an inventory and a decision set")
-    if decisions.inventory_identity != inventory.inventory_identity:
+    verified_inventory = B13ReconciliationInventory(
+        inventory.source_snapshot, inventory.strategy_ref, inventory.strategy_hash,
+        inventory.preparation_identity, inventory.windows, inventory.candidates,
+        inventory.findings, inventory.inventory_identity,
+    )
+    verified_decisions = B13ReconciliationDecisionSet(
+        decisions.inventory_identity, decisions.decisions,
+    )
+    if verified_inventory != inventory or verified_decisions != decisions:
+        raise B13ReconciliationError("review inputs are not canonical reconciliation contracts")
+    if verified_decisions.inventory_identity != verified_inventory.inventory_identity:
         raise B13ReconciliationError("decision set references another or stale reconciliation inventory")
+    return verified_inventory, verified_decisions
+
+
+def _derive_b13_reconciliation_review(
+    inventory: B13ReconciliationInventory, decisions: B13ReconciliationDecisionSet,
+) -> tuple[tuple[B13ReconciliationFinding, ...], tuple[str, ...]]:
+    """Pure deterministic review derivation; it never constructs a Review."""
+    inventory, decisions = _validated_review_inputs(inventory, decisions)
     candidates = {item.ref: item for item in inventory.candidates}
     static = {item.finding_id: item for item in inventory.findings}
     identity_decisions: dict[tuple[B13CandidateRef, B13CandidateRef], B13ReconciliationDecisionKind] = {}
@@ -699,7 +730,13 @@ def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: 
             continue
         if not _finding_is_resolved(finding, contribution_decisions):
             unresolved.append(finding.finding_id)
-    return B13ReconciliationReview(inventory, decisions, all_findings, tuple(sorted(unresolved)))
+    return all_findings, tuple(sorted(unresolved))
+
+
+def review_b13_reconciliation(inventory: B13ReconciliationInventory, decisions: B13ReconciliationDecisionSet) -> B13ReconciliationReview:
+    """Validate explicit decisions and expose every unresolved conflict to B3B."""
+    findings, unresolved = _derive_b13_reconciliation_review(inventory, decisions)
+    return B13ReconciliationReview(inventory, decisions, findings, unresolved)
 
 
 __all__ = [

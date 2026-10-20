@@ -11,7 +11,8 @@ from short_drama.adaptation import (
     B13DispositionWindowPacket,
     B13ReconciliationDecision, B13ReconciliationDecisionKind,
     B13ReconciliationDecisionSet, B13ReconciliationError,
-    B13ReconciliationFindingKind, B13WindowAcceptedProposal,
+    B13ReconciliationFindingKind, B13ReconciliationReview,
+    B13WindowAcceptedProposal,
     build_b13_reconciliation_inventory, build_b13_window_semantic_preparation,
     review_b13_reconciliation,
 )
@@ -373,3 +374,42 @@ def test_incompatible_explicit_equivalence_fails_immediately_without_dynamic_fin
     )
     with pytest.raises(B13ReconciliationError, match="incompatible"):
         review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, (decision,)))
+
+
+def test_review_rederives_integrity_before_resolved_handoff(tmp_path):
+    preparation, _runtime = _two_window_preparation(tmp_path, second_context_first=True)
+    first = _proposal(preparation.packets[0])
+    first["event_dispositions"][0]["disposition"] = "omit"
+    first["adapted_story_beats"], first["adaptation_mappings"] = [], []
+    second = _proposal(preparation.packets[1])
+    second["adapted_story_beats"].append({
+        "local_key": "context-beat", "summary_zh": "跨窗口上下文候选。", "origin": "source_direct",
+        "canon_compatibility": "uncertain", "source_event_refs": [{"kind": "event", "canonical_id": "evt_000001"}],
+        "participants": [], "canonical_anchor_refs": [], "invention_purpose": None,
+        "invention_rationale_zh": None, "invention_provenance_zh": None,
+    })
+    inventory = build_b13_reconciliation_inventory(_result(tmp_path, first, second, second_context_first=True))
+    decisions = B13ReconciliationDecisionSet(inventory.inventory_identity, ())
+    review = review_b13_reconciliation(inventory, decisions)
+    assert not review.is_resolved
+    with pytest.raises(B13ReconciliationError, match="unresolved finding IDs"):
+        replace(review, unresolved_finding_ids=())
+    with pytest.raises(B13ReconciliationError, match="findings"):
+        replace(review, findings=())
+    with pytest.raises(B13ReconciliationError, match="findings"):
+        B13ReconciliationReview(inventory, decisions, (), ())
+    object.__setattr__(review, "unresolved_finding_ids", ())
+    with pytest.raises(B13ReconciliationError, match="unresolved finding IDs"):
+        review.require_resolved()
+    with pytest.raises(B13ReconciliationError, match="stale"):
+        B13ReconciliationReview(
+            inventory, B13ReconciliationDecisionSet("f" * 64, ()),
+            inventory.findings, review_b13_reconciliation(inventory, decisions).unresolved_finding_ids,
+        )
+
+
+def test_valid_resolved_review_remains_usable(tmp_path):
+    inventory = build_b13_reconciliation_inventory(_result(tmp_path))
+    review = review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, ()))
+    assert review.is_resolved
+    review.require_resolved()

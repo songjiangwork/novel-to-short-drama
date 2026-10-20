@@ -122,9 +122,14 @@ def resolve_b12_strategy_selection(
         pointer_id = b12_strategy_pointer_id(manifest.project_id, adaptation_target_id)
         try:
             pointer_ref = pointers.resolve_current_pointer_ref(pointer_id)
-            pointer = pointers.resolve_current(pointer_id)
+            # Resolve this exact immutable snapshot, rather than asking the
+            # mutable head a second time through ``resolve_current``.  A later
+            # head check below detects (and rejects) any concurrent advance.
+            pointer = pointers._load_pointer_ref(pointer_ref)
         except PointerNotFoundError as exc:
             raise B13PreparationError("B1.2 CURRENT strategy is missing") from exc
+        except Exception as exc:
+            raise B13PreparationError("B1.2 CURRENT pointer fails integrity verification") from exc
         if (
             pointer.pointer_kind is not PointerKind.CURRENT
             or pointer.target_ref.artifact_type != B12_STRATEGY_ARTIFACT_TYPE
@@ -157,6 +162,12 @@ def resolve_b12_strategy_selection(
     # Guard the source authority again after all leaf/provenance reads.
     if AdaptationSourceSnapshot.from_store(store, pointers, bound.story_analysis_manifest_ref) != bound:
         raise B13PreparationError("A5/A6 CURRENT changed during B1.2 strategy selection")
+    if pointer_ref is not None:
+        try:
+            if pointers.resolve_current_pointer_ref(pointer_id) != pointer_ref:
+                raise B13PreparationError("B1.2 CURRENT pointer changed during strategy selection")
+        except PointerNotFoundError as exc:
+            raise B13PreparationError("B1.2 CURRENT pointer changed during strategy selection") from exc
     return B12StrategySelection(selected_ref, artifact, pointer_ref)
 
 
@@ -201,6 +212,8 @@ def _validate_a6_windows(
     counts = Counter(ref for window in ordered for ref in window.owned_event_refs)
     if tuple(ref for ref in all_ids if counts[ref] != 1):
         raise B13PreparationError("A6 window ownership does not give every event exactly one owner")
+    if tuple(ref for window in ordered for ref in window.owned_event_refs) != all_ids:
+        raise B13PreparationError("A6 window owned-event sequence does not match A5 narrative order")
     return ordered
 
 

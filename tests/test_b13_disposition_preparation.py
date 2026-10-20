@@ -10,7 +10,8 @@ from short_drama.adaptation import (
     B12StrategySelection, prepare_b13_disposition_windows,
     resolve_b12_strategy_selection,
 )
-from short_drama.artifacts import ArtifactRef, canonical_json_bytes
+from short_drama.artifacts import ArtifactRef, ImmutableArtifactEnvelope, canonical_json_bytes
+from short_drama.foundation import PointerKind
 from short_drama.story.story_analysis import PlotWindowAnalysis
 
 from test_adaptation_strategy import _semantic_preparation
@@ -78,6 +79,29 @@ def test_explicit_strategy_revision_is_pinned_and_wrong_target_fails_closed(tmp_
             store=tree.store, pointers=tree.pointers, source_snapshot=source,
             adaptation_target_id="another-target", strategy_ref=publication.strategy_ref,
         )
+
+
+def test_a6_cross_window_owned_sequence_must_equal_a5_narrative_order(tmp_path):
+    tree, semantic, _publication = _published_strategy(tmp_path)
+    _source, fixture_events, fixture_windows = _source_and_windows(tree, semantic)
+    events = tuple(
+        replace(fixture_events[0], event_id=f"evt_{ordinal:06d}", narrative_order=ordinal)
+        for ordinal in range(1, 5)
+    )
+    interpretation = fixture_windows[0].interpretation
+    valid = (
+        PlotWindowAnalysis("window_0001", 1, ("evt_000001", "evt_000002"), (), interpretation),
+        PlotWindowAnalysis("window_0002", 2, ("evt_000003", "evt_000004"), ("evt_000002",), interpretation),
+    )
+    assert _validate_a6_windows(valid, events) == valid
+    # Every window is internally ordered and each A5 event has exactly one
+    # owner, but their concatenated ownership sequence is globally swapped.
+    globally_swapped = (
+        PlotWindowAnalysis("window_0001", 1, ("evt_000003", "evt_000004"), ("evt_000002",), interpretation),
+        PlotWindowAnalysis("window_0002", 2, ("evt_000001", "evt_000002"), (), interpretation),
+    )
+    with pytest.raises(B13PreparationError, match="owned-event sequence does not match A5 narrative order"):
+        _validate_a6_windows(globally_swapped, events)
 
 
 @pytest.mark.parametrize("kind", ["missing", "duplicate", "unknown", "owned_as_context"])
@@ -194,3 +218,49 @@ def test_mismatched_b12_lineage_current_fails_closed_before_window_preparation(t
             source_snapshot=semantic.preparation.packet.source_snapshot,
             adaptation_target_id=semantic.preparation.packet.resolved_target.adaptation_target_id,
         )
+
+
+def test_b12_current_advance_between_exact_snapshot_and_recheck_fails_closed(tmp_path, monkeypatch):
+    tree, semantic, publication = _published_strategy(tmp_path)
+    target_id = semantic.preparation.packet.resolved_target.adaptation_target_id
+    pointer_id = publication.current_pointer_ref.artifact_id
+    next_strategy_ref = tree.store.put(ImmutableArtifactEnvelope.create(
+        artifact_type=publication.strategy_ref.artifact_type,
+        artifact_id=publication.strategy_ref.artifact_id,
+        revision=publication.strategy_ref.revision + 1,
+        schema_version=1,
+        payload=publication.artifact.to_dict(),
+    ))
+    original = tree.pointers.resolve_current_pointer_ref
+    calls = {"count": 0}
+
+    def advance_after_snapshot(observed_pointer_id):
+        if observed_pointer_id == pointer_id:
+            calls["count"] += 1
+        if observed_pointer_id == pointer_id and calls["count"] == 2:
+            tree.pointers.compare_and_set(
+                pointer_id=pointer_id, pointer_kind=PointerKind.CURRENT,
+                expected_pointer_ref=publication.current_pointer_ref,
+                target_ref=next_strategy_ref,
+            )
+        return original(observed_pointer_id)
+
+    monkeypatch.setattr(tree.pointers, "resolve_current_pointer_ref", advance_after_snapshot)
+    with pytest.raises(B13PreparationError, match="B1.2 CURRENT pointer changed during strategy selection"):
+        resolve_b12_strategy_selection(
+            store=tree.store, pointers=tree.pointers,
+            source_snapshot=semantic.preparation.packet.source_snapshot,
+            adaptation_target_id=target_id,
+        )
+    assert calls["count"] == 2
+
+
+def test_current_selection_pointer_snapshot_authorizes_returned_strategy(tmp_path):
+    tree, semantic, publication = _published_strategy(tmp_path)
+    selected = resolve_b12_strategy_selection(
+        store=tree.store, pointers=tree.pointers,
+        source_snapshot=semantic.preparation.packet.source_snapshot,
+        adaptation_target_id=semantic.preparation.packet.resolved_target.adaptation_target_id,
+    )
+    assert selected.current_pointer_ref == publication.current_pointer_ref
+    assert tree.pointers._load_pointer_ref(selected.current_pointer_ref).target_ref == selected.strategy_ref

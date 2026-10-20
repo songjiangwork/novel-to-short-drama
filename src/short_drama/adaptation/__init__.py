@@ -52,6 +52,12 @@ from .disposition import (
     EventDisposition, InventedBeatPurpose, MappingContributionRole,
     ParticipantKind, RelationshipArcRequirement,
 )
+from .disposition_preparation import (
+    B13_DISPOSITION_PACKET_SCHEMA_VERSION, B13PreparationError,
+    B12StrategySelection, resolve_b12_strategy_selection,
+    B13DispositionWindowPacket, B13DispositionPacketMeasurement,
+    B13DispositionPreparation, prepare_b13_disposition_windows,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -79,4 +85,8 @@ __all__ = [
     "CanonicalEventDisposition", "CharacterFunctionProvenance", "ContinuityStoryState",
     "EventDisposition", "InventedBeatPurpose", "MappingContributionRole",
     "ParticipantKind", "RelationshipArcRequirement",
+    "B13_DISPOSITION_PACKET_SCHEMA_VERSION", "B13PreparationError",
+    "B12StrategySelection", "resolve_b12_strategy_selection",
+    "B13DispositionWindowPacket", "B13DispositionPacketMeasurement",
+    "B13DispositionPreparation", "prepare_b13_disposition_windows",
 ]

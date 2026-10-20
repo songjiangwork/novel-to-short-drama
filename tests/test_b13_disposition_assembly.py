@@ -30,6 +30,27 @@ def _character_ref(window_id, local_key):
     return B13CandidateRef(window_id, B13CandidateKind.ADAPTED_CHARACTER, local_key)
 
 
+def _beat_ref(window_id, local_key):
+    return B13CandidateRef(window_id, B13CandidateKind.ADAPTED_STORY_BEAT, local_key)
+
+
+def _bridge(participant_kind, participant_key, anchor):
+    return {
+        "local_key": "bridge", "summary_zh": "以一个桥接动作外化选择。", "origin": "adaptation_invented",
+        "canon_compatibility": "compatible", "source_event_refs": [],
+        "participants": [{"kind": participant_kind, "local_key": participant_key}],
+        "canonical_anchor_refs": [anchor.to_dict()], "invention_purpose": "bridge",
+        "invention_rationale_zh": "衔接两段行动。", "invention_provenance_zh": "跨窗口改编审阅。",
+    }
+
+
+def _equivalent_bridge_decision():
+    return B13ReconciliationDecision(
+        "identify_equivalent", (_beat_ref("window_0001", "bridge"), _beat_ref("window_0002", "bridge")),
+        (), "确认同一桥接节拍。", "跨窗口审阅。",
+    )
+
+
 def test_same_local_key_is_scoped_and_different_keys_can_be_explicitly_equivalent(tmp_path):
     source = _source_character(_result(tmp_path))
     preparation, _runtime = _two_window_preparation(tmp_path)
@@ -86,6 +107,55 @@ def test_equivalent_candidates_with_material_content_disagreement_fail_closed(tm
     )
     with pytest.raises(B13DispositionAssemblyError, match="content-selection"):
         assemble_b13_disposition_plan(_review(_result(tmp_path, first, second), (decision,)))
+
+
+def test_equivalent_beats_reject_identical_local_participant_keys_with_distinct_global_characters(tmp_path):
+    source = _source_character(_result(tmp_path))
+    preparation, _runtime = _two_window_preparation(tmp_path)
+    first, second = (_proposal(packet) for packet in preparation.packets)
+    anchor = next(item for item in preparation.source_snapshot.canonical_references if item.kind == "fact")
+    first["adapted_characters"] = [_character("lead", source)]
+    second["adapted_characters"] = [_character("lead", source)]
+    first["adapted_characters"][0]["display_name_zh"] = second["adapted_characters"][0]["display_name_zh"] = "同名但不同改编角色"
+    first["adapted_story_beats"].append(_bridge("adapted_character", "lead", anchor))
+    second["adapted_story_beats"].append(_bridge("adapted_character", "lead", anchor))
+    with pytest.raises(B13DispositionAssemblyError, match=r"equivalent beats resolve different material participants.*window_0001.*window_0002"):
+        assemble_b13_disposition_plan(_review(_result(tmp_path, first, second), (_equivalent_bridge_decision(),)))
+
+
+def test_equivalent_beats_accept_differently_keyed_participants_with_one_global_character(tmp_path):
+    source = _source_character(_result(tmp_path))
+    preparation, _runtime = _two_window_preparation(tmp_path)
+    first, second = (_proposal(packet) for packet in preparation.packets)
+    anchor = next(item for item in preparation.source_snapshot.canonical_references if item.kind == "fact")
+    first["adapted_characters"] = [_character("lead-left", source)]
+    second["adapted_characters"] = [_character("lead-right", source)]
+    second["adapted_characters"][0]["display_name_zh"] = first["adapted_characters"][0]["display_name_zh"]
+    first["adapted_story_beats"].append(_bridge("adapted_character", "lead-left", anchor))
+    second["adapted_story_beats"].append(_bridge("adapted_character", "lead-right", anchor))
+    same_character = B13ReconciliationDecision(
+        "identify_equivalent", (_character_ref("window_0001", "lead-left"), _character_ref("window_0002", "lead-right")),
+        (), "确认同一改编角色。", "跨窗口审阅。",
+    )
+    plan = assemble_b13_disposition_plan(_review(
+        _result(tmp_path, first, second), (same_character, _equivalent_bridge_decision()),
+    )).plan
+    bridge = next(item for item in plan.adapted_story_beats if item.origin.value == "adaptation_invented")
+    assert len(bridge.participants) == 1
+    assert bridge.participants[0].participant_id == plan.adapted_characters[0].adapted_character_id
+    assert len(plan.adaptation_mappings) == 2
+
+
+def test_equivalent_beats_compare_controlled_anonymous_role_global_identities(tmp_path):
+    preparation, _runtime = _two_window_preparation(tmp_path)
+    first, second = (_proposal(packet) for packet in preparation.packets)
+    anchor = next(item for item in preparation.source_snapshot.canonical_references if item.kind == "fact")
+    first["anonymous_roles"] = [{"local_key": "guard", "role_kind": "guard", "function_zh": "阻拦。"}]
+    second["anonymous_roles"] = [{"local_key": "guard", "role_kind": "guard", "function_zh": "阻拦。"}]
+    first["adapted_story_beats"].append(_bridge("anonymous_role", "guard", anchor))
+    second["adapted_story_beats"].append(_bridge("anonymous_role", "guard", anchor))
+    with pytest.raises(B13DispositionAssemblyError, match="equivalent beats resolve different material participants"):
+        assemble_b13_disposition_plan(_review(_result(tmp_path, first, second), (_equivalent_bridge_decision(),)))
 
 
 def test_complete_event_coverage_one_to_many_mapping_and_participants_materialize(tmp_path):

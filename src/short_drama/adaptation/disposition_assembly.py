@@ -150,11 +150,16 @@ def _equivalence_components(
     return tuple(sorted((tuple(sorted(group)) for group in grouped.values()), key=lambda group: group[0]))
 
 
-def _same_material_payload(component: tuple[B13CandidateRef, ...], candidates: dict[B13CandidateRef, B13ReconciliationCandidate]) -> dict[str, Any]:
+def _same_material_payload(
+    component: tuple[B13CandidateRef, ...], candidates: dict[B13CandidateRef, B13ReconciliationCandidate],
+    *, ignored_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     payloads: list[dict[str, Any]] = []
     for ref in component:
         payload = dict(candidates[ref].payload())
         payload.pop("local_key", None)
+        for field in ignored_fields:
+            payload.pop(field, None)
         payloads.append(payload)
     if any(payload != payloads[0] for payload in payloads[1:]):
         raise B13DispositionAssemblyError(
@@ -179,6 +184,57 @@ def _require_live(ref: B13CandidateRef, candidates: dict[B13CandidateRef, B13Rec
         raise B13DispositionAssemblyError(
             f"accepted graph contribution depends on rejected or absent candidate {ref.window_id}/{ref.candidate_kind.value}/{ref.local_key}"
         ) from exc
+
+
+def _candidate_label(ref: B13CandidateRef) -> str:
+    return f"{ref.window_id}/{ref.candidate_kind.value}/{ref.local_key}"
+
+
+def _resolved_beat_participants(
+    component: tuple[B13CandidateRef, ...], candidates: dict[B13CandidateRef, B13ReconciliationCandidate],
+    identity_by_ref: dict[B13CandidateRef, tuple[str, str]],
+) -> tuple[BeatParticipant, ...]:
+    """Resolve every equivalent beat's scoped participant graph before merging.
+
+    A local key has authority only within the proposal window that declared the
+    beat.  Comparing final ``(kind, adapted_id)`` sets permits different local
+    keys that were explicitly reconciled, while refusing a representative-only
+    participant selection or an unauditable union.
+    """
+    resolved_by_beat: dict[B13CandidateRef, tuple[BeatParticipant, ...]] = {}
+    for beat_ref in component:
+        resolved: list[BeatParticipant] = []
+        for item in candidates[beat_ref].payload()["participants"]:
+            kind = (
+                B13CandidateKind.ADAPTED_CHARACTER
+                if item["kind"] == "adapted_character"
+                else B13CandidateKind.ANONYMOUS_ROLE
+            )
+            participant_ref = B13CandidateRef(beat_ref.window_id, kind, item["local_key"])
+            target = _require_live(participant_ref, candidates)
+            target_identity = identity_by_ref.get(participant_ref)
+            if target.ref.candidate_kind is not kind or target_identity is None or not target_identity[1]:
+                raise B13DispositionAssemblyError(
+                    f"beat participant {_candidate_label(participant_ref)} does not resolve to a final adapted identity"
+                )
+            resolved.append(BeatParticipant(item["kind"], target_identity[1]))
+        if len(set(resolved)) != len(resolved):
+            raise B13DispositionAssemblyError(
+                f"equivalent beat {_candidate_label(beat_ref)} resolves duplicate material participants"
+            )
+        resolved_by_beat[beat_ref] = tuple(sorted(resolved, key=lambda item: (item.kind.value, item.participant_id)))
+
+    baseline_ref = component[0]
+    baseline = frozenset(resolved_by_beat[baseline_ref])
+    for beat_ref in component[1:]:
+        resolved = frozenset(resolved_by_beat[beat_ref])
+        if resolved != baseline:
+            raise B13DispositionAssemblyError(
+                "equivalent beats resolve different material participants: "
+                f"{_candidate_label(baseline_ref)}={sorted((item.kind.value, item.participant_id) for item in baseline)!r}; "
+                f"{_candidate_label(beat_ref)}={sorted((item.kind.value, item.participant_id) for item in resolved)!r}"
+            )
+    return resolved_by_beat[baseline_ref]
 
 
 def assemble_b13_disposition_plan(review: B13ReconciliationReview) -> B13DispositionAssemblyResult:
@@ -210,9 +266,9 @@ def assemble_b13_disposition_plan(review: B13ReconciliationReview) -> B13Disposi
         kind = representative.ref.candidate_kind
         if any(candidates[ref].ref.candidate_kind is not kind for ref in component):
             raise B13DispositionAssemblyError("equivalence component spans candidate kinds")
-        payload = _same_material_payload(component, candidates)
         identity_key = _identity_key(kind, component)
         if kind is B13CandidateKind.ADAPTED_CHARACTER:
+            payload = _same_material_payload(component, candidates)
             value = AdaptedCharacter(
                 identity_key, payload["display_name_zh"], payload["origin"],
                 tuple(CharacterFunctionProvenance(
@@ -223,6 +279,7 @@ def assemble_b13_disposition_plan(review: B13ReconciliationReview) -> B13Disposi
             characters.append(value)
             adapted_id = value.adapted_character_id
         elif kind is B13CandidateKind.ANONYMOUS_ROLE:
+            payload = _same_material_payload(component, candidates)
             value = AnonymousRole(identity_key, payload["role_kind"], payload["function_zh"])
             roles.append(value)
             adapted_id = value.anonymous_role_id
@@ -242,19 +299,12 @@ def assemble_b13_disposition_plan(review: B13ReconciliationReview) -> B13Disposi
     beat_components = [item for item in _equivalence_components(live_items, decisions)
                        if candidates[item[0]].ref.candidate_kind is B13CandidateKind.ADAPTED_STORY_BEAT]
     for component in beat_components:
-        payload = _same_material_payload(component, candidates)
+        payload = _same_material_payload(component, candidates, ignored_fields=frozenset({"participants"}))
         identity_key = identity_by_ref[component[0]][0]
-        participants: list[BeatParticipant] = []
-        for item in payload["participants"]:
-            kind = B13CandidateKind.ADAPTED_CHARACTER if item["kind"] == "adapted_character" else B13CandidateKind.ANONYMOUS_ROLE
-            ref = B13CandidateRef(component[0].window_id, kind, item["local_key"])
-            target = _require_live(ref, candidates)
-            if target.ref.candidate_kind is not kind or not identity_by_ref.get(ref, ("", ""))[1]:
-                raise B13DispositionAssemblyError("beat participant does not resolve to a final adapted identity")
-            participants.append(BeatParticipant(item["kind"], identity_by_ref[ref][1]))
+        participants = _resolved_beat_participants(component, candidates, identity_by_ref)
         value = AdaptedStoryBeat(
             identity_key, payload["summary_zh"], payload["origin"], payload["canon_compatibility"],
-            tuple(_ref(item) for item in payload["source_event_refs"]), tuple(participants),
+            tuple(_ref(item) for item in payload["source_event_refs"]), participants,
             tuple(_ref(item) for item in payload["canonical_anchor_refs"]),
             payload["invention_purpose"], payload["invention_rationale_zh"], payload["invention_provenance_zh"],
         )

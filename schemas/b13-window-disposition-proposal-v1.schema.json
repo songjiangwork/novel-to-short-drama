@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/b13-window-disposition-proposal-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_dispositions", "adapted_characters", "adapted_story_beats", "adaptation_mappings", "continuity_overlay_candidates"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_dispositions": {"type": "array", "items": {"$ref": "#/$defs/eventDisposition"}},
+    "adapted_characters": {"type": "array", "items": {"$ref": "#/$defs/character"}},
+    "adapted_story_beats": {"type": "array", "items": {"$ref": "#/$defs/beat"}},
+    "adaptation_mappings": {"type": "array", "items": {"$ref": "#/$defs/mapping"}},
+    "continuity_overlay_candidates": {"$ref": "#/$defs/overlay"}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "pattern": "^(?=.*\\S)[^\\u0000]+$"},
+    "localKey": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "sourceRef": {"type": "object", "additionalProperties": false, "required": ["kind", "canonical_id"], "properties": {"kind": {"enum": ["character", "location", "fact", "event", "relationship", "arc", "turning_point", "reveal", "payoff"]}, "canonical_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}}},
+    "eventDisposition": {"type": "object", "additionalProperties": false, "required": ["source_event_id", "disposition", "rationale_zh"], "properties": {"source_event_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}, "disposition": {"enum": ["keep", "compress", "merge_member", "omit"]}, "rationale_zh": {"$ref": "#/$defs/text"}}},
+    "functionProvenance": {"type": "object", "additionalProperties": false, "required": ["source_character_ref", "function_zh", "provenance_zh"], "properties": {"source_character_ref": {"$ref": "#/$defs/sourceRef"}, "function_zh": {"$ref": "#/$defs/text"}, "provenance_zh": {"$ref": "#/$defs/text"}}},
+    "character": {"type": "object", "additionalProperties": false, "required": ["local_key", "display_name_zh", "origin", "function_provenance", "invention_rationale_zh"], "properties": {"local_key": {"$ref": "#/$defs/localKey"}, "display_name_zh": {"$ref": "#/$defs/text"}, "origin": {"enum": ["source_single", "source_composite", "adaptation_invented"]}, "function_provenance": {"type": "array", "items": {"$ref": "#/$defs/functionProvenance"}}, "invention_rationale_zh": {"type": ["string", "null"]}}},
+    "beat": {"type": "object", "additionalProperties": false, "required": ["local_key", "summary_zh", "origin", "canon_compatibility", "source_event_refs", "canonical_anchor_refs", "invention_purpose", "invention_rationale_zh", "invention_provenance_zh"], "properties": {"local_key": {"$ref": "#/$defs/localKey"}, "summary_zh": {"$ref": "#/$defs/text"}, "origin": {"enum": ["source_direct", "source_condensed", "source_composite", "adaptation_invented"]}, "canon_compatibility": {"enum": ["compatible", "deliberate_divergence", "uncertain"]}, "source_event_refs": {"type": "array", "items": {"$ref": "#/$defs/sourceRef"}}, "canonical_anchor_refs": {"type": "array", "items": {"$ref": "#/$defs/sourceRef"}}, "invention_purpose": {"type": ["string", "null"], "enum": ["bridge", "externalization", "continuity_repair", "setup", "payoff", "episode_hook", "dramatic_escalation", "deliberate_divergence", "other", null]}, "invention_rationale_zh": {"type": ["string", "null"]}, "invention_provenance_zh": {"type": ["string", "null"]}}},
+    "endpoint": {"type": "object", "additionalProperties": false, "required": ["kind", "local_key"], "properties": {"kind": {"enum": ["story_beat", "character"]}, "local_key": {"$ref": "#/$defs/localKey"}}},
+    "mapping": {"type": "object", "additionalProperties": false, "required": ["source_ref", "adapted_endpoint", "contribution_role", "retained_semantics_zh", "transformed_semantics_zh", "provenance_zh", "active"], "properties": {"source_ref": {"$ref": "#/$defs/sourceRef"}, "adapted_endpoint": {"$ref": "#/$defs/endpoint"}, "contribution_role": {"enum": ["primary", "supporting", "context"]}, "retained_semantics_zh": {"$ref": "#/$defs/text"}, "transformed_semantics_zh": {"$ref": "#/$defs/text"}, "provenance_zh": {"$ref": "#/$defs/text"}, "active": {"type": "boolean"}}},
+    "factualDivergence": {"type": "object", "additionalProperties": false, "required": ["source_fact_ref", "adapted_assertion_zh", "provenance_zh"], "properties": {"source_fact_ref": {"$ref": "#/$defs/sourceRef"}, "adapted_assertion_zh": {"$ref": "#/$defs/text"}, "provenance_zh": {"$ref": "#/$defs/text"}}},
+    "relationshipRequirement": {"type": "object", "additionalProperties": false, "required": ["source_relationship_ref", "requirement_zh", "provenance_zh"], "properties": {"source_relationship_ref": {"$ref": "#/$defs/sourceRef"}, "requirement_zh": {"$ref": "#/$defs/text"}, "provenance_zh": {"$ref": "#/$defs/text"}}},
+    "storyState": {"type": "object", "additionalProperties": false, "required": ["adapted_story_beat_local_key", "assertion_zh", "provenance_zh"], "properties": {"adapted_story_beat_local_key": {"$ref": "#/$defs/localKey"}, "assertion_zh": {"$ref": "#/$defs/text"}, "provenance_zh": {"$ref": "#/$defs/text"}}},
+    "overlay": {"type": "object", "additionalProperties": false, "required": ["factual_divergences", "relationship_requirements", "story_state_requirements"], "properties": {"factual_divergences": {"type": "array", "items": {"$ref": "#/$defs/factualDivergence"}}, "relationship_requirements": {"type": "array", "items": {"$ref": "#/$defs/relationshipRequirement"}}, "story_state_requirements": {"type": "array", "items": {"$ref": "#/$defs/storyState"}}}}
+  }
+}

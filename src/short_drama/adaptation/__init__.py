@@ -72,6 +72,15 @@ from .disposition_execution import (
     B13WindowAcceptedProposal,
     B13DispositionExecutionResult, execute_b13_disposition_windows,
 )
+from .disposition_reconciliation import (
+    B13ReconciliationError, B13CandidateKind, B13CandidateRef,
+    B13ReconciliationCandidate, B13InventoryWindow,
+    B13ReconciliationFindingKind, B13ReconciliationFinding,
+    B13ReconciliationInventory, B13ReconciliationDecisionKind,
+    B13ReconciliationDecision, B13ReconciliationDecisionSet,
+    B13ReconciliationReview, build_b13_reconciliation_inventory,
+    review_b13_reconciliation,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -113,4 +122,11 @@ __all__ = [
     "B13WindowSemanticGenerationPolicy", "B13WindowRejectedSemanticRound",
     "B13WindowAcceptedProposal",
     "B13DispositionExecutionResult", "execute_b13_disposition_windows",
+    "B13ReconciliationError", "B13CandidateKind", "B13CandidateRef",
+    "B13ReconciliationCandidate", "B13InventoryWindow",
+    "B13ReconciliationFindingKind", "B13ReconciliationFinding",
+    "B13ReconciliationInventory", "B13ReconciliationDecisionKind",
+    "B13ReconciliationDecision", "B13ReconciliationDecisionSet",
+    "B13ReconciliationReview", "build_b13_reconciliation_inventory",
+    "review_b13_reconciliation",
 ]

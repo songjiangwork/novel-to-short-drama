@@ -85,6 +85,12 @@ from .disposition_assembly import (
     B13DispositionAssemblyError, B13GlobalIdentityBinding, B13AssemblyWindowAudit,
     B13DispositionAssemblyResult, assemble_b13_disposition_plan,
 )
+from .disposition_publication import (
+    B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION, B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE,
+    B13DispositionPublicationError, B13DispositionPublication,
+    b13_disposition_publication_artifact_id, prepare_b13_disposition_publication,
+    verify_b13_disposition_publication,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -135,4 +141,8 @@ __all__ = [
     "review_b13_reconciliation",
     "B13DispositionAssemblyError", "B13GlobalIdentityBinding", "B13AssemblyWindowAudit",
     "B13DispositionAssemblyResult", "assemble_b13_disposition_plan",
+    "B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION", "B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE",
+    "B13DispositionPublicationError", "B13DispositionPublication",
+    "b13_disposition_publication_artifact_id", "prepare_b13_disposition_publication",
+    "verify_b13_disposition_publication",
 ]

@@ -1,16 +1,19 @@
-"""B1.3-B4B1 read-only CURRENT verification and exact reuse.
+"""B1.3-B4B CURRENT verification, immutable publication, and exact reuse.
 
-This is intentionally the *reader* half of B4B.  It neither persists a B1.3
-publication nor mutates a pointer.  A published B4A payload is stored directly
-as the existing immutable ``b13_disposition_publication`` artifact; there is no
-second cache payload or persistence format.
+B4B1's verifier remains the sole reader for a published B4A payload.  B4B2
+adds the narrowly scoped immutable write and stage-local CURRENT CAS path; it
+stores B4A's existing ``b13_disposition_publication`` payload directly and
+does not introduce a second persistence format.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-from short_drama.artifacts import ArtifactRef, FileArtifactStore
+from short_drama.artifacts import (
+    ArtifactError, ArtifactNotFoundError, ArtifactRef, FileArtifactStore,
+    ImmutableArtifactEnvelope,
+)
 from short_drama.foundation import FilePointerStore, PointerKind, PointerNotFoundError
 from short_drama.story.consolidation import ConsolidationManifest
 from short_drama.story.consolidation_persistence import (
@@ -64,6 +67,17 @@ class B13VerifiedCurrentSnapshot:
     publication: B13DispositionPublication
     plan: B13DispositionPlan
     reused: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class B13DispositionPublicationResult:
+    """One verified B1.3 CURRENT publication, never a human approval."""
+
+    publication_ref: ArtifactRef
+    current_pointer_ref: ArtifactRef
+    publication: B13DispositionPublication
+    plan: B13DispositionPlan
+    reused: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +237,7 @@ def _verify_historical_strategy(
 
 
 class B13DispositionPersistenceService:
-    """Read-only B4B1 resolver.  B4B2 owns the future write/CAS half."""
+    """B1.3 immutable publication and stage-local CURRENT persistence."""
 
     def __init__(self, store: FileArtifactStore, pointers: FilePointerStore) -> None:
         if not isinstance(store, FileArtifactStore) or not isinstance(pointers, FilePointerStore):
@@ -245,9 +259,8 @@ class B13DispositionPersistenceService:
         self._validate_request(preparation, semantic_preparations)
         project_id, target_id = self._request_pointer_identity(preparation)
         pointer_id = b13_disposition_pointer_id(project_id, target_id)
-        try:
-            pointer_ref = self._pointers.resolve_current_pointer_ref(pointer_id)
-        except PointerNotFoundError:
+        current = self._resolve_verified_current(pointer_id)
+        if current is None:
             # A missing B1.3 head is a normal cache miss, but a caller cannot
             # use that miss to bypass verification of its requested live A5/A6
             # (and selected B1.2) authority.
@@ -259,6 +272,112 @@ class B13DispositionPersistenceService:
             raise B13DispositionPersistenceError(
                 "B1.3 CURRENT appeared during missing-current verification"
             )
+        # Only after the persisted CURRENT has survived intrinsic verification
+        # may a changed live request turn it into a normal cache miss.
+        self._request_current_authority(preparation)
+        if not self._matches_request(current.publication, preparation, semantic_preparations):
+            self._recheck_stability(preparation, project_id, target_id, current.current_pointer_ref)
+            return None
+        # This must be the final observable operation before a successful
+        # return: B4A reconstruction above is deliberately expensive.
+        self._recheck_stability(preparation, project_id, target_id, current.current_pointer_ref)
+        return current
+
+    def publish_validated(
+        self,
+        *,
+        publication: B13DispositionPublication,
+        preparation: B13DispositionPreparation,
+        semantic_preparations: tuple[B13WindowSemanticPreparation, ...],
+    ) -> B13DispositionPublicationResult:
+        """Persist exact B4A evidence and advance B1.3 CURRENT exactly once.
+
+        ``publication`` is not trusted merely because it has B4A's type: this
+        boundary reconstructs it, binds it to the supplied deterministic B1.3
+        request, verifies live A5/A6/B1.2 authority, then uses a stage-local
+        CURRENT CAS.  A matching final semantic identity reuses only a healthy
+        CURRENT; request-level identity alone is deliberately insufficient.
+        """
+        self._validate_request(preparation, semantic_preparations)
+        if not isinstance(publication, B13DispositionPublication):
+            raise B13DispositionPersistenceError("publication requires exact B4A publication evidence")
+        try:
+            plan = verify_b13_disposition_publication(publication)
+        except Exception as exc:
+            raise B13DispositionPersistenceError("publication B4A evidence cannot reconstruct a final plan") from exc
+        if not self._matches_request(publication, preparation, semantic_preparations):
+            raise B13DispositionPersistenceError(
+                "publication evidence is not for the exact prepared B1.3 request"
+            )
+        project_id, target_id = self._request_pointer_identity(preparation)
+        pointer_id = b13_disposition_pointer_id(project_id, target_id)
+
+        # Always validate an existing head before comparing semantic identity.
+        # There is intentionally no history fallback when it is corrupt.
+        current = self._resolve_verified_current(pointer_id)
+        observed_pointer_ref = None if current is None else current.current_pointer_ref
+        self._request_current_authority(preparation)
+        self._require_observed_current(pointer_id, observed_pointer_ref)
+        if current is not None and current.publication.semantic_identity == publication.semantic_identity:
+            # This final-semantic hit remains distinct from B4B1's pre-provider
+            # request reuse: a different proposal/reconciliation decision must
+            # proceed to a new immutable revision even when request identities
+            # are identical.
+            return B13DispositionPublicationResult(
+                current.publication_ref, current.current_pointer_ref,
+                current.publication, current.plan, reused=True,
+            )
+
+        artifact_id = b13_disposition_publication_artifact_id(
+            preparation.source_snapshot, preparation.strategy_selection.artifact,
+        )
+        if publication.to_dict()["stage_artifact_id"] != artifact_id:
+            raise B13DispositionPersistenceError("publication artifact identity disagrees with exact authority")
+        revision = self._allocate_revision(
+            artifact_id=artifact_id,
+            observed_current=current,
+        )
+        envelope = ImmutableArtifactEnvelope.create(
+            artifact_type=B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE,
+            artifact_id=artifact_id,
+            revision=revision,
+            schema_version=B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION,
+            payload=publication.to_dict(),
+        )
+        try:
+            publication_ref = self._store.put(envelope)
+        except ArtifactError as exc:
+            raise B13DispositionPersistenceError("failed to persist immutable B1.3 publication") from exc
+
+        # An orphan is acceptable if this post-write guard discovers a race;
+        # returning a stale success is not.  Do not retry against a new head.
+        self._recheck_stability(preparation, project_id, target_id, observed_pointer_ref)
+        try:
+            pointer_ref = self._pointers.compare_and_set(
+                pointer_id=pointer_id,
+                pointer_kind=PointerKind.CURRENT,
+                expected_pointer_ref=observed_pointer_ref,
+                target_ref=publication_ref,
+            )
+        except Exception as exc:
+            raise B13DispositionPersistenceError("B1.3 CURRENT publication CAS failed") from exc
+        self._verify_published_success(
+            preparation=preparation,
+            project_id=project_id,
+            target_id=target_id,
+            publication_ref=publication_ref,
+            pointer_ref=pointer_ref,
+        )
+        return B13DispositionPublicationResult(
+            publication_ref, pointer_ref, publication, plan,
+        )
+
+    def _resolve_verified_current(self, pointer_id: str) -> B13VerifiedCurrentSnapshot | None:
+        """Use B4B1's single historical verifier for the stage-local head."""
+        try:
+            pointer_ref = self._pointers.resolve_current_pointer_ref(pointer_id)
+        except PointerNotFoundError:
+            return None
         try:
             pointer = self._pointers._load_pointer_ref(pointer_ref)
         except Exception as exc:
@@ -273,17 +392,100 @@ class B13DispositionPersistenceService:
         historical_target_id = historical_selection.artifact.strategy.resolved_target.adaptation_target_id
         if b13_disposition_pointer_id(historical.manifest.project_id, historical_target_id) != pointer_id:
             raise B13DispositionPersistenceError("B1.3 CURRENT publication belongs to another project or target")
-        # Only after the persisted CURRENT has survived intrinsic verification
-        # may a changed live request turn it into a normal cache miss.
-        self._request_current_authority(preparation)
-        if not self._matches_request(publication, preparation, semantic_preparations):
-            self._recheck_stability(preparation, project_id, target_id, pointer_ref)
-            return None
-        plan = verify_b13_disposition_publication(publication)
-        # This must be the final observable operation before a successful
-        # return: B4A reconstruction above is deliberately expensive.
-        self._recheck_stability(preparation, project_id, target_id, pointer_ref)
+        try:
+            plan = verify_b13_disposition_publication(publication)
+        except Exception as exc:
+            raise B13DispositionPersistenceError("B1.3 CURRENT publication has a forged final plan") from exc
         return B13VerifiedCurrentSnapshot(pointer.target_ref, pointer_ref, publication, plan)
+
+    def _allocate_revision(
+        self,
+        *,
+        artifact_id: str,
+        observed_current: B13VerifiedCurrentSnapshot | None,
+    ) -> int:
+        """Allocate after the stage-local head, preserving monotonic revision.
+
+        The immutable artifact id can change with A6, while the B1.3 CURRENT
+        pointer cannot.  Start after the observed published revision and only
+        skip occupied *valid* immutable slots; a corrupt slot is an error.
+        """
+        revision = 1 if observed_current is None else observed_current.publication_ref.revision + 1
+        while True:
+            try:
+                envelope = self._store.get(
+                    B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE, artifact_id, revision,
+                )
+            except ArtifactNotFoundError:
+                return revision
+            except ArtifactError as exc:
+                raise B13DispositionPersistenceError(
+                    "cannot allocate immutable B1.3 publication revision"
+                ) from exc
+            self._verify_occupied_publication(
+                envelope=envelope, artifact_id=artifact_id, revision=revision,
+            )
+            revision += 1
+
+    def _verify_occupied_publication(
+        self,
+        *,
+        envelope: ImmutableArtifactEnvelope,
+        artifact_id: str,
+        revision: int,
+    ) -> None:
+        """Validate an occupied allocation slot without considering it for reuse.
+
+        Foundation has already verified the envelope's canonical bytes.  An
+        immutable B1.3 orphan additionally has to pass B4B1's publication and
+        exact historical-authority verification before it is safe to skip.
+        Historical refs deliberately need not still be CURRENT.
+        """
+        try:
+            if (
+                envelope.artifact_type != B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE
+                or envelope.artifact_id != artifact_id
+                or envelope.revision != revision
+                or envelope.schema_version != B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION
+            ):
+                raise ValueError("occupied envelope has an unexpected B1.3 publication identity")
+            publication = self._load_and_verify_publication(envelope.ref)
+            self._verify_historical_publication(publication)
+        except Exception as exc:
+            raise B13DispositionPersistenceError(
+                "occupied immutable B1.3 publication revision fails semantic integrity"
+            ) from exc
+
+    def _require_observed_current(self, pointer_id: str, expected: ArtifactRef | None) -> None:
+        try:
+            actual = self._pointers.resolve_current_pointer_ref(pointer_id)
+        except PointerNotFoundError:
+            actual = None
+        if actual != expected:
+            raise B13DispositionPersistenceError("B1.3 CURRENT changed during publication verification")
+
+    def _verify_published_success(
+        self,
+        *,
+        preparation: B13DispositionPreparation,
+        project_id: str,
+        target_id: str,
+        publication_ref: ArtifactRef,
+        pointer_ref: ArtifactRef,
+    ) -> None:
+        pointer_id = b13_disposition_pointer_id(project_id, target_id)
+        try:
+            pointer = self._pointers._load_pointer_ref(pointer_ref)
+            if (
+                pointer.pointer_kind is not PointerKind.CURRENT
+                or pointer.target_ref != publication_ref
+                or self._pointers.resolve_current_pointer_ref(pointer_id) != pointer_ref
+            ):
+                raise ValueError("returned pointer is no longer the expected B1.3 CURRENT")
+        except Exception as exc:
+            raise B13DispositionPersistenceError("B1.3 CURRENT changed after publication CAS") from exc
+        self._request_current_authority(preparation)
+        self._require_observed_current(pointer_id, pointer_ref)
 
     def _request_pointer_identity(self, preparation: B13DispositionPreparation) -> tuple[str, str]:
         """Derive the stage-local pointer without asserting live freshness."""
@@ -473,17 +675,17 @@ class B13DispositionPersistenceService:
 
     def _recheck_stability(
         self, preparation: B13DispositionPreparation, project_id: str, target_id: str,
-                           pointer_ref: ArtifactRef) -> None:
+                           pointer_ref: ArtifactRef | None) -> None:
         self._request_current_authority(preparation)
         pointer_id = b13_disposition_pointer_id(project_id, target_id)
         try:
-            if self._pointers.resolve_current_pointer_ref(pointer_id) != pointer_ref:
-                raise B13DispositionPersistenceError("B1.3 CURRENT changed during verification")
-        except PointerNotFoundError as exc:
+            self._require_observed_current(pointer_id, pointer_ref)
+        except B13DispositionPersistenceError as exc:
             raise B13DispositionPersistenceError("B1.3 CURRENT changed during verification") from exc
 
 
 __all__ = [
     "B13DispositionPersistenceError", "B13VerifiedCurrentSnapshot",
+    "B13DispositionPublicationResult",
     "B13DispositionPersistenceService", "b13_disposition_pointer_id",
 ]

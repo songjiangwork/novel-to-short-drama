@@ -93,7 +93,8 @@ from .disposition_publication import (
 )
 from .disposition_persistence import (
     B13DispositionPersistenceError, B13DispositionPersistenceService,
-    B13VerifiedCurrentSnapshot, b13_disposition_pointer_id,
+    B13DispositionPublicationResult, B13VerifiedCurrentSnapshot,
+    b13_disposition_pointer_id,
 )
 
 __all__ = [
@@ -150,5 +151,6 @@ __all__ = [
     "b13_disposition_publication_artifact_id", "prepare_b13_disposition_publication",
     "verify_b13_disposition_publication",
     "B13DispositionPersistenceError", "B13DispositionPersistenceService",
-    "B13VerifiedCurrentSnapshot", "b13_disposition_pointer_id",
+    "B13DispositionPublicationResult", "B13VerifiedCurrentSnapshot",
+    "b13_disposition_pointer_id",
 ]

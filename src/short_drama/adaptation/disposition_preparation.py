@@ -227,6 +227,74 @@ def _relevant_arc_context(arcs: ArcAnalysis, event_ids: frozenset[str]) -> dict[
     }
 
 
+def build_b13_disposition_preparation_from_authority(
+    *,
+    source_snapshot: AdaptationSourceSnapshot,
+    strategy_selection: B12StrategySelection,
+    event_set: CanonicalEventSet,
+    event_analysis: GlobalEventAnalysis,
+    arc_analysis: ArcAnalysis,
+) -> "B13DispositionPreparation":
+    """Materialize B1.3 packets from already verified immutable authority.
+
+    This is deliberately pure: callers own source/CURRENT selection and exact
+    artifact loading.  B4B1 uses the same construction to verify a historical
+    B4A publication without consulting any live head.
+    """
+    if source_snapshot != strategy_selection.artifact.source_snapshot:
+        raise B13PreparationError("B1.3 packet authority source/strategy mismatch")
+    ordered_events = _ordered_events(event_set)
+    windows = _validate_a6_windows(event_analysis.windows, ordered_events)
+    event_by_id = {event.event_id: event for event in ordered_events}
+    importance = {item.event_ref: item for item in event_analysis.event_importance_overlay}
+    if not set(importance) <= set(event_by_id):
+        raise B13PreparationError("A6 event-importance overlay references an unknown canonical event")
+
+    packets: list[B13DispositionWindowPacket] = []
+    measurements: list[B13DispositionPacketMeasurement] = []
+    for window in windows:
+        covered = frozenset((*window.owned_event_refs, *window.context_event_refs))
+        payload = {
+            "schema_version": B13_DISPOSITION_PACKET_SCHEMA_VERSION,
+            "source_snapshot": source_snapshot.to_dict(),
+            "global_adaptation_strategy": {
+                "strategy_ref": strategy_selection.strategy_ref.to_dict(),
+                "strategy_hash": strategy_selection.strategy_hash,
+                "strategy": strategy_selection.artifact.strategy.to_dict(),
+            },
+            "window": {
+                "window_id": window.window_id,
+                "window_ordinal": window.window_ordinal,
+                "owned_event_refs": list(window.owned_event_refs),
+                "context_event_refs": list(window.context_event_refs),
+            },
+            "owned_source_events": [event_by_id[event_id].to_dict() for event_id in window.owned_event_refs],
+            "context_source_events": [event_by_id[event_id].to_dict() for event_id in window.context_event_refs],
+            "a6_window_analysis": window.to_dict(),
+            "a6_event_importance_context": [importance[event_id].to_dict() for event_id in sorted(covered, key=lambda event_id: (event_by_id[event_id].narrative_order, event_id)) if event_id in importance],
+            "a6_arc_context": _relevant_arc_context(arc_analysis, covered),
+        }
+        raw = canonical_json_bytes(payload)
+        packet = B13DispositionWindowPacket(
+            source_snapshot, strategy_selection, window.window_id, window.window_ordinal, raw
+        )
+        packets.append(packet)
+        measurements.append(B13DispositionPacketMeasurement(
+            window.window_id, len(raw), estimate_tokens(raw.decode("utf-8")), packet.content_hash()
+        ))
+    identity = content_hash({
+        "stage": "B1.3-B1",
+        "source_snapshot": source_snapshot.to_dict(),
+        "strategy_ref": strategy_selection.strategy_ref.to_dict(),
+        "strategy_hash": strategy_selection.strategy_hash,
+        "packet_hashes": [packet.content_hash() for packet in packets],
+    })
+    return B13DispositionPreparation(
+        source_snapshot, strategy_selection, tuple(packets), tuple(measurements),
+        tuple(event.event_id for event in ordered_events), identity,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class B13DispositionWindowPacket:
     """Canonical, immutable input for exactly one future B1.3 semantic window."""
@@ -379,55 +447,9 @@ def prepare_b13_disposition_windows(
     if verified_manifest != manifest:
         raise B13PreparationError("verified A6 manifest differs from selected source snapshot")
     event_set = _load(store, bound.canonical_event_set_ref, CanonicalEventSet)
-    ordered_events = _ordered_events(event_set)
-    windows = _validate_a6_windows(event_analysis.windows, ordered_events)
-    event_by_id = {event.event_id: event for event in ordered_events}
-    importance = {item.event_ref: item for item in event_analysis.event_importance_overlay}
-    if not set(importance) <= set(event_by_id):
-        raise B13PreparationError("A6 event-importance overlay references an unknown canonical event")
-
-    packets: list[B13DispositionWindowPacket] = []
-    measurements: list[B13DispositionPacketMeasurement] = []
-    for window in windows:
-        covered = frozenset((*window.owned_event_refs, *window.context_event_refs))
-        payload = {
-            "schema_version": B13_DISPOSITION_PACKET_SCHEMA_VERSION,
-            "source_snapshot": bound.to_dict(),
-            "global_adaptation_strategy": {
-                "strategy_ref": selection.strategy_ref.to_dict(),
-                "strategy_hash": selection.strategy_hash,
-                "strategy": selection.artifact.strategy.to_dict(),
-            },
-            "window": {
-                "window_id": window.window_id,
-                "window_ordinal": window.window_ordinal,
-                "owned_event_refs": list(window.owned_event_refs),
-                "context_event_refs": list(window.context_event_refs),
-            },
-            "owned_source_events": [event_by_id[event_id].to_dict() for event_id in window.owned_event_refs],
-            "context_source_events": [event_by_id[event_id].to_dict() for event_id in window.context_event_refs],
-            "a6_window_analysis": window.to_dict(),
-            "a6_event_importance_context": [importance[event_id].to_dict() for event_id in sorted(covered, key=lambda event_id: (event_by_id[event_id].narrative_order, event_id)) if event_id in importance],
-            "a6_arc_context": _relevant_arc_context(arc_analysis, covered),
-        }
-        raw = canonical_json_bytes(payload)
-        packet = B13DispositionWindowPacket(
-            bound, selection, window.window_id, window.window_ordinal, raw
-        )
-        packets.append(packet)
-        measurements.append(B13DispositionPacketMeasurement(
-            window.window_id, len(raw), estimate_tokens(raw.decode("utf-8")), packet.content_hash()
-        ))
-    identity = content_hash({
-        "stage": "B1.3-B1",
-        "source_snapshot": bound.to_dict(),
-        "strategy_ref": selection.strategy_ref.to_dict(),
-        "strategy_hash": selection.strategy_hash,
-        "packet_hashes": [packet.content_hash() for packet in packets],
-    })
-    return B13DispositionPreparation(
-        bound, selection, tuple(packets), tuple(measurements),
-        tuple(event.event_id for event in ordered_events), identity,
+    return build_b13_disposition_preparation_from_authority(
+        source_snapshot=bound, strategy_selection=selection, event_set=event_set,
+        event_analysis=event_analysis, arc_analysis=arc_analysis,
     )
 
 
@@ -435,5 +457,6 @@ __all__ = [
     "B13_DISPOSITION_PACKET_SCHEMA_VERSION", "B13PreparationError",
     "B12StrategySelection", "resolve_b12_strategy_selection",
     "B13DispositionWindowPacket", "B13DispositionPacketMeasurement",
-    "B13DispositionPreparation", "prepare_b13_disposition_windows",
+    "B13DispositionPreparation", "build_b13_disposition_preparation_from_authority",
+    "prepare_b13_disposition_windows",
 ]

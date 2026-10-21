@@ -91,6 +91,10 @@ from .disposition_publication import (
     b13_disposition_publication_artifact_id, prepare_b13_disposition_publication,
     verify_b13_disposition_publication,
 )
+from .disposition_persistence import (
+    B13DispositionPersistenceError, B13DispositionPersistenceService,
+    B13VerifiedCurrentSnapshot, b13_disposition_pointer_id,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -145,4 +149,6 @@ __all__ = [
     "B13DispositionPublicationError", "B13DispositionPublication",
     "b13_disposition_publication_artifact_id", "prepare_b13_disposition_publication",
     "verify_b13_disposition_publication",
+    "B13DispositionPersistenceError", "B13DispositionPersistenceService",
+    "B13VerifiedCurrentSnapshot", "b13_disposition_pointer_id",
 ]

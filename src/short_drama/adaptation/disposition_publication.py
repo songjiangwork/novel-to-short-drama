@@ -77,6 +77,36 @@ def _provenance(value: Any) -> LLMInvocationProvenance:
         raise B13DispositionPublicationError("invocation provenance is invalid") from exc
 
 
+def _verify_reconstructed_provenance(
+    provenance: LLMInvocationProvenance, *, request: Any, semantic_profile: Any,
+    output_schema: Any, label: str,
+) -> None:
+    """Apply B2B's request-bound provenance checks to retained invocation audit.
+
+    B4A intentionally does not retain a runtime endpoint or credentials, so it
+    cannot attest which backend actually served an invocation.  The declared
+    routing fields are retained as audit data and compared between semantic
+    rounds below; every content-bound field is instead checked against the
+    independently rebuilt request and pinned B2A assets.
+    """
+    checks = (
+        (provenance.semantic_profile_id, semantic_profile.profile_id),
+        (provenance.semantic_profile_hash, semantic_profile.semantic_profile_hash),
+        (provenance.prompt_id, request.rendered_prompt.prompt_id),
+        (provenance.prompt_version, request.rendered_prompt.prompt_version),
+        (provenance.prompt_content_hash, request.rendered_prompt.prompt_content_hash),
+        (provenance.rendered_prompt_hash, request.rendered_prompt.rendered_prompt_hash),
+        (provenance.output_schema_id, output_schema.schema_id),
+        (provenance.output_schema_version, output_schema.schema_version),
+        (provenance.output_schema_hash, output_schema.schema_hash),
+        (provenance.request_hash, request.request_hash),
+    )
+    if any(actual != expected for actual, expected in checks):
+        raise B13DispositionPublicationError(
+            f"{label} invocation provenance does not match the exact reconstructed request"
+        )
+
+
 def _accepted_to_dict(value: B13WindowAcceptedProposal) -> dict[str, Any]:
     return {
         "packet": value.proposal.packet.to_dict(),
@@ -294,6 +324,24 @@ def _reconstruct_execution(payload: dict[str, Any]) -> tuple[B13DispositionExecu
             raise B13DispositionPublicationError("accepted window semantic profile identity is invalid")
         if item.output_schema_identity != {"schema_id": assets.output_schema.schema_id, "schema_version": assets.output_schema.schema_version, "schema_hash": assets.output_schema.schema_hash}:
             raise B13DispositionPublicationError("accepted window output schema identity is invalid")
+        _verify_reconstructed_provenance(
+            item.invocation_provenance, request=request,
+            semantic_profile=assets.semantic_profile, output_schema=assets.output_schema,
+            label="accepted",
+        )
+        for rejected_round in item.rejected_semantic_rounds:
+            _verify_reconstructed_provenance(
+                rejected_round.invocation_provenance, request=request,
+                semantic_profile=assets.semantic_profile, output_schema=assets.output_schema,
+                label="rejected semantic round",
+            )
+            if (
+                rejected_round.invocation_provenance.provider_family != item.invocation_provenance.provider_family
+                or rejected_round.invocation_provenance.model != item.invocation_provenance.model
+            ):
+                raise B13DispositionPublicationError(
+                    "rejected semantic round declared routing differs from its accepted invocation"
+                )
         accepted.append(item)
     try:
         execution = B13DispositionExecutionResult(source, selection, evidence["preparation_identity"], tuple(accepted))

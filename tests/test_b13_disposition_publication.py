@@ -9,7 +9,7 @@ import pytest
 from short_drama.adaptation import (
     B12StrategySelection, B13DispositionExecutionResult, B13DispositionPublication,
     B13DispositionPublicationError, B13DispositionWindowPacket,
-    B13ReconciliationDecisionSet,
+    B13ReconciliationDecisionSet, B13WindowRejectedSemanticRound,
     assemble_b13_disposition_plan, build_b13_reconciliation_inventory,
     build_b13_window_semantic_preparation, prepare_b13_disposition_publication,
     review_b13_reconciliation, verify_b13_disposition_publication,
@@ -19,6 +19,7 @@ from short_drama.llm import LLMClient
 from test_adaptation_strategy import _b12_test_runtime_config
 from test_b13_disposition_assembly import _result
 from test_b13_disposition_reconciliation import _accepted
+from short_drama.adaptation.disposition_publication import _publication_identity
 
 
 def _persistable_result(tmp_path):
@@ -62,6 +63,40 @@ def _publication(tmp_path):
     return prepare_b13_disposition_publication(review, assembly, execution), review, assembly, execution
 
 
+def _review_and_assembly(execution):
+    inventory = build_b13_reconciliation_inventory(execution)
+    review = review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, ()))
+    return review, assemble_b13_disposition_plan(review)
+
+
+def _two_round_result(tmp_path):
+    """One bounded semantic rejection followed by a valid accepted proposal."""
+    execution = _persistable_result(tmp_path)
+    accepted = execution.accepted_windows[0]
+    rejected = B13WindowRejectedSemanticRound(
+        semantic_round=1, provider_attempts=1,
+        invocation_provenance=accepted.invocation_provenance,
+        diagnostic="schema 有效但语义不满足约束。",
+    )
+    retried = replace(
+        accepted, semantic_rounds=2, provider_attempts=2,
+        accepted_round_provider_attempts=1,
+        semantic_failures=(rejected.diagnostic,), rejected_semantic_rounds=(rejected,),
+    )
+    return replace(execution, accepted_windows=(retried, *execution.accepted_windows[1:]))
+
+
+def _two_round_publication(tmp_path):
+    execution = _two_round_result(tmp_path)
+    review, assembly = _review_and_assembly(execution)
+    return prepare_b13_disposition_publication(review, assembly, execution), review, assembly, execution
+
+
+def _reidentified(payload):
+    payload["publication_identity"] = _publication_identity(payload)
+    return payload
+
+
 def test_prepare_and_verify_two_window_publication_is_deterministic_and_zero_write(tmp_path, monkeypatch):
     execution = _persistable_result(tmp_path)
     inventory = build_b13_reconciliation_inventory(execution)
@@ -76,6 +111,44 @@ def test_prepare_and_verify_two_window_publication_is_deterministic_and_zero_wri
     assert verify_b13_disposition_publication(publication) == assembly
     assert B13DispositionPublication.from_dict(publication.to_dict()).canonical_bytes() == publication.canonical_bytes()
     assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
+
+
+def test_two_round_publication_reconstructs_with_consistent_provenance(tmp_path):
+    publication, _review, assembly, _execution = _two_round_publication(tmp_path)
+    assert publication.to_dict()["evidence"]["accepted_windows"][0]["semantic_rounds"] == 2
+    assert verify_b13_disposition_publication(publication) == assembly
+
+
+@pytest.mark.parametrize(("field", "value", "match"), [
+    ("request_hash", "f" * 64, "rejected semantic round.*exact reconstructed request"),
+    ("output_schema_hash", "e" * 64, "rejected semantic round.*exact reconstructed request"),
+    ("prompt_content_hash", "d" * 64, "rejected semantic round.*exact reconstructed request"),
+    ("semantic_profile_hash", "c" * 64, "rejected semantic round.*exact reconstructed request"),
+    ("provider_family", "other-provider", "declared routing"),
+    ("model", "other-model", "declared routing"),
+])
+def test_rejected_round_provenance_mismatch_fails_prepare_and_reidentified_verification(tmp_path, field, value, match):
+    publication, review, assembly, execution = _two_round_publication(tmp_path)
+    rejected = execution.accepted_windows[0].rejected_semantic_rounds[0]
+    forged_round = replace(rejected, invocation_provenance=replace(rejected.invocation_provenance, **{field: value}))
+    forged_window = replace(execution.accepted_windows[0], rejected_semantic_rounds=(forged_round,))
+    forged_execution = replace(execution, accepted_windows=(forged_window, *execution.accepted_windows[1:]))
+    forged_review, forged_assembly = _review_and_assembly(forged_execution)
+    with pytest.raises(B13DispositionPublicationError, match=match):
+        prepare_b13_disposition_publication(forged_review, forged_assembly, forged_execution)
+
+    payload = deepcopy(publication.to_dict())
+    payload["evidence"]["accepted_windows"][0]["rejected_semantic_rounds"][0]["invocation_provenance"][field] = value
+    with pytest.raises(B13DispositionPublicationError, match=match):
+        verify_b13_disposition_publication(_reidentified(payload))
+
+
+def test_accepted_round_provenance_mismatch_fails_with_reidentified_outer_payload(tmp_path):
+    publication, _review, _assembly, _execution = _two_round_publication(tmp_path)
+    payload = deepcopy(publication.to_dict())
+    payload["evidence"]["accepted_windows"][0]["invocation_provenance"]["request_hash"] = "b" * 64
+    with pytest.raises(B13DispositionPublicationError, match="accepted invocation provenance.*exact reconstructed request"):
+        verify_b13_disposition_publication(_reidentified(payload))
 
 
 @pytest.mark.parametrize("mutate", [

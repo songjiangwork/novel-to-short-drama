@@ -384,6 +384,12 @@ class CharacterKnowledgeTransition:
 
 @dataclass(frozen=True, slots=True)
 class WithholdingBoundary:
+    """A presentation-disclosure boundary, never a story-time knowledge rewrite.
+
+    Its PresentationEntry anchor regulates what the audience may be shown; a
+    character may already have learned the information at its story-world beat.
+    """
+
     boundary_id: str
     knowledge_key: str
     subject_kind: KnowledgeSubjectKind

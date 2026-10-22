@@ -38,9 +38,9 @@ def _skeleton() -> AdaptedStorySkeleton:
         audience_knowledge_states=(AudienceKnowledgeState("ak_audience", "identity_secret", "unknown", "观众初始不知情。"),),
         reveal_transitions=(
             RevealTransition("reveal_suspect", "identity_secret", "unknown", "suspected", "pe_teaser"),
-            RevealTransition("reveal_confirm", "identity_secret", "unknown", "confirmed", "pe_flashback_discovery"),
+            RevealTransition("reveal_confirm", "identity_secret", "suspected", "confirmed", "pe_flashback_discovery"),
         ),
-        withholding_boundaries=(WithholdingBoundary("hold_identity", "identity_secret", "audience", None, "pe_reveal", "在正式揭示前仅允许暗示。"),),
+        withholding_boundaries=(WithholdingBoundary("hold_identity", "identity_secret", "audience", None, "pe_flashback_discovery", "在正式闪回揭示前仅允许暗示。"),),
         setup_payoffs=(SetupPayoffLink("sp_key", "beat_discovery", "beat_choice", (CanonicalTargetReference("fact", "fact_000001"),), "改编层面的钥匙 setup/payoff。"),),
         arc_checkpoints=(ArcCheckpoint("arc_lead_choice", "character", "adapted_char_lead", "commitment", "从回避转为承诺行动。", "beat_choice", "主角弧线检查点。"),),
         gaps=(SkeletonGap("gap_mystery", "knowledge", "intentional_ambiguity", "身份细节暂不说明。", "保留悬念，不是缺陷。", (GapAnchor("beat", "beat_discovery"), GapAnchor("knowledge", "identity_secret"))),),
@@ -80,7 +80,7 @@ def test_reveal_withholding_setup_arc_and_intentional_ambiguity_round_trip():
     skeleton = _skeleton()
     restored = AdaptedStorySkeleton.from_dict(skeleton.to_dict())
     assert [item.to_status.value for item in restored.reveal_transitions] == ["confirmed", "suspected"]
-    assert restored.withholding_boundaries[0].must_not_be_confirmed_before_presentation_id == "pe_reveal"
+    assert restored.withholding_boundaries[0].must_not_be_confirmed_before_presentation_id == "pe_flashback_discovery"
     assert restored.setup_payoffs[0].source_provenance_refs[0].canonical_id == "fact_000001"
     assert restored.arc_checkpoints[0].trigger_beat_id == "beat_choice"
     assert restored.gaps[0].disposition.value == "intentional_ambiguity"
@@ -95,6 +95,7 @@ def test_character_learning_is_beat_anchored_before_later_audience_flashback():
     audience_reveal = next(item for item in skeleton.reveal_transitions if item.reveal_id == "reveal_confirm")
     assert character_transition.triggered_by_beat_id == "beat_discovery"
     assert next(item for item in skeleton.character_knowledge_states if item.state_id == "ck_lead_after").established_by_beat_id == "beat_discovery"
+    assert audience_reveal.from_status.value == "suspected"
     assert audience_reveal.triggered_by_presentation_id == "pe_flashback_discovery"
     assert skeleton.primary_presentation[1].semantics.value == "flashback"
     assert AdaptedStorySkeleton.from_dict(skeleton.to_dict()) == skeleton

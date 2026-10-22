@@ -89,6 +89,13 @@ class GapDisposition(str, Enum):
     INTENTIONAL_WITHHOLDING = "intentional_withholding"
 
 
+class GapAnchorKind(str, Enum):
+    BEAT = "beat"
+    DEPENDENCY = "dependency"
+    PRESENTATION = "presentation"
+    KNOWLEDGE = "knowledge"
+
+
 class BeatPresentationTreatment(str, Enum):
     DIRECTLY_PRESENTED = "directly_presented"
     INDIRECTLY_REVEALED = "indirectly_revealed"
@@ -142,6 +149,22 @@ def _subject(kind: Any, subject_id: Any, name: str) -> tuple[KnowledgeSubjectKin
             raise B14SkeletonError(f"{name} audience subject_id must be null")
         return kind, None
     return kind, _key(subject_id, f"{name} character subject_id")
+
+
+def _knowledge_transition(before: Any, after: Any, name: str) -> tuple[KnowledgeStatus, KnowledgeStatus]:
+    before = _enum(before, KnowledgeStatus, f"{name} from_status")
+    after = _enum(after, KnowledgeStatus, f"{name} to_status")
+    allowed = {
+        (KnowledgeStatus.UNKNOWN, KnowledgeStatus.SUSPECTED),
+        (KnowledgeStatus.SUSPECTED, KnowledgeStatus.CONFIRMED),
+        # Definitive evidence may be received without an invented suspicion beat.
+        (KnowledgeStatus.UNKNOWN, KnowledgeStatus.CONFIRMED),
+    }
+    if (before, after) not in allowed:
+        raise B14SkeletonError(
+            f"{name} must be unknown→suspected, suspected→confirmed, or unknown→confirmed"
+        )
+    return before, after
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +259,7 @@ class WorldTruthState:
     kind: ContinuityStateKind
     subject_key: str
     assertion_zh: str
-    established_by_beat_id: str
+    established_by_beat_id: str | None
     provenance_zh: str
 
     def __post_init__(self) -> None:
@@ -244,7 +267,8 @@ class WorldTruthState:
         object.__setattr__(self, "kind", _enum(self.kind, ContinuityStateKind, "world truth kind"))
         _key(self.subject_key, "world truth subject_key")
         _text(self.assertion_zh, "world truth assertion")
-        _key(self.established_by_beat_id, "world truth established_by_beat_id")
+        if self.established_by_beat_id is not None:
+            _key(self.established_by_beat_id, "world truth established_by_beat_id")
         _text(self.provenance_zh, "world truth provenance")
 
     def to_dict(self) -> dict[str, Any]:
@@ -257,10 +281,13 @@ class WorldTruthState:
 
 @dataclass(frozen=True, slots=True)
 class CharacterKnowledgeState:
+    """A character's plot-critical state; ``None`` marks pre-story initial knowledge."""
+
     state_id: str
     character_id: str
     knowledge_key: str
     status: KnowledgeStatus
+    established_by_beat_id: str | None
     provenance_zh: str
 
     def __post_init__(self) -> None:
@@ -268,14 +295,16 @@ class CharacterKnowledgeState:
         _key(self.character_id, "character knowledge character_id")
         _key(self.knowledge_key, "character knowledge knowledge_key")
         object.__setattr__(self, "status", _enum(self.status, KnowledgeStatus, "character knowledge status"))
+        if self.established_by_beat_id is not None:
+            _key(self.established_by_beat_id, "character knowledge established_by_beat_id")
         _text(self.provenance_zh, "character knowledge provenance")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"state_id": self.state_id, "character_id": self.character_id, "knowledge_key": self.knowledge_key, "status": self.status.value, "provenance_zh": self.provenance_zh}
+        return {"state_id": self.state_id, "character_id": self.character_id, "knowledge_key": self.knowledge_key, "status": self.status.value, "established_by_beat_id": self.established_by_beat_id, "provenance_zh": self.provenance_zh}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "CharacterKnowledgeState":
-        return cls(**_exact(value, {"state_id", "character_id", "knowledge_key", "status", "provenance_zh"}, cls.__name__))
+        return cls(**_exact(value, {"state_id", "character_id", "knowledge_key", "status", "established_by_beat_id", "provenance_zh"}, cls.__name__))
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,12 +330,10 @@ class AudienceKnowledgeState:
 
 @dataclass(frozen=True, slots=True)
 class RevealTransition:
-    """One local unknown→suspected→confirmed knowledge transition."""
+    """An audience knowledge transition, anchored to audience presentation."""
 
     reveal_id: str
     knowledge_key: str
-    subject_kind: KnowledgeSubjectKind
-    subject_id: str | None
     from_status: KnowledgeStatus
     to_status: KnowledgeStatus
     triggered_by_presentation_id: str
@@ -314,23 +341,45 @@ class RevealTransition:
     def __post_init__(self) -> None:
         _key(self.reveal_id, "reveal_id")
         _key(self.knowledge_key, "reveal knowledge_key")
-        kind, subject_id = _subject(self.subject_kind, self.subject_id, "reveal subject")
-        object.__setattr__(self, "subject_kind", kind)
-        object.__setattr__(self, "subject_id", subject_id)
-        before = _enum(self.from_status, KnowledgeStatus, "reveal from_status")
-        after = _enum(self.to_status, KnowledgeStatus, "reveal to_status")
-        if (before, after) not in {(KnowledgeStatus.UNKNOWN, KnowledgeStatus.SUSPECTED), (KnowledgeStatus.SUSPECTED, KnowledgeStatus.CONFIRMED)}:
-            raise B14SkeletonError("reveal transition must be unknown→suspected or suspected→confirmed")
+        before, after = _knowledge_transition(self.from_status, self.to_status, "audience reveal transition")
         object.__setattr__(self, "from_status", before)
         object.__setattr__(self, "to_status", after)
         _key(self.triggered_by_presentation_id, "reveal triggered_by_presentation_id")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"reveal_id": self.reveal_id, "knowledge_key": self.knowledge_key, "subject_kind": self.subject_kind.value, "subject_id": self.subject_id, "from_status": self.from_status.value, "to_status": self.to_status.value, "triggered_by_presentation_id": self.triggered_by_presentation_id}
+        return {"reveal_id": self.reveal_id, "knowledge_key": self.knowledge_key, "from_status": self.from_status.value, "to_status": self.to_status.value, "triggered_by_presentation_id": self.triggered_by_presentation_id}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RevealTransition":
-        return cls(**_exact(value, {"reveal_id", "knowledge_key", "subject_kind", "subject_id", "from_status", "to_status", "triggered_by_presentation_id"}, cls.__name__))
+        return cls(**_exact(value, {"reveal_id", "knowledge_key", "from_status", "to_status", "triggered_by_presentation_id"}, cls.__name__))
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterKnowledgeTransition:
+    """A character knowledge transition at one story-world beat occurrence."""
+
+    transition_id: str
+    character_id: str
+    knowledge_key: str
+    from_status: KnowledgeStatus
+    to_status: KnowledgeStatus
+    triggered_by_beat_id: str
+
+    def __post_init__(self) -> None:
+        _key(self.transition_id, "character knowledge transition_id")
+        _key(self.character_id, "character knowledge transition character_id")
+        _key(self.knowledge_key, "character knowledge transition knowledge_key")
+        before, after = _knowledge_transition(self.from_status, self.to_status, "character knowledge transition")
+        object.__setattr__(self, "from_status", before)
+        object.__setattr__(self, "to_status", after)
+        _key(self.triggered_by_beat_id, "character knowledge transition triggered_by_beat_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"transition_id": self.transition_id, "character_id": self.character_id, "knowledge_key": self.knowledge_key, "from_status": self.from_status.value, "to_status": self.to_status.value, "triggered_by_beat_id": self.triggered_by_beat_id}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "CharacterKnowledgeTransition":
+        return cls(**_exact(value, {"transition_id", "character_id", "knowledge_key", "from_status", "to_status", "triggered_by_beat_id"}, cls.__name__))
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,12 +465,32 @@ class ArcCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class GapAnchor:
+    """A narrow locator for a gap; A2 resolves the referenced object."""
+
+    kind: GapAnchorKind
+    reference_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", _enum(self.kind, GapAnchorKind, "gap anchor kind"))
+        _key(self.reference_id, "gap anchor reference_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind.value, "reference_id": self.reference_id}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "GapAnchor":
+        return cls(**_exact(value, {"kind", "reference_id"}, cls.__name__))
+
+
+@dataclass(frozen=True, slots=True)
 class SkeletonGap:
     gap_id: str
     kind: SkeletonGapKind
     disposition: GapDisposition
     description_zh: str
     provenance_zh: str
+    anchors: tuple[GapAnchor, ...] = ()
 
     def __post_init__(self) -> None:
         _key(self.gap_id, "skeleton gap_id")
@@ -429,13 +498,17 @@ class SkeletonGap:
         object.__setattr__(self, "disposition", _enum(self.disposition, GapDisposition, "skeleton gap disposition"))
         _text(self.description_zh, "skeleton gap description")
         _text(self.provenance_zh, "skeleton gap provenance")
+        object.__setattr__(self, "anchors", _items(self.anchors, GapAnchor, "skeleton gap anchors", lambda item: (item.kind.value, item.reference_id)))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"gap_id": self.gap_id, "kind": self.kind.value, "disposition": self.disposition.value, "description_zh": self.description_zh, "provenance_zh": self.provenance_zh}
+        return {"gap_id": self.gap_id, "kind": self.kind.value, "disposition": self.disposition.value, "description_zh": self.description_zh, "provenance_zh": self.provenance_zh, "anchors": [item.to_dict() for item in self.anchors]}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "SkeletonGap":
-        return cls(**_exact(value, {"gap_id", "kind", "disposition", "description_zh", "provenance_zh"}, cls.__name__))
+        value = _exact(value, {"gap_id", "kind", "disposition", "description_zh", "provenance_zh", "anchors"}, cls.__name__)
+        if not isinstance(value["anchors"], list):
+            raise B14SkeletonError("skeleton gap anchors must be an array")
+        return cls(value["gap_id"], value["kind"], value["disposition"], value["description_zh"], value["provenance_zh"], tuple(GapAnchor.from_dict(item) for item in value["anchors"]))
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +542,7 @@ class AdaptedStorySkeleton:
     dependencies: tuple[NarrativeDependency, ...] = ()
     world_truth_states: tuple[WorldTruthState, ...] = ()
     character_knowledge_states: tuple[CharacterKnowledgeState, ...] = ()
+    character_knowledge_transitions: tuple[CharacterKnowledgeTransition, ...] = ()
     audience_knowledge_states: tuple[AudienceKnowledgeState, ...] = ()
     reveal_transitions: tuple[RevealTransition, ...] = ()
     withholding_boundaries: tuple[WithholdingBoundary, ...] = ()
@@ -480,7 +554,7 @@ class AdaptedStorySkeleton:
     schema_version: int = B14_SKELETON_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != B14_SKELETON_SCHEMA_VERSION:
+        if isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int) or self.schema_version != B14_SKELETON_SCHEMA_VERSION:
             raise B14SkeletonError("unsupported B1.4 skeleton schema_version")
         if not isinstance(self.strategy_ref, ArtifactRef) or self.strategy_ref.artifact_type != B12_STRATEGY_ARTIFACT_TYPE:
             raise B14SkeletonError("strategy_ref must be an exact B1.2 adaptation_strategy ArtifactRef")
@@ -506,6 +580,7 @@ class AdaptedStorySkeleton:
             ("dependencies", NarrativeDependency, lambda item: item.dependency_id),
             ("world_truth_states", WorldTruthState, lambda item: item.state_id),
             ("character_knowledge_states", CharacterKnowledgeState, lambda item: item.state_id),
+            ("character_knowledge_transitions", CharacterKnowledgeTransition, lambda item: item.transition_id),
             ("audience_knowledge_states", AudienceKnowledgeState, lambda item: item.state_id),
             ("reveal_transitions", RevealTransition, lambda item: item.reveal_id),
             ("withholding_boundaries", WithholdingBoundary, lambda item: item.boundary_id),
@@ -538,6 +613,7 @@ class AdaptedStorySkeleton:
             "dependencies": [item.to_dict() for item in self.dependencies],
             "world_truth_states": [item.to_dict() for item in self.world_truth_states],
             "character_knowledge_states": [item.to_dict() for item in self.character_knowledge_states],
+            "character_knowledge_transitions": [item.to_dict() for item in self.character_knowledge_transitions],
             "audience_knowledge_states": [item.to_dict() for item in self.audience_knowledge_states],
             "reveal_transitions": [item.to_dict() for item in self.reveal_transitions],
             "withholding_boundaries": [item.to_dict() for item in self.withholding_boundaries],
@@ -550,7 +626,7 @@ class AdaptedStorySkeleton:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "AdaptedStorySkeleton":
-        fields = {"schema_version", "strategy_ref", "disposition_publication_ref", "chronology", "primary_presentation", "outcomes", "dependencies", "world_truth_states", "character_knowledge_states", "audience_knowledge_states", "reveal_transitions", "withholding_boundaries", "setup_payoffs", "arc_checkpoints", "gaps", "beat_accounting", "local_invented_beats"}
+        fields = {"schema_version", "strategy_ref", "disposition_publication_ref", "chronology", "primary_presentation", "outcomes", "dependencies", "world_truth_states", "character_knowledge_states", "character_knowledge_transitions", "audience_knowledge_states", "reveal_transitions", "withholding_boundaries", "setup_payoffs", "arc_checkpoints", "gaps", "beat_accounting", "local_invented_beats"}
         value = _exact(value, fields, cls.__name__)
         list_fields = fields - {"schema_version", "strategy_ref", "disposition_publication_ref"}
         if any(not isinstance(value[name], list) for name in list_fields):
@@ -563,6 +639,7 @@ class AdaptedStorySkeleton:
             tuple(NarrativeDependency.from_dict(item) for item in value["dependencies"]),
             tuple(WorldTruthState.from_dict(item) for item in value["world_truth_states"]),
             tuple(CharacterKnowledgeState.from_dict(item) for item in value["character_knowledge_states"]),
+            tuple(CharacterKnowledgeTransition.from_dict(item) for item in value["character_knowledge_transitions"]),
             tuple(AudienceKnowledgeState.from_dict(item) for item in value["audience_knowledge_states"]),
             tuple(RevealTransition.from_dict(item) for item in value["reveal_transitions"]),
             tuple(WithholdingBoundary.from_dict(item) for item in value["withholding_boundaries"]),

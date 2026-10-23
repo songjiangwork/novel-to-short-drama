@@ -137,6 +137,16 @@ def test_initial_audience_confirmation_violates_later_withholding_boundary():
     assert "withholding.violation" in _codes(skeleton)
 
 
+def test_audience_withholding_requires_a_resolved_knowledge_key():
+    skeleton = replace(
+        _skeleton(),
+        withholding_boundaries=(
+            WithholdingBoundary("hold_missing", "unknown_secret", "audience", None, _skeleton().primary_presentation[1], "无效 knowledge key。"),
+        ),
+    )
+    assert "withholding.knowledge" in _codes(skeleton)
+
+
 def test_character_knowledge_requires_comparable_progression_but_flashback_is_legal():
     skeleton = _skeleton()
     first, second, third = _authority().disposition_plan.adapted_story_beats
@@ -231,6 +241,46 @@ def test_accounting_requires_consequential_evidence_not_an_unconsumed_outcome():
     assert validate_adapted_story_skeleton(dependency_path, authority=_authority()).valid
     orphan_indirect = replace(dependency_path, dependencies=())
     assert "accounting.indirect_evidence" in _codes(orphan_indirect)
+
+
+def test_background_only_cannot_also_have_direct_primary_presentation():
+    skeleton = _skeleton()
+    first = _authority().disposition_plan.adapted_story_beats[0]
+    contradictory = replace(
+        skeleton,
+        beat_accounting=tuple(
+            BeatAccounting(item.adapted_story_beat_id, "background_only", "与直接 presentation 冲突。")
+            if item.adapted_story_beat_id == first.adapted_story_beat_id else item
+            for item in skeleton.beat_accounting
+        ),
+    )
+    assert "accounting.background_presented" in _codes(contradictory)
+
+
+def test_background_knowledge_progression_reaches_presented_confirmation():
+    skeleton = _skeleton()
+    first, second, _third = _authority().disposition_plan.adapted_story_beats
+    character = _authority().disposition_plan.adapted_characters[0].adapted_character_id
+    knowledge_path = replace(
+        skeleton,
+        primary_presentation=skeleton.primary_presentation[1:],
+        outcomes=(), dependencies=(), setup_payoffs=(),
+        character_knowledge_transitions=(
+            CharacterKnowledgeTransition("suspect_at_a", character, "secret", "unknown", "suspected", first.adapted_story_beat_id),
+            CharacterKnowledgeTransition("confirm_at_b", character, "secret", "suspected", "confirmed", second.adapted_story_beat_id),
+        ),
+        beat_accounting=tuple(
+            BeatAccounting(item.adapted_story_beat_id, "background_only", "为角色确认提供知识前提。")
+            if item.adapted_story_beat_id == first.adapted_story_beat_id else item
+            for item in skeleton.beat_accounting
+        ),
+    )
+    assert validate_adapted_story_skeleton(knowledge_path, authority=_authority()).valid
+    unused_transition = replace(
+        knowledge_path,
+        character_knowledge_transitions=knowledge_path.character_knowledge_transitions[:1],
+    )
+    assert "accounting.orphan" in _codes(unused_transition)
 
 
 def test_self_dependency_is_not_a_meaningful_same_beat_precondition():

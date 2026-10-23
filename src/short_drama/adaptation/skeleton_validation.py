@@ -286,7 +286,10 @@ def _validate_knowledge(skeleton, beats, characters, index, precedes, fail) -> N
         elif boundary.subject_kind is KnowledgeSubjectKind.CHARACTER:
             fail("withholding.character_unverifiable", "character withholding cannot be verified from a presentation-time boundary", boundary.boundary_id)
         if boundary.subject_kind is KnowledgeSubjectKind.AUDIENCE:
-            if initial_audience.get(boundary.knowledge_key) is KnowledgeStatus.CONFIRMED:
+            if boundary.knowledge_key not in initial_audience:
+                fail("withholding.knowledge", "audience withholding knowledge key has no initial audience state", boundary.boundary_id)
+                continue
+            if initial_audience[boundary.knowledge_key] is KnowledgeStatus.CONFIRMED:
                 fail("withholding.violation", "audience is initially confirmed before withholding boundary", boundary.boundary_id)
             for reveal in skeleton.reveal_transitions:
                 if (reveal.knowledge_key == boundary.knowledge_key and reveal.to_status is KnowledgeStatus.CONFIRMED
@@ -331,6 +334,8 @@ def _validate_accounting(skeleton, beats, projection, fail) -> None:
     for beat_id, item in accounting.items():
         if item.treatment is BeatPresentationTreatment.DIRECTLY_PRESENTED and beat_id not in presented:
             fail("accounting.direct_evidence", "directly presented beat has no presentation evidence", beat_id)
+        if item.treatment is BeatPresentationTreatment.BACKGROUND_ONLY and beat_id in presented:
+            fail("accounting.background_presented", "background-only beat has direct presentation evidence", beat_id)
         if item.treatment is BeatPresentationTreatment.INDIRECTLY_REVEALED and beat_id not in consequential:
             fail("accounting.indirect_evidence", "indirectly revealed beat lacks consequential structured evidence", beat_id)
         if item.treatment is BeatPresentationTreatment.BACKGROUND_ONLY and beat_id not in consequential:
@@ -352,6 +357,21 @@ def _beats_reaching_presented(skeleton, presented: set[str]) -> set[str]:
     for link in skeleton.setup_payoffs:
         if link.setup_beat_id != link.payoff_beat_id:
             predecessors.setdefault(link.payoff_beat_id, set()).add(link.setup_beat_id)
+    chronology = {beat_id: set() for beat_id in (
+        item.adapted_story_beat_id for item in skeleton.beat_accounting
+    )}
+    for edge in skeleton.chronology:
+        chronology.setdefault(edge.before_beat_id, set()).add(edge.after_beat_id)
+    transitions = skeleton.character_knowledge_transitions
+    for later in transitions:
+        for earlier in transitions:
+            if (
+                earlier is not later
+                and (earlier.character_id, earlier.knowledge_key) == (later.character_id, later.knowledge_key)
+                and earlier.to_status is later.from_status
+                and _reachable(chronology, earlier.triggered_by_beat_id, later.triggered_by_beat_id)
+            ):
+                predecessors.setdefault(later.triggered_by_beat_id, set()).add(earlier.triggered_by_beat_id)
     reached, pending = set(presented), list(presented)
     while pending:
         beat_id = pending.pop()

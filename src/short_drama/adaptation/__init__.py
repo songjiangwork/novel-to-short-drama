@@ -96,6 +96,16 @@ from .disposition_persistence import (
     B13DispositionPublicationResult, B13VerifiedCurrentSnapshot,
     b13_disposition_pointer_id,
 )
+from .skeleton import (
+    B14_SKELETON_SCHEMA_VERSION, B14SkeletonError, AdaptedStorySkeleton,
+    ArcCheckpoint, ArcCheckpointKind, ArcDimension, AudienceKnowledgeState,
+    BeatAccounting, BeatPresentationTreatment, CharacterKnowledgeState,
+    CharacterKnowledgeTransition, GapAnchor, GapAnchorKind,
+    ChronologyPrecedence, ContinuityStateKind, GapDisposition,
+    KnowledgeStatus, KnowledgeSubjectKind, NarrativeDependency, NarrativeOutcome,
+    PresentationEntry, PresentationSemantics, RevealTransition, SetupPayoffLink,
+    SkeletonGap, SkeletonGapKind, WithholdingBoundary, WorldTruthState,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -153,4 +163,12 @@ __all__ = [
     "B13DispositionPersistenceError", "B13DispositionPersistenceService",
     "B13DispositionPublicationResult", "B13VerifiedCurrentSnapshot",
     "b13_disposition_pointer_id",
+    "B14_SKELETON_SCHEMA_VERSION", "B14SkeletonError", "AdaptedStorySkeleton",
+    "ArcCheckpoint", "ArcCheckpointKind", "ArcDimension", "AudienceKnowledgeState",
+    "BeatAccounting", "BeatPresentationTreatment", "CharacterKnowledgeState",
+    "CharacterKnowledgeTransition", "GapAnchor", "GapAnchorKind",
+    "ChronologyPrecedence", "ContinuityStateKind", "GapDisposition",
+    "KnowledgeStatus", "KnowledgeSubjectKind", "NarrativeDependency", "NarrativeOutcome",
+    "PresentationEntry", "PresentationSemantics", "RevealTransition", "SetupPayoffLink",
+    "SkeletonGap", "SkeletonGapKind", "WithholdingBoundary", "WorldTruthState",
 ]

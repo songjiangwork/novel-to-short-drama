@@ -13,6 +13,7 @@ from typing import Any
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore, canonical_json_bytes, content_hash, strict_json_loads
 from short_drama.foundation import FilePointerStore
+from short_drama.guidance.models import UserDirection
 from short_drama.guidance.projection import load_user_direction
 from short_drama.io import load_json
 from short_drama.llm import (GenerationExecutionOptions, OpenAICompatibleLLMClient, OutputSchema,
@@ -36,7 +37,7 @@ B14_SKELETON_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
 B14_SKELETON_PACKET_SCHEMA_VERSION = 1
 B14_SKELETON_PROMPT_CONTENT_HASH_V1 = "f31bb574c259d7e39f61f440cd47f5f8ad8f4068c81ed4c7a46d4a4b286bf66e"
 B14_SKELETON_PROFILE_HASH_V1 = "bfc31ec94b1bc2285429639811a5704b09459618e8a0390eb8f1ef548b86ab39"
-B14_SKELETON_SCHEMA_HASH_V1 = "f08580b34e55909fedd25d2dbaffe2720697ddbd22218dd59af6f6ead6faacd6"
+B14_SKELETON_SCHEMA_HASH_V1 = "bf5fde02fc98ac47ee8e9a93b99268afebf3e7160ef57d2eb99eb574b1d75c28"
 
 
 class B14SkeletonSemanticError(ValueError):
@@ -89,11 +90,24 @@ class B14SkeletonSemanticMeasurement:
 class B14SkeletonPacket:
     authority: B14SkeletonAuthority
     strategy: B12StrategyArtifact
+    effective_directions: tuple[UserDirection, ...]
+    _verified_global_context: bytes
     _canonical_payload: bytes
 
     def __post_init__(self) -> None:
         if not isinstance(self.authority, B14SkeletonAuthority) or not isinstance(self.strategy, B12StrategyArtifact):
             raise B14SkeletonSemanticError("packet requires verified B1.4 authority and B1.2 strategy")
+        directions = tuple(self.effective_directions)
+        if any(not isinstance(item, UserDirection) for item in directions):
+            raise B14SkeletonSemanticError("packet effective directions must be verified UserDirection values")
+        if tuple(item.artifact_ref for item in directions) != self.strategy.effective_direction_refs:
+            raise B14SkeletonSemanticError("packet effective directions do not match exact B1.2 direction refs")
+        try:
+            context = strict_json_loads(self._verified_global_context)
+        except Exception as exc:
+            raise B14SkeletonSemanticError("packet verified global context must be canonical JSON") from exc
+        if not isinstance(context, dict) or canonical_json_bytes(context) != self._verified_global_context:
+            raise B14SkeletonSemanticError("packet verified global context must be canonical JSON")
         try:
             value = strict_json_loads(self._canonical_payload)
         except Exception as exc:
@@ -110,6 +124,17 @@ class B14SkeletonPacket:
             raise B14SkeletonSemanticError("packet B1.3 content does not match verified authority")
         if value.get("verified_b12_strategy") != self.strategy.strategy.to_dict():
             raise B14SkeletonSemanticError("packet B1.2 content does not match verified authority")
+        if value.get("resolved_target") != self.strategy.strategy.resolved_target.to_dict():
+            raise B14SkeletonSemanticError("packet target does not match verified B1.2 authority")
+        expected_directions = {
+            "effective_direction_hash": self.strategy.effective_b1_direction_hash,
+            "direction_refs": [item.to_dict() for item in self.strategy.effective_direction_refs],
+            "directions": [item.to_dict() for item in directions],
+        }
+        if value.get("effective_b1_directions") != expected_directions:
+            raise B14SkeletonSemanticError("packet effective directions do not match verified B1.2 authority")
+        if value.get("global_and_canonical_context") != context:
+            raise B14SkeletonSemanticError("packet global/canonical context does not match verified construction")
 
     def to_dict(self) -> dict[str, Any]:
         value = strict_json_loads(self._canonical_payload)
@@ -210,10 +235,10 @@ def prepare_b14_skeleton_packet(*, store: FileArtifactStore, pointers: FilePoint
     strategy = _load(store, strategy_ref, B12StrategyArtifact)
     if strategy.source_snapshot != authority.disposition_plan.source_snapshot:
         raise B14SkeletonSemanticError("B1.2 strategy and B1.3 plan source snapshots differ")
-    directions = []
+    directions: list[UserDirection] = []
     try:
         for ref in strategy.effective_direction_refs:
-            directions.append(load_user_direction(store, ref).to_dict())
+            directions.append(load_user_direction(store, ref))
     except Exception as exc:
         raise B14SkeletonSemanticError("effective B1 user-direction authority is missing or invalid") from exc
     payload = {
@@ -222,11 +247,15 @@ def prepare_b14_skeleton_packet(*, store: FileArtifactStore, pointers: FilePoint
         "resolved_target": strategy.strategy.resolved_target.to_dict(),
         "verified_b12_strategy": strategy.strategy.to_dict(),
         "effective_b1_directions": {"effective_direction_hash": strategy.effective_b1_direction_hash,
-                                    "direction_refs": [x.to_dict() for x in strategy.effective_direction_refs], "directions": directions},
+                                    "direction_refs": [x.to_dict() for x in strategy.effective_direction_refs],
+                                    "directions": [x.to_dict() for x in directions]},
         "verified_b13_disposition": authority.disposition_plan.to_dict(),
         "global_and_canonical_context": _relevant_source_context(store, authority.disposition_plan.source_snapshot),
     }
-    return B14SkeletonPacket(authority, strategy, canonical_json_bytes(payload))
+    return B14SkeletonPacket(
+        authority, strategy, tuple(directions),
+        canonical_json_bytes(payload["global_and_canonical_context"]), canonical_json_bytes(payload),
+    )
 
 
 _ASSETS = ("b14_skeleton_llm_v1.yaml", "b14-adapted-story-skeleton-proposal-v1.schema.json",

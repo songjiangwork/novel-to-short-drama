@@ -138,7 +138,6 @@ def validate_adapted_story_skeleton(
 
     projection = _primary_projection(skeleton.primary_presentation, beats, fail)
     index = {item.presentation_id: item.presentation_index for item in projection}
-    entry_by_id = {item.presentation_id: item for item in projection}
 
     edges: dict[str, set[str]] = {beat_id: set() for beat_id in beats}
     for edge in skeleton.chronology:
@@ -166,7 +165,9 @@ def validate_adapted_story_skeleton(
         outcome = outcomes.get(dependency.prerequisite_outcome_id)
         if outcome is None or dependency.required_by_beat_id not in beats:
             fail("dependency.reference", "dependency outcome or required beat does not resolve", dependency.dependency_id)
-        elif outcome.produced_by_beat_id != dependency.required_by_beat_id:
+        elif outcome.produced_by_beat_id == dependency.required_by_beat_id:
+            fail("dependency.self", "dependency cannot require an outcome produced by the same beat", dependency.dependency_id)
+        else:
             reverse_or_unknown(outcome.produced_by_beat_id, dependency.required_by_beat_id, "dependency.chronology", "dependency")
     for link in skeleton.setup_payoffs:
         if link.setup_beat_id not in beats or link.payoff_beat_id not in beats:
@@ -178,7 +179,7 @@ def validate_adapted_story_skeleton(
         if any(ref not in canonical_refs for ref in link.source_provenance_refs):
             fail("setup_payoff.provenance", "setup/payoff provenance is outside exact source snapshot", link.link_id)
 
-    _validate_knowledge(skeleton, beats, characters, index, entry_by_id, precedes, fail)
+    _validate_knowledge(skeleton, beats, characters, index, precedes, fail)
     _validate_overlay_refs(skeleton, beats, characters, canonical_refs, outcomes, index, fail)
     _validate_accounting(skeleton, beats, projection, fail)
     return B14SkeletonValidationResult(tuple(sorted(findings, key=lambda item: (item.code, item.subject_id or "", item.message))), projection)
@@ -198,12 +199,13 @@ def _primary_projection(items: Iterable[str | PresentationEntry], beats: set[str
     return tuple(result)
 
 
-def _validate_knowledge(skeleton, beats, characters, index, entries, precedes, fail) -> None:
-    keys = {item.knowledge_key for item in skeleton.audience_knowledge_states}
-    keys.update(item.knowledge_key for item in skeleton.reveal_transitions)
-    keys.update(item.knowledge_key for item in skeleton.character_knowledge_states)
-    keys.update(item.knowledge_key for item in skeleton.character_knowledge_transitions)
-    initial_audience = {item.knowledge_key: item.status for item in skeleton.audience_knowledge_states}
+def _validate_knowledge(skeleton, beats, characters, index, precedes, fail) -> None:
+    initial_audience = {}
+    for state in skeleton.audience_knowledge_states:
+        if state.knowledge_key in initial_audience:
+            fail("audience_knowledge.initial", "audience knowledge has duplicate initial state", state.state_id)
+            continue
+        initial_audience[state.knowledge_key] = state.status
     for reveal in skeleton.reveal_transitions:
         if reveal.triggered_by_presentation_id not in index:
             fail("reveal.presentation", "reveal presentation does not resolve", reveal.reveal_id)
@@ -223,6 +225,7 @@ def _validate_knowledge(skeleton, beats, characters, index, entries, precedes, f
             status = item.to_status
             last = now
     initial_characters = {}
+    established_states = {}
     for state in skeleton.character_knowledge_states:
         if state.character_id not in characters:
             fail("character_knowledge.character", "knowledge state character does not resolve", state.state_id)
@@ -233,6 +236,11 @@ def _validate_knowledge(skeleton, beats, characters, index, entries, precedes, f
             if key in initial_characters:
                 fail("character_knowledge.initial", "character knowledge has duplicate initial state", state.state_id)
             initial_characters[key] = state.status
+        else:
+            key = (state.character_id, state.knowledge_key, state.established_by_beat_id)
+            if key in established_states:
+                fail("character_knowledge.state", "character knowledge has duplicate state at a beat", state.state_id)
+            established_states[key] = state
     for key in sorted({(item.character_id, item.knowledge_key) for item in skeleton.character_knowledge_transitions}):
         transitions = [item for item in skeleton.character_knowledge_transitions if (item.character_id, item.knowledge_key) == key]
         if key not in initial_characters:
@@ -254,13 +262,32 @@ def _validate_knowledge(skeleton, beats, characters, index, entries, precedes, f
             if item.from_status != status:
                 fail("character_knowledge.chain", "character knowledge transition contradicts prior state", item.transition_id)
             status = item.to_status
+        states = [
+            state for state in skeleton.character_knowledge_states
+            if (state.character_id, state.knowledge_key) == key and state.established_by_beat_id is not None
+        ]
+        transitions_by_beat = {item.triggered_by_beat_id: item for item in transitions}
+        for state in states:
+            transition = transitions_by_beat.get(state.established_by_beat_id)
+            if transition is None:
+                fail("character_knowledge.state_unsupported", "post-initial knowledge state has no transition at its establishing beat", state.state_id)
+            elif transition.to_status != state.status:
+                fail("character_knowledge.state_conflict", "knowledge state contradicts transition result at its establishing beat", state.state_id)
+    transition_keys = {(item.character_id, item.knowledge_key) for item in skeleton.character_knowledge_transitions}
+    for state in skeleton.character_knowledge_states:
+        if state.established_by_beat_id is not None and (state.character_id, state.knowledge_key) not in transition_keys:
+            fail("character_knowledge.state_unsupported", "post-initial knowledge state has no progression", state.state_id)
     for boundary in skeleton.withholding_boundaries:
         if boundary.must_not_be_confirmed_before_presentation_id not in index:
             fail("withholding.presentation", "withholding boundary presentation does not resolve", boundary.boundary_id)
             continue
         if boundary.subject_kind is KnowledgeSubjectKind.CHARACTER and boundary.subject_id not in characters:
             fail("withholding.character", "withholding boundary character does not resolve", boundary.boundary_id)
+        elif boundary.subject_kind is KnowledgeSubjectKind.CHARACTER:
+            fail("withholding.character_unverifiable", "character withholding cannot be verified from a presentation-time boundary", boundary.boundary_id)
         if boundary.subject_kind is KnowledgeSubjectKind.AUDIENCE:
+            if initial_audience.get(boundary.knowledge_key) is KnowledgeStatus.CONFIRMED:
+                fail("withholding.violation", "audience is initially confirmed before withholding boundary", boundary.boundary_id)
             for reveal in skeleton.reveal_transitions:
                 if (reveal.knowledge_key == boundary.knowledge_key and reveal.to_status is KnowledgeStatus.CONFIRMED
                         and index.get(reveal.triggered_by_presentation_id, -1) < index[boundary.must_not_be_confirmed_before_presentation_id]):
@@ -300,19 +327,39 @@ def _validate_accounting(skeleton, beats, projection, fail) -> None:
     for beat_id in sorted(set(accounting) - beats):
         fail("accounting.unknown", "accounting references an unknown beat", beat_id)
     presented = {item.adapted_story_beat_id for item in projection}
-    support = set()
-    for collection, field in ((skeleton.outcomes, "produced_by_beat_id"), (skeleton.dependencies, "required_by_beat_id"),
-                              (skeleton.world_truth_states, "established_by_beat_id"), (skeleton.character_knowledge_transitions, "triggered_by_beat_id"),
-                              (skeleton.setup_payoffs, "setup_beat_id"), (skeleton.setup_payoffs, "payoff_beat_id"),
-                              (skeleton.arc_checkpoints, "trigger_beat_id")):
-        support.update(getattr(item, field) for item in collection if getattr(item, field) is not None)
+    consequential = _beats_reaching_presented(skeleton, presented)
     for beat_id, item in accounting.items():
         if item.treatment is BeatPresentationTreatment.DIRECTLY_PRESENTED and beat_id not in presented:
             fail("accounting.direct_evidence", "directly presented beat has no presentation evidence", beat_id)
-        if item.treatment is BeatPresentationTreatment.INDIRECTLY_REVEALED and beat_id not in support:
-            fail("accounting.indirect_evidence", "indirectly revealed beat lacks structured support", beat_id)
-        if item.treatment is BeatPresentationTreatment.BACKGROUND_ONLY and beat_id not in support:
+        if item.treatment is BeatPresentationTreatment.INDIRECTLY_REVEALED and beat_id not in consequential:
+            fail("accounting.indirect_evidence", "indirectly revealed beat lacks consequential structured evidence", beat_id)
+        if item.treatment is BeatPresentationTreatment.BACKGROUND_ONLY and beat_id not in consequential:
             fail("accounting.orphan", "background-only beat has no causal, knowledge, or continuity role", beat_id)
+
+
+def _beats_reaching_presented(skeleton, presented: set[str]) -> set[str]:
+    """Return beats with an explicit causal/setup path to presented material.
+
+    A produced outcome is not evidence by itself.  It becomes consequential only
+    when a dependency consumes it; setup/payoff links are similarly explicit.
+    """
+    outcomes = {item.outcome_id: item for item in skeleton.outcomes}
+    predecessors: dict[str, set[str]] = {}
+    for dependency in skeleton.dependencies:
+        outcome = outcomes.get(dependency.prerequisite_outcome_id)
+        if outcome is not None and outcome.produced_by_beat_id != dependency.required_by_beat_id:
+            predecessors.setdefault(dependency.required_by_beat_id, set()).add(outcome.produced_by_beat_id)
+    for link in skeleton.setup_payoffs:
+        if link.setup_beat_id != link.payoff_beat_id:
+            predecessors.setdefault(link.payoff_beat_id, set()).add(link.setup_beat_id)
+    reached, pending = set(presented), list(presented)
+    while pending:
+        beat_id = pending.pop()
+        for predecessor in predecessors.get(beat_id, ()):
+            if predecessor not in reached:
+                reached.add(predecessor)
+                pending.append(predecessor)
+    return reached
 
 
 def _reachable(edges: dict[str, set[str]], start: str, target: str) -> bool:

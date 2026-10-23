@@ -115,6 +115,28 @@ def test_audience_reveal_chain_direct_confirmation_and_withholding_boundary():
     assert "withholding.violation" in _codes(early)
 
 
+@pytest.mark.parametrize("statuses", [("unknown", "suspected"), ("unknown", "unknown")])
+def test_duplicate_audience_initial_states_fail_closed_even_when_identical(statuses):
+    skeleton = _skeleton()
+    duplicate = replace(
+        skeleton,
+        audience_knowledge_states=(
+            AudienceKnowledgeState("ak_first", "secret", statuses[0], "初始状态。"),
+            AudienceKnowledgeState("ak_second", "secret", statuses[1], "重复初始状态。"),
+        ),
+    )
+    assert "audience_knowledge.initial" in _codes(duplicate)
+
+
+def test_initial_audience_confirmation_violates_later_withholding_boundary():
+    skeleton = replace(
+        _skeleton(),
+        audience_knowledge_states=(AudienceKnowledgeState("ak_confirmed", "secret", "confirmed", "开场已确认。"),),
+        reveal_transitions=(),
+    )
+    assert "withholding.violation" in _codes(skeleton)
+
+
 def test_character_knowledge_requires_comparable_progression_but_flashback_is_legal():
     skeleton = _skeleton()
     first, second, third = _authority().disposition_plan.adapted_story_beats
@@ -132,13 +154,51 @@ def test_character_knowledge_requires_comparable_progression_but_flashback_is_le
     assert "character_knowledge.order" in _codes(conflicted)
 
 
+def test_character_knowledge_state_snapshots_must_match_transition_progression():
+    skeleton = _skeleton()
+    _first, second, third = _authority().disposition_plan.adapted_story_beats
+    character = _authority().disposition_plan.adapted_characters[0].adapted_character_id
+    matching = replace(
+        skeleton,
+        character_knowledge_states=(
+            *skeleton.character_knowledge_states,
+            CharacterKnowledgeState("ck_after", character, "secret", "confirmed", second.adapted_story_beat_id, "学习后的快照。"),
+        ),
+    )
+    assert validate_adapted_story_skeleton(matching, authority=_authority()).valid
+    contradictory = replace(
+        matching,
+        character_knowledge_states=(
+            skeleton.character_knowledge_states[0],
+            CharacterKnowledgeState("ck_wrong", character, "secret", "suspected", second.adapted_story_beat_id, "与转换冲突。"),
+        ),
+    )
+    assert "character_knowledge.state_conflict" in _codes(contradictory)
+    unsupported = replace(
+        matching,
+        character_knowledge_states=(
+            skeleton.character_knowledge_states[0],
+            CharacterKnowledgeState("ck_unsupported", character, "secret", "confirmed", third.adapted_story_beat_id, "没有转换。"),
+        ),
+    )
+    assert "character_knowledge.state_unsupported" in _codes(unsupported)
+
+
 def test_setup_gap_accounting_and_local_invented_beat_validation():
     skeleton = _skeleton()
     first, second, third = _authority().disposition_plan.adapted_story_beats
     assert "setup_payoff.endpoint" in _codes(replace(skeleton, setup_payoffs=(SetupPayoffLink("dangling", first.adapted_story_beat_id, "missing", (), "无效。"),)))
     assert "setup_payoff.chronology.contradiction" in _codes(replace(skeleton, setup_payoffs=(SetupPayoffLink("reverse", third.adapted_story_beat_id, first.adapted_story_beat_id, (), "反序。"),)))
     assert "gap.anchor" in _codes(replace(skeleton, gaps=(SkeletonGap("bad", "knowledge", "intentional_ambiguity", "保留。", "记录。", (GapAnchor("knowledge", "not_a_state_id"),)),)))
-    background = replace(skeleton, beat_accounting=(*skeleton.beat_accounting[:-1], BeatAccounting(third.adapted_story_beat_id, "background_only", "只承担 payoff。")))
+    background = replace(
+        skeleton,
+        primary_presentation=skeleton.primary_presentation[1:],
+        beat_accounting=tuple(
+            BeatAccounting(item.adapted_story_beat_id, "background_only", "产生后续后果。")
+            if item.adapted_story_beat_id == first.adapted_story_beat_id else item
+            for item in skeleton.beat_accounting
+        ),
+    )
     assert validate_adapted_story_skeleton(background, authority=_authority()).valid
     orphan = replace(
         skeleton, primary_presentation=skeleton.primary_presentation[:2], setup_payoffs=(), arc_checkpoints=(),
@@ -146,6 +206,48 @@ def test_setup_gap_accounting_and_local_invented_beat_validation():
     )
     assert "accounting.orphan" in _codes(orphan)
     assert "accounting.missing" in _codes(replace(skeleton, beat_accounting=skeleton.beat_accounting[:-1]))
+
+
+def test_accounting_requires_consequential_evidence_not_an_unconsumed_outcome():
+    skeleton = _skeleton()
+    first, _second, _third = _authority().disposition_plan.adapted_story_beats
+    unconsumed = replace(
+        skeleton, primary_presentation=skeleton.primary_presentation[1:], dependencies=(), setup_payoffs=(),
+        beat_accounting=tuple(
+            BeatAccounting(item.adapted_story_beat_id, "background_only", "误称背景贡献。")
+            if item.adapted_story_beat_id == first.adapted_story_beat_id else item
+            for item in skeleton.beat_accounting
+        ),
+    )
+    assert "accounting.orphan" in _codes(unconsumed)
+    dependency_path = replace(
+        unconsumed, dependencies=_skeleton().dependencies,
+        beat_accounting=tuple(
+            BeatAccounting(item.adapted_story_beat_id, "indirectly_revealed", "通过后果间接揭示。")
+            if item.adapted_story_beat_id == first.adapted_story_beat_id else item
+            for item in unconsumed.beat_accounting
+        ),
+    )
+    assert validate_adapted_story_skeleton(dependency_path, authority=_authority()).valid
+    orphan_indirect = replace(dependency_path, dependencies=())
+    assert "accounting.indirect_evidence" in _codes(orphan_indirect)
+
+
+def test_self_dependency_is_not_a_meaningful_same_beat_precondition():
+    skeleton = _skeleton()
+    first = _authority().disposition_plan.adapted_story_beats[0]
+    self_dependent = replace(
+        skeleton,
+        dependencies=(NarrativeDependency("self_dep", "outcome_start", first.adapted_story_beat_id, "同一 beat 不构成前提。"),),
+    )
+    assert "dependency.self" in _codes(self_dependent)
+
+
+def test_character_specific_withholding_is_explicitly_unverifiable():
+    skeleton = _skeleton()
+    character = _authority().disposition_plan.adapted_characters[0].adapted_character_id
+    boundary = WithholdingBoundary("character_hold", "secret", "character", character, skeleton.primary_presentation[1], "当前结构未提供角色披露时点。")
+    assert "withholding.character_unverifiable" in _codes(replace(skeleton, withholding_boundaries=(*skeleton.withholding_boundaries, boundary)))
 
 
 def test_local_invented_identity_conflict_and_exact_authority_fail_closed(tmp_path):

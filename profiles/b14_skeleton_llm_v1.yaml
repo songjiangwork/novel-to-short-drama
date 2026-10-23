@@ -1,0 +1,9 @@
+# B1.4-B1 semantic behavior only; this deliberately declares no n_ctx/input ceiling.
+schema_version: 2
+profile_id: b14-adapted-story-skeleton-llm-v1
+temperature: 0.0
+max_output_tokens: 16384
+structured_output_mode: json_schema
+reasoning:
+  enabled: false
+  effort: null

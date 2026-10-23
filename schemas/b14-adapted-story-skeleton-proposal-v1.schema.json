@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novel-to-short-drama.local/schemas/b14-adapted-story-skeleton-proposal-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["chronology", "primary_presentation", "outcomes", "dependencies", "world_truth_states", "character_knowledge_states", "character_knowledge_transitions", "audience_knowledge_states", "reveal_transitions", "withholding_boundaries", "setup_payoffs", "arc_checkpoints", "gaps", "beat_accounting", "local_invented_beats"],
+  "properties": {
+    "chronology": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "primary_presentation": {"type": "array", "items": {"anyOf": [{"type": "string", "minLength": 1}, {"$ref": "#/$defs/object"}]}},
+    "outcomes": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "dependencies": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "world_truth_states": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "character_knowledge_states": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "character_knowledge_transitions": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "audience_knowledge_states": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "reveal_transitions": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "withholding_boundaries": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "setup_payoffs": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "arc_checkpoints": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "gaps": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "beat_accounting": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "local_invented_beats": {"type": "array", "items": {"$ref": "#/$defs/object"}}
+  },
+  "$defs": {"object": {"type": "object"}}
+}

@@ -106,6 +106,11 @@ from .skeleton import (
     PresentationEntry, PresentationSemantics, RevealTransition, SetupPayoffLink,
     SkeletonGap, SkeletonGapKind, WithholdingBoundary, WorldTruthState,
 )
+from .skeleton_validation import (
+    B14SkeletonAuthority, B14SkeletonValidationError, B14SkeletonValidationResult,
+    B14ValidationFinding, PrimaryPresentationIdentity, resolve_b14_skeleton_authority,
+    validate_adapted_story_skeleton, validate_stored_adapted_story_skeleton,
+)
 
 __all__ = [
     "AdaptationTarget", "AdaptationTargetDefaults", "AdaptationTargetError",
@@ -171,4 +176,7 @@ __all__ = [
     "KnowledgeStatus", "KnowledgeSubjectKind", "NarrativeDependency", "NarrativeOutcome",
     "PresentationEntry", "PresentationSemantics", "RevealTransition", "SetupPayoffLink",
     "SkeletonGap", "SkeletonGapKind", "WithholdingBoundary", "WorldTruthState",
+    "B14SkeletonAuthority", "B14SkeletonValidationError", "B14SkeletonValidationResult",
+    "B14ValidationFinding", "PrimaryPresentationIdentity", "resolve_b14_skeleton_authority",
+    "validate_adapted_story_skeleton", "validate_stored_adapted_story_skeleton",
 ]

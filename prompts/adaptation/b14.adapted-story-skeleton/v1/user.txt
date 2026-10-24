@@ -1,0 +1,2 @@
+Exact B1.4 whole-story semantic packet (authority refs are Python-owned and must not be returned):
+{{skeleton_packet_json}}

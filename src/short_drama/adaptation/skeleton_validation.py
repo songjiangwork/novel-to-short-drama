@@ -50,6 +50,32 @@ class B14SkeletonAuthority:
     disposition_plan: B13DispositionPlan
 
 
+def resolve_b14_skeleton_semantic_authority(
+    *, strategy_ref: ArtifactRef, disposition_publication_ref: ArtifactRef,
+    store: FileArtifactStore, pointers: FilePointerStore,
+) -> B14SkeletonAuthority:
+    """Resolve explicit B1.4 inputs through the existing B1.3 verifier.
+
+    This pre-skeleton entry point never consults CURRENT.  The B1.3
+    persistence boundary remains the single owner of historical publication,
+    source, and B1.2 selection verification.
+    """
+    if not isinstance(strategy_ref, ArtifactRef) or not isinstance(disposition_publication_ref, ArtifactRef):
+        raise B14SkeletonValidationError("B1.4 semantic preparation requires exact B1.2/B1.3 ArtifactRefs")
+    try:
+        service = B13DispositionPersistenceService(store, pointers)
+        publication = service._load_and_verify_publication(disposition_publication_ref)
+        _historical, selection = service._verify_historical_publication(publication)
+        plan = verify_b13_disposition_publication(publication).plan
+        if selection.strategy_ref != strategy_ref:
+            raise ValueError("explicit B1.2 strategy differs from B1.3 publication selection")
+        if plan.source_snapshot != selection.artifact.source_snapshot:
+            raise ValueError("B1.3 plan/source snapshot differs from exact B1.2 authority")
+        return B14SkeletonAuthority(strategy_ref, disposition_publication_ref, plan)
+    except Exception as exc:
+        raise B14SkeletonValidationError("pinned B1.2/B1.3 semantic authority cannot be verified") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class B14SkeletonValidationResult:
     findings: tuple[B14ValidationFinding, ...]
@@ -79,18 +105,12 @@ def resolve_b14_skeleton_authority(
     """
     if not isinstance(skeleton, AdaptedStorySkeleton):
         raise B14SkeletonValidationError("skeleton must be an AdaptedStorySkeleton")
-    try:
-        service = B13DispositionPersistenceService(store, pointers)
-        publication = service._load_and_verify_publication(skeleton.disposition_publication_ref)
-        _historical, selection = service._verify_historical_publication(publication)
-        plan = verify_b13_disposition_publication(publication).plan
-        if selection.strategy_ref != skeleton.strategy_ref:
-            raise ValueError("skeleton strategy_ref differs from B1.3 publication selection")
-        if plan.source_snapshot != selection.artifact.source_snapshot:
-            raise ValueError("B1.3 plan/source snapshot differs from exact B1.2 authority")
-        return B14SkeletonAuthority(selection.strategy_ref, skeleton.disposition_publication_ref, plan)
-    except Exception as exc:
-        raise B14SkeletonValidationError("pinned B1.2/B1.3 authority cannot be verified") from exc
+    return resolve_b14_skeleton_semantic_authority(
+        strategy_ref=skeleton.strategy_ref,
+        disposition_publication_ref=skeleton.disposition_publication_ref,
+        store=store,
+        pointers=pointers,
+    )
 
 
 def validate_stored_adapted_story_skeleton(

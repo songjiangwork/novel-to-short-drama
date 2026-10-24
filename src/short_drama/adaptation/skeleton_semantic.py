@@ -35,9 +35,10 @@ B14_SKELETON_PROMPT_VERSION = 1
 B14_SKELETON_OUTPUT_SCHEMA_ID = "b14-adapted-story-skeleton-proposal"
 B14_SKELETON_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
 B14_SKELETON_PACKET_SCHEMA_VERSION = 1
-B14_SKELETON_PROMPT_CONTENT_HASH_V1 = "f31bb574c259d7e39f61f440cd47f5f8ad8f4068c81ed4c7a46d4a4b286bf66e"
+B14_SKELETON_PROMPT_CONTENT_HASH_V1 = "65606a595272f77f92bc9721e48f342844da1465c70aa72a2c671b297cfe5f36"
 B14_SKELETON_PROFILE_HASH_V1 = "bfc31ec94b1bc2285429639811a5704b09459618e8a0390eb8f1ef548b86ab39"
-B14_SKELETON_SCHEMA_HASH_V1 = "bf5fde02fc98ac47ee8e9a93b99268afebf3e7160ef57d2eb99eb574b1d75c28"
+B14_SKELETON_SCHEMA_HASH_V1 = "295f5c96eb196121cf1ef9acc616b699607059c93189b06e79da7e5d4edde8fa"
+_VERIFIED_PACKET_FACTORY_TOKEN = object()
 
 
 class B14SkeletonSemanticError(ValueError):
@@ -93,8 +94,43 @@ class B14SkeletonPacket:
     effective_directions: tuple[UserDirection, ...]
     _verified_global_context: bytes
     _canonical_payload: bytes
+    _verified_packet_hash: str
+    _factory_token: object
+
+    @classmethod
+    def _from_verified_components(
+        cls,
+        authority: B14SkeletonAuthority,
+        strategy: B12StrategyArtifact,
+        directions: tuple[UserDirection, ...],
+        global_context: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> "B14SkeletonPacket":
+        """Construct a packet solely after immutable-store authority checks.
+
+        This deliberately private factory is the bridge from the read-only
+        preparation service to later zero-provider rendering.  Rendering only
+        rechecks this sealed canonical payload; it does not redo B1.3's
+        expensive historical publication verification.
+        """
+        payload_bytes = canonical_json_bytes(payload)
+        return cls(
+            authority, strategy, directions, canonical_json_bytes(global_context),
+            payload_bytes, content_hash(payload), _VERIFIED_PACKET_FACTORY_TOKEN,
+        )
+
+    def _require_verified_construction(self) -> None:
+        if self._factory_token is not _VERIFIED_PACKET_FACTORY_TOKEN:
+            raise B14SkeletonSemanticError("packet was not constructed by verified B1.4 authority preparation")
+        try:
+            value = strict_json_loads(self._canonical_payload)
+        except Exception as exc:
+            raise B14SkeletonSemanticError("packet must be canonical JSON") from exc
+        if not isinstance(value, dict) or content_hash(value) != self._verified_packet_hash:
+            raise B14SkeletonSemanticError("packet payload differs from the verified construction snapshot")
 
     def __post_init__(self) -> None:
+        self._require_verified_construction()
         if not isinstance(self.authority, B14SkeletonAuthority) or not isinstance(self.strategy, B12StrategyArtifact):
             raise B14SkeletonSemanticError("packet requires verified B1.4 authority and B1.2 strategy")
         directions = tuple(self.effective_directions)
@@ -108,10 +144,7 @@ class B14SkeletonPacket:
             raise B14SkeletonSemanticError("packet verified global context must be canonical JSON") from exc
         if not isinstance(context, dict) or canonical_json_bytes(context) != self._verified_global_context:
             raise B14SkeletonSemanticError("packet verified global context must be canonical JSON")
-        try:
-            value = strict_json_loads(self._canonical_payload)
-        except Exception as exc:
-            raise B14SkeletonSemanticError("packet must be canonical JSON") from exc
+        value = strict_json_loads(self._canonical_payload)
         if not isinstance(value, dict) or canonical_json_bytes(value) != self._canonical_payload:
             raise B14SkeletonSemanticError("packet must be canonical JSON")
         if value.get("schema_version") != B14_SKELETON_PACKET_SCHEMA_VERSION:
@@ -172,7 +205,7 @@ class B14SkeletonSemanticPreparation:
             raise B14SkeletonSemanticBudgetError("B1.4 rendered provider request plus output reserve exceeds model context")
 
     def decode_and_validate_proposal(self, proposal: dict[str, Any]) -> tuple[AdaptedStorySkeleton, B14SkeletonValidationResult]:
-        """Optional B2 seam: schema-valid proposal is not graph-valid output."""
+        """Future B1.4-B2 seam: schema-valid proposal is not graph-valid output."""
         if not isinstance(proposal, dict):
             raise B14SkeletonSemanticError("B1.4 proposal must be an object")
         if {"strategy_ref", "disposition_publication_ref"} & set(proposal):
@@ -252,9 +285,8 @@ def prepare_b14_skeleton_packet(*, store: FileArtifactStore, pointers: FilePoint
         "verified_b13_disposition": authority.disposition_plan.to_dict(),
         "global_and_canonical_context": _relevant_source_context(store, authority.disposition_plan.source_snapshot),
     }
-    return B14SkeletonPacket(
-        authority, strategy, tuple(directions),
-        canonical_json_bytes(payload["global_and_canonical_context"]), canonical_json_bytes(payload),
+    return B14SkeletonPacket._from_verified_components(
+        authority, strategy, tuple(directions), payload["global_and_canonical_context"], payload,
     )
 
 
@@ -305,6 +337,7 @@ def build_b14_skeleton_semantic_preparation(packet: B14SkeletonPacket, *, prompt
     execution_options: GenerationExecutionOptions | None = None) -> B14SkeletonSemanticPreparation:
     if not isinstance(packet, B14SkeletonPacket) or not isinstance(runtime_config, RuntimeConfig):
         raise B14SkeletonSemanticError("B1.4 semantic preparation requires packet and explicit RuntimeConfig")
+    packet._require_verified_construction()
     if execution_options is not None and not isinstance(execution_options, GenerationExecutionOptions):
         raise B14SkeletonSemanticError("execution_options must be GenerationExecutionOptions or None")
     assets = load_b14_skeleton_semantic_assets(version=semantic_asset_version)

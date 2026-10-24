@@ -2,4 +2,4 @@ schema_version: 1
 prompt_id: b14.adapted-story-skeleton
 version: 1
 required_variables: [skeleton_packet_json]
-content_hash: f31bb574c259d7e39f61f440cd47f5f8ad8f4068c81ed4c7a46d4a4b286bf66e
+content_hash: 65606a595272f77f92bc9721e48f342844da1465c70aa72a2c671b297cfe5f36

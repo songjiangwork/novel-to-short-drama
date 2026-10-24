@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from copy import deepcopy
-import hashlib
 
 import pytest
 
@@ -18,11 +17,6 @@ from short_drama.adaptation.disposition_publication import (
     b13_disposition_publication_artifact_id,
 )
 from short_drama.artifacts import ImmutableArtifactEnvelope, canonical_json_bytes
-from short_drama.guidance import (
-    DirectionCategory, DirectionOrigin, DirectionStage, DirectionStrength,
-    TargetScope, UserDirection,
-)
-from short_drama.guidance.models import GUIDANCE_SCHEMA_VERSION
 from test_adaptation_strategy import _b12_test_runtime_config
 from test_b13_disposition_persistence import _prepared, _publication
 from test_b14_skeleton_validation import _skeleton as _typed_skeleton
@@ -49,6 +43,7 @@ def test_whole_story_packet_assets_identity_and_runtime_independence(tmp_path):
     assert packet.to_dict()["authority"]["disposition_publication_ref"] == publication_ref.to_dict()
     assert "accepted_windows" not in packet.to_dict()
     assert packet.to_dict()["verified_b13_disposition"]["adapted_story_beats"]
+    assert tuple(item.artifact_ref for item in packet.effective_directions) == packet.strategy.effective_direction_refs
     assets = load_b14_skeleton_semantic_assets()
     assert assets.semantic_profile.max_output_tokens == 16384
     one = build_b14_skeleton_semantic_preparation(packet, runtime_config=_b12_test_runtime_config())
@@ -152,39 +147,44 @@ def test_packet_payload_content_cannot_be_detached_from_verified_construction(tm
         replace(packet, _canonical_payload=canonical_json_bytes(altered))
 
 
-def test_b14_identity_consumes_only_the_exact_b12_b1_guidance_snapshot(tmp_path):
+def test_packet_factory_rejects_consistently_tampered_context_and_payload(tmp_path):
     _tree, _strategy_ref, _publication_ref, packet = _packet(tmp_path)
-    baseline = build_b14_skeleton_semantic_preparation(packet, runtime_config=_b12_test_runtime_config())
-    direction = UserDirection(
-        "b14-story-focus", "test-project", 1, DirectionOrigin.USER,
-        DirectionCategory.ADAPTATION_STORY, DirectionStrength.PREFER,
-        DirectionStage.B1_ADAPTATION, TargetScope.PROJECT, (), "强化主线悬念。",
-    )
-    direction_hash = canonical_json_bytes({
-        "schema_version": GUIDANCE_SCHEMA_VERSION,
-        "direction_refs": [direction.artifact_ref.to_dict()],
-    })
-    changed_strategy = replace(
-        packet.strategy, effective_direction_refs=(direction.artifact_ref,),
-        effective_b1_direction_hash=hashlib.sha256(direction_hash).hexdigest(),
-    )
-    changed = packet.to_dict()
-    changed["effective_b1_directions"] = {
-        "effective_direction_hash": changed_strategy.effective_b1_direction_hash,
-        "direction_refs": [direction.artifact_ref.to_dict()], "directions": [direction.to_dict()],
-    }
-    guided = B14SkeletonPacket(
-        packet.authority, changed_strategy, (direction,), packet._verified_global_context,
-        canonical_json_bytes(changed),
-    )
-    guided_request = build_b14_skeleton_semantic_preparation(guided, runtime_config=_b12_test_runtime_config())
-    assert guided_request.request_identity != baseline.request_identity
-    # A B4-only direction cannot enter B1.2's B1-effective snapshot and so
-    # cannot invalidate this B1.4 request without an upstream B1 revision.
-    b4_direction = UserDirection(
-        "b14-camera", "test-project", 1, DirectionOrigin.USER,
-        DirectionCategory.CAMERA, DirectionStrength.PREFER, DirectionStage.B4_SHOT,
-        TargetScope.PROJECT, (), "更常用近景。",
-    )
-    assert b4_direction.artifact_ref not in packet.strategy.effective_direction_refs
-    assert build_b14_skeleton_semantic_preparation(packet, runtime_config=_b12_test_runtime_config()).request_identity == baseline.request_identity
+    altered = packet.to_dict()
+    context = deepcopy(altered["global_and_canonical_context"])
+    context["a5_canonical_events"] = []
+    altered["global_and_canonical_context"] = context
+    with pytest.raises(B14SkeletonSemanticError, match="verified construction snapshot"):
+        replace(packet, _verified_global_context=canonical_json_bytes(context),
+                _canonical_payload=canonical_json_bytes(altered))
+    with pytest.raises(B14SkeletonSemanticError, match="not constructed"):
+        B14SkeletonPacket(
+            packet.authority, packet.strategy, packet.effective_directions,
+            packet._verified_global_context, packet._canonical_payload,
+            packet._verified_packet_hash, object(),
+        )
+
+
+def test_initial_synthesis_forbids_model_local_beats_but_accepts_zero_local_skeleton(tmp_path):
+    _tree, _strategy_ref, _publication_ref, packet = _packet(tmp_path)
+    semantic = build_b14_skeleton_semantic_preparation(packet, runtime_config=_b12_test_runtime_config())
+    fields = semantic.output_schema.schema["required"]
+    proposal = {name: [] for name in fields}
+    beats = packet.authority.disposition_plan.adapted_story_beats
+    proposal["primary_presentation"] = [item.adapted_story_beat_id for item in beats]
+    proposal["beat_accounting"] = [
+        {"adapted_story_beat_id": item.adapted_story_beat_id,
+         "treatment": "directly_presented", "rationale_zh": "初始骨架直接呈现。"}
+        for item in beats
+    ]
+    _skeleton, result = semantic.decode_and_validate_proposal(proposal)
+    assert result.valid
+    arbitrary_id = deepcopy(proposal)
+    arbitrary_id["local_invented_beats"] = [{
+        "adapted_story_beat_id": "qwen_invented_id", "identity_key": "repair",
+        "summary_zh": "模型试图发明桥接。", "origin": "adaptation_invented",
+        "canon_compatibility": "compatible", "source_event_refs": [], "participants": [],
+        "canonical_anchor_refs": [], "invention_purpose": "bridge",
+        "invention_rationale_zh": "错误边界。", "invention_provenance_zh": "错误边界。",
+    }]
+    with pytest.raises(LLMStructuredOutputError):
+        validate_against_output_schema(arbitrary_id, semantic.output_schema)

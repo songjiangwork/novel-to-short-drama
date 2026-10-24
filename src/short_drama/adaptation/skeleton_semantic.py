@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from short_drama.artifacts import ArtifactRef, FileArtifactStore, canonical_json_bytes, content_hash, strict_json_loads
 from short_drama.foundation import FilePointerStore
@@ -39,6 +40,7 @@ B14_SKELETON_PROMPT_CONTENT_HASH_V1 = "65606a595272f77f92bc9721e48f342844da1465c
 B14_SKELETON_PROFILE_HASH_V1 = "bfc31ec94b1bc2285429639811a5704b09459618e8a0390eb8f1ef548b86ab39"
 B14_SKELETON_SCHEMA_HASH_V1 = "295f5c96eb196121cf1ef9acc616b699607059c93189b06e79da7e5d4edde8fa"
 _VERIFIED_PACKET_FACTORY_TOKEN = object()
+_VERIFIED_PACKET_SNAPSHOTS: WeakKeyDictionary[object, str] = WeakKeyDictionary()
 
 
 class B14SkeletonSemanticError(ValueError):
@@ -87,7 +89,7 @@ class B14SkeletonSemanticMeasurement:
         return self.provider_request_estimated_tokens + self.reserved_output_tokens
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False, weakref_slot=True)
 class B14SkeletonPacket:
     authority: B14SkeletonAuthority
     strategy: B12StrategyArtifact
@@ -114,10 +116,12 @@ class B14SkeletonPacket:
         expensive historical publication verification.
         """
         payload_bytes = canonical_json_bytes(payload)
-        return cls(
+        packet = cls(
             authority, strategy, directions, canonical_json_bytes(global_context),
             payload_bytes, content_hash(payload), _VERIFIED_PACKET_FACTORY_TOKEN,
         )
+        _VERIFIED_PACKET_SNAPSHOTS[packet] = packet._verified_packet_hash
+        return packet
 
     def _require_verified_construction(self) -> None:
         if self._factory_token is not _VERIFIED_PACKET_FACTORY_TOKEN:
@@ -128,9 +132,18 @@ class B14SkeletonPacket:
             raise B14SkeletonSemanticError("packet must be canonical JSON") from exc
         if not isinstance(value, dict) or content_hash(value) != self._verified_packet_hash:
             raise B14SkeletonSemanticError("packet payload differs from the verified construction snapshot")
+        if _VERIFIED_PACKET_SNAPSHOTS.get(self) != self._verified_packet_hash:
+            raise B14SkeletonSemanticError("packet is not the original verified construction instance")
 
     def __post_init__(self) -> None:
-        self._require_verified_construction()
+        if self._factory_token is not _VERIFIED_PACKET_FACTORY_TOKEN:
+            raise B14SkeletonSemanticError("packet was not constructed by verified B1.4 authority preparation")
+        try:
+            value = strict_json_loads(self._canonical_payload)
+        except Exception as exc:
+            raise B14SkeletonSemanticError("packet must be canonical JSON") from exc
+        if not isinstance(value, dict) or content_hash(value) != self._verified_packet_hash:
+            raise B14SkeletonSemanticError("packet payload differs from the verified construction snapshot")
         if not isinstance(self.authority, B14SkeletonAuthority) or not isinstance(self.strategy, B12StrategyArtifact):
             raise B14SkeletonSemanticError("packet requires verified B1.4 authority and B1.2 strategy")
         directions = tuple(self.effective_directions)
@@ -144,7 +157,6 @@ class B14SkeletonPacket:
             raise B14SkeletonSemanticError("packet verified global context must be canonical JSON") from exc
         if not isinstance(context, dict) or canonical_json_bytes(context) != self._verified_global_context:
             raise B14SkeletonSemanticError("packet verified global context must be canonical JSON")
-        value = strict_json_loads(self._canonical_payload)
         if not isinstance(value, dict) or canonical_json_bytes(value) != self._canonical_payload:
             raise B14SkeletonSemanticError("packet must be canonical JSON")
         if value.get("schema_version") != B14_SKELETON_PACKET_SCHEMA_VERSION:

@@ -16,7 +16,7 @@ from short_drama.adaptation.disposition_publication import (
     B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE, B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION,
     b13_disposition_publication_artifact_id,
 )
-from short_drama.artifacts import ImmutableArtifactEnvelope, canonical_json_bytes
+from short_drama.artifacts import ImmutableArtifactEnvelope, canonical_json_bytes, content_hash
 from test_adaptation_strategy import _b12_test_runtime_config
 from test_b13_disposition_persistence import _prepared, _publication
 from test_b14_skeleton_validation import _skeleton as _typed_skeleton
@@ -153,9 +153,18 @@ def test_packet_factory_rejects_consistently_tampered_context_and_payload(tmp_pa
     context = deepcopy(altered["global_and_canonical_context"])
     context["a5_canonical_events"] = []
     altered["global_and_canonical_context"] = context
-    with pytest.raises(B14SkeletonSemanticError, match="verified construction snapshot"):
-        replace(packet, _verified_global_context=canonical_json_bytes(context),
-                _canonical_payload=canonical_json_bytes(altered))
+    forged = replace(
+        packet,
+        _verified_global_context=canonical_json_bytes(context),
+        _canonical_payload=canonical_json_bytes(altered),
+        _verified_packet_hash=content_hash(altered),
+    )
+    with pytest.raises(B14SkeletonSemanticError, match="original verified construction instance"):
+        build_b14_skeleton_semantic_preparation(forged, runtime_config=_b12_test_runtime_config())
+    # The original identity-backed instance remains renderable repeatedly.
+    first = build_b14_skeleton_semantic_preparation(packet, runtime_config=_b12_test_runtime_config())
+    second = build_b14_skeleton_semantic_preparation(packet, runtime_config=_b12_test_runtime_config())
+    assert first.request_identity == second.request_identity
     with pytest.raises(B14SkeletonSemanticError, match="not constructed"):
         B14SkeletonPacket(
             packet.authority, packet.strategy, packet.effective_directions,

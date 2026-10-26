@@ -46,12 +46,14 @@ class B13CheckpointEvidenceError(ValueError):
 
 
 def _trusted_session(session: Any):
-    """Structurally gate the session (declared PASS preflight, model identity,
-    a matching strategy ref, and one model-matched budget plus ordered window
-    evidence per window).  This cannot prove the session ran a preflight and
-    takes no store/pointer arguments, so it establishes neither live A5/A6
-    authority freshness nor safe resumability; a future resume integration must
-    freshly revalidate store/pointers and authority before reusing this evidence.
+    """Structurally gate the session: declared PASS preflight, model identity, a
+    matching strategy ref, per-window model-matched budgets consistent with the
+    session's verified limits, per-window PASS estimator/tokenizer evidence,
+    matching semantic RuntimeConfig, and ordered window identities.  This cannot
+    prove the session ran a preflight and takes no store/pointer arguments, so it
+    establishes neither live A5/A6 authority freshness nor safe resumability; a
+    future resume integration must freshly revalidate store/pointers and authority
+    before reusing this evidence.
     """
     preparation = getattr(session, "preparation", None)
     runtime = getattr(session, "runtime_config", None)
@@ -68,6 +70,7 @@ def _trusted_session(session: Any):
             or any(not isinstance(item, B13WindowSemanticPreparation)
                    or item.packet.window_id != packet.window_id
                    or item.packet.content_hash() != packet.content_hash()
+                   or item.runtime_config != runtime
                    for item, packet in zip(semantic_preparations, packets))):
         raise B13CheckpointEvidenceError("semantic preparations do not match the session windows")
     if getattr(session, "preflight_verdict", None) != "PASS":
@@ -81,13 +84,18 @@ def _trusted_session(session: Any):
     budgets = getattr(session, "budgets", None)
     if (not isinstance(budgets, (tuple, list)) or len(budgets) != len(packets)
             or any(not isinstance(budget, B13WindowSemanticBudget)
-                   or budget.runtime_model_id != runtime.request_model for budget in budgets)):
-        raise B13CheckpointEvidenceError("session must carry one model-matched budget per window")
+                   or budget.runtime_model_id != runtime.request_model
+                   or budget.model_context_tokens != getattr(session, "effective_n_ctx", None)
+                   or budget.input_ceiling_tokens != getattr(session, "input_ceiling_tokens", None)
+                   for budget in budgets)):
+        raise B13CheckpointEvidenceError("session budgets are not model-matched or consistent")
     evidence = getattr(session, "window_evidence", None)
     if (not isinstance(evidence, (tuple, list)) or len(evidence) != len(packets)
             or any(getattr(row, "window_id", None) != packet.window_id
                    or getattr(row, "window_ordinal", None) != packet.window_ordinal
                    or getattr(row, "request_identity", None) != semantic.request_identity
+                   or getattr(row, "estimator_budget", None) != "PASS"
+                   or getattr(row, "tokenizer_budget", None) != "PASS"
                    for packet, semantic, row in zip(packets, semantic_preparations, evidence))):
         raise B13CheckpointEvidenceError("session window evidence is inconsistent with the windows")
     return preparation, semantic_preparations, runtime

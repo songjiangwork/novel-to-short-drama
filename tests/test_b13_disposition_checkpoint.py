@@ -218,13 +218,20 @@ def _broken_session(session, name):
         "missing_evidence": dict(window_evidence=()),
         "evidence_request_mismatch": dict(window_evidence=(_dc_replace(row, request_identity="0" * 64),) + session.window_evidence[1:]),
         "evidence_ordinal_mismatch": dict(window_evidence=(_dc_replace(row, window_ordinal=row.window_ordinal + 1),) + session.window_evidence[1:]),
+        "estimator_fail": dict(window_evidence=(_dc_replace(row, estimator_budget="FAIL"),) + session.window_evidence[1:]),
+        "tokenizer_unknown": dict(window_evidence=(_dc_replace(row, tokenizer_budget="UNKNOWN"),) + session.window_evidence[1:]),
+        "budget_context_mismatch": dict(budgets=(B13WindowSemanticBudget(session.budgets[0].runtime_model_id, session.effective_n_ctx + 1, session.input_ceiling_tokens),) * len(session.budgets)),
+        "budget_ceiling_mismatch": dict(budgets=(B13WindowSemanticBudget(session.budgets[0].runtime_model_id, session.effective_n_ctx, session.input_ceiling_tokens + 1),) * len(session.budgets)),
+        "semantic_runtime_mismatch": dict(semantic_preparations=(_dc_replace(session.semantic_preparations[0], runtime_config=_dc_replace(session.runtime_config, timeout_seconds=999.0)),) + session.semantic_preparations[1:]),
         "missing_semantic": dict(semantic_preparations=()),
     }[name])
 
 
 @pytest.mark.parametrize("name", [
     "non_pass_preflight", "wrong_model", "wrong_strategy_ref", "missing_budgets", "wrong_budget_model",
-    "missing_evidence", "evidence_request_mismatch", "evidence_ordinal_mismatch", "missing_semantic",
+    "missing_evidence", "evidence_request_mismatch", "evidence_ordinal_mismatch", "estimator_fail",
+    "tokenizer_unknown", "budget_context_mismatch", "budget_ceiling_mismatch",
+    "semantic_runtime_mismatch", "missing_semantic",
 ])
 def test_session_evidence_gate_rejects(tmp_path, name):
     _tree, session, packet, semantic = _fixture(tmp_path)

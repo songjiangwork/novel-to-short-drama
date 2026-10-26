@@ -111,8 +111,12 @@ def checkpoint_path(root: Path | str | os.PathLike[str], session: Any, window_id
     """
     directory = _root(root, create=True)
     assert directory is not None
+    return directory / _checkpoint_name(session, window_id)
+
+
+def _checkpoint_name(session: Any, window_id: str) -> str:
     preparation, ordinal, request = _session_window(session, window_id)
-    return directory / f"{_FILE_PREFIX}-p{preparation}-w{ordinal:08d}-q{request}.json"
+    return f"{_FILE_PREFIX}-p{preparation}-w{ordinal:08d}-q{request}.json"
 
 
 def _target_stat(path: Path, *, missing_ok: bool = False) -> os.stat_result | None:
@@ -270,8 +274,13 @@ def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id
     _session_window(session, window_id)
     if directory is None:
         return None
-    target = directory / checkpoint_path(directory, session, window_id).name
+    # Do not call checkpoint_path here: it may recreate a root removed after
+    # the read-only root check. Loading must never create filesystem objects.
+    target = directory / _checkpoint_name(session, window_id)
     if _target_stat(target, missing_ok=True) is None:
+        # A root that vanished after inspection is not an ordinary cache miss.
+        if _root(directory, create=False) is None:
+            _fail("checkpoint root disappeared during load")
         return None
     raw = _read_bounded(target)
     try:

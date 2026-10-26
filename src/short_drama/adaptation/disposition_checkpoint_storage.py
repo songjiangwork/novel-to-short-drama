@@ -5,6 +5,8 @@ the A5/A6 artifact and pointer trees.  This module rejects symlink roots and
 targets, but does not defend against an adversary concurrently changing trusted
 parent directories or a hostile filesystem.  It verifies bytes against the
 caller-supplied session only; that is not authorization to resume execution.
+The root parent must already be a trusted non-symlink directory; only the final
+root component may be created, and that parent is fsynced before save succeeds.
 """
 from __future__ import annotations
 
@@ -50,8 +52,14 @@ def _root(root: Path | str | os.PathLike[str], *, create: bool) -> Path | None:
     if before is None:
         if not create:
             return None
+        parent = path.parent
+        parent_stat = _lstat(parent, missing_ok=True)
+        if parent_stat is None or stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+            _fail(f"checkpoint root parent must be an existing non-symlink directory: {parent}")
         try:
-            path.mkdir(parents=True, mode=0o700)
+            os.mkdir(path, mode=0o700)
+        except FileExistsError:
+            pass
         except OSError as exc:
             _fail(f"cannot create checkpoint root: {path}", exc)
     elif stat.S_ISLNK(before.st_mode):
@@ -62,6 +70,8 @@ def _root(root: Path | str | os.PathLike[str], *, create: bool) -> Path | None:
         _fail(f"checkpoint root must not be a symlink: {path}")
     if not stat.S_ISDIR(current.st_mode):
         _fail(f"checkpoint root is not a directory: {path}")
+    if before is None:
+        _fsync_directory(path.parent)
     return path.resolve()
 
 
@@ -141,7 +151,7 @@ def _read_bounded(path: Path) -> bytes:
         _fail(f"cannot safely open checkpoint file: {path}", exc)
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or not _same_file(before, opened):
+        if not stat.S_ISREG(opened.st_mode) or not _stable_file(before, opened):
             _fail("checkpoint target changed or is not a regular file")
         if opened.st_size > evidence.B13_CHECKPOINT_MAX_BYTES:
             _fail("checkpoint file exceeds the maximum size")
@@ -155,6 +165,8 @@ def _read_bounded(path: Path) -> bytes:
             if total > evidence.B13_CHECKPOINT_MAX_BYTES:
                 _fail("checkpoint file exceeds the maximum size")
             parts.append(chunk)
+        if total != opened.st_size:
+            _fail("checkpoint file is incomplete")
         after = os.fstat(fd)
         if not _stable_file(opened, after):
             _fail("checkpoint file changed while being read")

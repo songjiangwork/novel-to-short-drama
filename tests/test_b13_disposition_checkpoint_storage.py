@@ -86,6 +86,26 @@ def test_oversize_final_file_rejects_before_decode(tmp_path):
         storage.load_checkpoint(root, session, packet.window_id)
 
 
+def test_opened_file_metadata_mismatch_and_premature_eof_reject(tmp_path, monkeypatch):
+    _tree, session, packet, _semantic, accepted = _case(tmp_path)
+    root = tmp_path / "private"
+    storage.save_checkpoint(root, accepted, session)
+    real_fstat = storage.os.fstat
+
+    def changed_opened_stat(fd):
+        value = real_fstat(fd)
+        return os.stat_result((*value[:6], value.st_size + 1, *value[7:]))
+
+    monkeypatch.setattr(storage.os, "fstat", changed_opened_stat)
+    with pytest.raises(storage.B13CheckpointStorageError, match="changed"):
+        storage.load_checkpoint(root, session, packet.window_id)
+
+    monkeypatch.undo()
+    monkeypatch.setattr(storage.os, "read", lambda *_a: b"")
+    with pytest.raises(storage.B13CheckpointStorageError, match="incomplete"):
+        storage.load_checkpoint(root, session, packet.window_id)
+
+
 def test_symlink_root_and_target_are_rejected(tmp_path):
     _tree, session, packet, _semantic, accepted = _case(tmp_path)
     real = tmp_path / "real"
@@ -150,6 +170,26 @@ def test_publish_write_and_fsync_failures_never_report_success_and_clean_temp(tm
     with pytest.raises(storage.B13CheckpointStorageError, match="directory"):
         storage.save_checkpoint(root, accepted, session)
     assert target.exists() and not list(root.glob("*.tmp"))
+
+
+def test_new_root_parent_fsync_failure_is_not_a_durable_save(tmp_path, monkeypatch):
+    _tree, session, packet, _semantic, accepted = _case(tmp_path)
+    parent, root = tmp_path / "parent", tmp_path / "parent" / "new-root"
+    parent.mkdir()
+    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
+    real_fsync = storage.os.fsync
+
+    def fail_new_root_parent_fsync(fd):
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) == parent_identity:
+            raise OSError("parent sync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(storage.os, "fsync", fail_new_root_parent_fsync)
+    with pytest.raises(storage.B13CheckpointStorageError, match="directory"):
+        storage.save_checkpoint(root, accepted, session)
+    assert root.is_dir()
+    assert not list(root.glob("*.json")) and not list(root.glob("*.tmp"))
 
 
 def test_preexisting_verified_checkpoint_survives_failed_retry_and_leftover_temp_is_ignored(tmp_path, monkeypatch):

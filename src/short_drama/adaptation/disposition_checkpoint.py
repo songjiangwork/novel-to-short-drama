@@ -14,7 +14,8 @@ from short_drama.llm import LLMInvocationProvenance, RuntimeConfig
 from .disposition_execution import B13WindowAcceptedProposal, B13WindowRejectedSemanticRound
 from .disposition_preparation import B13DispositionPreparation
 from .disposition_semantic import (
-    B13WindowProposal, B13WindowSemanticPreparation, build_b13_window_semantic_preparation)
+    B13WindowProposal, B13WindowSemanticBudget, B13WindowSemanticPreparation,
+    build_b13_window_semantic_preparation)
 
 
 B13_CHECKPOINT_EVIDENCE_SCHEMA_VERSION = 1
@@ -44,18 +45,52 @@ class B13CheckpointEvidenceError(ValueError):
     """A B1.3 single-window checkpoint is malformed or mismatches its session."""
 
 
-def _session_parts(session: Any):
+def _trusted_session(session: Any):
+    """Structurally gate the session (declared PASS preflight, model identity,
+    a matching strategy ref, and one model-matched budget plus ordered window
+    evidence per window).  This cannot prove the session ran a preflight and
+    takes no store/pointer arguments, so it establishes neither live A5/A6
+    authority freshness nor safe resumability; a future resume integration must
+    freshly revalidate store/pointers and authority before reusing this evidence.
+    """
     preparation = getattr(session, "preparation", None)
-    semantic_preparations = getattr(session, "semantic_preparations", None)
-    runtime_config = getattr(session, "runtime_config", None)
+    runtime = getattr(session, "runtime_config", None)
     if not isinstance(preparation, B13DispositionPreparation):
         raise B13CheckpointEvidenceError("checkpoint requires a trusted B1.3 execution session")
-    if (not isinstance(semantic_preparations, (tuple, list)) or not semantic_preparations
-            or any(not isinstance(item, B13WindowSemanticPreparation) for item in semantic_preparations)):
-        raise B13CheckpointEvidenceError("checkpoint requires one semantic preparation per window")
-    if not isinstance(runtime_config, RuntimeConfig):
+    if not isinstance(runtime, RuntimeConfig):
         raise B13CheckpointEvidenceError("checkpoint requires an exact RuntimeConfig")
-    return preparation, tuple(semantic_preparations), runtime_config
+    semantic_preparations = getattr(session, "semantic_preparations", None)
+    if not isinstance(semantic_preparations, (tuple, list)):
+        raise B13CheckpointEvidenceError("checkpoint requires one semantic preparation per window")
+    semantic_preparations = tuple(semantic_preparations)
+    packets = preparation.packets
+    if (len(semantic_preparations) != len(packets)
+            or any(not isinstance(item, B13WindowSemanticPreparation)
+                   or item.packet.window_id != packet.window_id
+                   or item.packet.content_hash() != packet.content_hash()
+                   for item, packet in zip(semantic_preparations, packets))):
+        raise B13CheckpointEvidenceError("semantic preparations do not match the session windows")
+    if getattr(session, "preflight_verdict", None) != "PASS":
+        raise B13CheckpointEvidenceError("session preflight evidence is not a declared PASS")
+    if getattr(session, "request_model", None) != runtime.request_model:
+        raise B13CheckpointEvidenceError("session request model identity is inconsistent")
+    strategy_ref = getattr(session, "strategy_ref", None)
+    if (strategy_ref is None or not hasattr(strategy_ref, "to_dict")
+            or strategy_ref.to_dict() != preparation.strategy_selection.strategy_ref.to_dict()):
+        raise B13CheckpointEvidenceError("session strategy ref is inconsistent with the preparation")
+    budgets = getattr(session, "budgets", None)
+    if (not isinstance(budgets, (tuple, list)) or len(budgets) != len(packets)
+            or any(not isinstance(budget, B13WindowSemanticBudget)
+                   or budget.runtime_model_id != runtime.request_model for budget in budgets)):
+        raise B13CheckpointEvidenceError("session must carry one model-matched budget per window")
+    evidence = getattr(session, "window_evidence", None)
+    if (not isinstance(evidence, (tuple, list)) or len(evidence) != len(packets)
+            or any(getattr(row, "window_id", None) != packet.window_id
+                   or getattr(row, "window_ordinal", None) != packet.window_ordinal
+                   or getattr(row, "request_identity", None) != semantic.request_identity
+                   for packet, semantic, row in zip(packets, semantic_preparations, evidence))):
+        raise B13CheckpointEvidenceError("session window evidence is inconsistent with the windows")
+    return preparation, semantic_preparations, runtime
 
 
 def _provenance(value: Any) -> LLMInvocationProvenance:
@@ -150,14 +185,17 @@ def _accepted_to_payload(accepted: B13WindowAcceptedProposal, preparation: B13Di
 
 def encode_checkpoint(accepted: B13WindowAcceptedProposal, session: Any) -> bytes:
     """Canonicalize one accepted B1.3 window bound to its trusted session."""
-    preparation, semantic_preparations, _runtime = _session_parts(session)
+    preparation, semantic_preparations, _runtime = _trusted_session(session)
     packet, semantic = _locate_window(preparation, semantic_preparations, accepted.window_id)
     if (packet.window_ordinal != accepted.window_ordinal
             or accepted.proposal.packet.content_hash() != packet.content_hash()
             or accepted.request_identity != semantic.request_identity
             or accepted.semantic_request_hash != semantic.request.request_hash):
         raise B13CheckpointEvidenceError("accepted window does not match its trusted session window")
-    return canonical_json_bytes(_accepted_to_payload(accepted, preparation, packet))
+    data = canonical_json_bytes(_accepted_to_payload(accepted, preparation, packet))
+    if len(data) > B13_CHECKPOINT_MAX_BYTES:
+        raise B13CheckpointEvidenceError("checkpoint payload exceeds the bounded size")
+    return data
 
 
 def verify_and_decode_checkpoint(raw: bytes, session: Any) -> B13WindowAcceptedProposal:
@@ -167,11 +205,13 @@ def verify_and_decode_checkpoint(raw: bytes, session: Any) -> B13WindowAcceptedP
     raw = bytes(raw)
     if not raw or len(raw) > B13_CHECKPOINT_MAX_BYTES:
         raise B13CheckpointEvidenceError("checkpoint payload exceeds the bounded size")
-    preparation, semantic_preparations, runtime = _session_parts(session)
+    preparation, semantic_preparations, runtime = _trusted_session(session)
     try:
         payload = strict_json_loads(raw)
     except Exception as exc:
         raise B13CheckpointEvidenceError("checkpoint payload is not strict canonical JSON") from exc
+    if raw != canonical_json_bytes(payload):
+        raise B13CheckpointEvidenceError("checkpoint payload is not canonical JSON bytes")
     if not isinstance(payload, dict) or set(payload) != _TOP_FIELDS:
         raise B13CheckpointEvidenceError("checkpoint payload has an invalid shape")
     if (payload["schema_version"] != B13_CHECKPOINT_EVIDENCE_SCHEMA_VERSION

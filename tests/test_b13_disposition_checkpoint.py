@@ -3,7 +3,9 @@
 Every case uses temporary stores and synthetic fixtures; no provider is called,
 no artifact is written, and no CURRENT pointer is mutated.
 """
+import json
 import sys
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from short_drama.adaptation import (
     B13WindowRejectedSemanticRound, B13WindowSemanticBudget, build_b13_window_semantic_preparation,
     load_b13_window_semantic_assets, prepare_b13_disposition_windows,
 )
+import short_drama.adaptation.disposition_checkpoint as disposition_checkpoint
 from short_drama.adaptation.disposition_checkpoint import (
     B13_CHECKPOINT_MAX_BYTES, B13CheckpointEvidenceError, encode_checkpoint,
     verify_and_decode_checkpoint,
@@ -204,3 +207,52 @@ def test_codec_performs_no_writes_and_no_generation(tmp_path):
     verify_and_decode_checkpoint(raw, session)
     assert _tree_bytes(tree.store.root) == store_before
     assert _tree_bytes(tree.pointers.root) == pointers_before
+
+
+def _broken_session(session, name):
+    row, budget = session.window_evidence[0], B13WindowSemanticBudget("other", 100, 100)
+    return _dc_replace(session, **{
+        "non_pass_preflight": dict(preflight_verdict="FAIL"), "wrong_model": dict(request_model="other-model"),
+        "wrong_strategy_ref": dict(strategy_ref=_dc_replace(session.strategy_ref, revision=session.strategy_ref.revision + 1)),
+        "missing_budgets": dict(budgets=()), "wrong_budget_model": dict(budgets=(budget,) * len(session.budgets)),
+        "missing_evidence": dict(window_evidence=()),
+        "evidence_request_mismatch": dict(window_evidence=(_dc_replace(row, request_identity="0" * 64),) + session.window_evidence[1:]),
+        "evidence_ordinal_mismatch": dict(window_evidence=(_dc_replace(row, window_ordinal=row.window_ordinal + 1),) + session.window_evidence[1:]),
+        "missing_semantic": dict(semantic_preparations=()),
+    }[name])
+
+
+@pytest.mark.parametrize("name", [
+    "non_pass_preflight", "wrong_model", "wrong_strategy_ref", "missing_budgets", "wrong_budget_model",
+    "missing_evidence", "evidence_request_mismatch", "evidence_ordinal_mismatch", "missing_semantic",
+])
+def test_session_evidence_gate_rejects(tmp_path, name):
+    _tree, session, packet, semantic = _fixture(tmp_path)
+    accepted = _accepted(packet, semantic, _b12_test_runtime_config())
+    broken = _broken_session(session, name)
+    with pytest.raises(B13CheckpointEvidenceError):
+        encode_checkpoint(accepted, broken)
+    with pytest.raises(B13CheckpointEvidenceError):
+        verify_and_decode_checkpoint(encode_checkpoint(accepted, session), broken)
+
+
+def test_rejects_valid_but_non_canonical_bytes(tmp_path):
+    _tree, session, packet, semantic = _fixture(tmp_path)
+    accepted = _accepted(packet, semantic, _b12_test_runtime_config())
+    payload = _payload(accepted, session)
+    canonical = encode_checkpoint(accepted, session)
+    reversed_keys = json.dumps({key: payload[key] for key in reversed(list(payload))},
+                               separators=(",", ":"), sort_keys=False).encode()
+    spaced = json.dumps(payload, separators=(", ", ": "), sort_keys=True).encode()
+    escaped = canonical.replace(b"_", b"\\u005f", 1)
+    for bad in (reversed_keys, spaced, escaped):
+        with pytest.raises(B13CheckpointEvidenceError):
+            verify_and_decode_checkpoint(bad, session)
+
+
+def test_encode_rejects_oversized_evidence(tmp_path, monkeypatch):
+    _tree, session, packet, semantic = _fixture(tmp_path)
+    accepted = _accepted(packet, semantic, _b12_test_runtime_config())
+    monkeypatch.setattr(disposition_checkpoint, "B13_CHECKPOINT_MAX_BYTES", 16)
+    with pytest.raises(B13CheckpointEvidenceError, match="bounded"):
+        encode_checkpoint(accepted, session)

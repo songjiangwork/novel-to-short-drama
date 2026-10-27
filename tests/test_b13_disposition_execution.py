@@ -16,6 +16,7 @@ from short_drama.adaptation import (
     prepare_b13_disposition_windows,
 )
 from short_drama.adaptation.target import CanonicalTargetReference
+from short_drama.adaptation.disposition_semantic import B13WindowSchemaError
 from short_drama.artifacts import ImmutableArtifactEnvelope, canonical_json_bytes
 from short_drama.foundation import PointerKind
 from short_drama.llm import LLMTransportError
@@ -75,6 +76,17 @@ class _AttemptCountingFakeClient(_FakeClient):
         return replace(super().generate_structured(*args, **kwargs), attempts=next(self._attempts))
 
 
+class _RecordingFakeClient(_FakeClient):
+    def __init__(self, results, runtime):
+        super().__init__(results, runtime)
+        self.responses = []
+
+    def generate_structured(self, *args, **kwargs):
+        response = super().generate_structured(*args, **kwargs)
+        self.responses.append(response)
+        return response
+
+
 def test_preflight_checks_both_mapped_attempt_budgets_before_any_call(tmp_path):
     tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
     insufficient = (replace(budgets[0], input_ceiling_tokens=1),)
@@ -86,7 +98,7 @@ def test_preflight_checks_both_mapped_attempt_budgets_before_any_call(tmp_path):
 
 def test_valid_execution_retains_exact_window_proposal_and_provenance_in_memory(tmp_path):
     tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
-    fake = _FakeClient([(_proposal(requests[0].packet), False)], runtime)
+    fake = _RecordingFakeClient([(_proposal(requests[0].packet), False)], runtime)
     store_before = _tree_bytes(tree.store.root)
     pointers_before = _tree_bytes(tree.pointers.root)
     result = _execute(tree, preparation, requests, budgets, runtime, fake)
@@ -94,6 +106,23 @@ def test_valid_execution_retains_exact_window_proposal_and_provenance_in_memory(
     assert len(fake.calls) == result.semantic_call_count == 1
     assert accepted.request_identity == requests[0].request_identity
     assert accepted.semantic_request_hash == requests[0].request.request_hash
+    assert accepted.semantic_profile_identity == {
+        "profile_id": requests[0].semantic_profile.profile_id,
+        "profile_hash": requests[0].semantic_profile.semantic_profile_hash,
+    }
+    assert accepted.prompt_identity == {
+        "prompt_id": requests[0].request.rendered_prompt.prompt_id,
+        "prompt_version": requests[0].request.rendered_prompt.prompt_version,
+        "prompt_content_hash": requests[0].request.rendered_prompt.prompt_content_hash,
+    }
+    assert accepted.output_schema_identity == {
+        "schema_id": requests[0].output_schema.schema_id,
+        "schema_version": requests[0].output_schema.schema_version,
+        "schema_hash": requests[0].output_schema.schema_hash,
+    }
+    assert accepted.rendered_prompt_hash == requests[0].request.rendered_prompt.rendered_prompt_hash
+    assert accepted.invocation_provenance.request_hash == requests[0].request.request_hash
+    assert accepted.invocation_provenance == fake.responses[0].provenance
     assert accepted.proposal.to_dict() == _proposal(requests[0].packet)
     assert accepted.semantic_rounds == 1
     assert accepted.provider_attempts == 1
@@ -108,7 +137,7 @@ def test_schema_valid_semantic_invalidity_gets_one_cache_disabled_regeneration(t
     tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
     invalid = _proposal(requests[0].packet)
     invalid["event_dispositions"][0]["disposition"] = "omit"
-    fake = _FakeClient([(invalid, False), (_proposal(requests[0].packet), False)], runtime)
+    fake = _RecordingFakeClient([(invalid, False), (_proposal(requests[0].packet), False)], runtime)
     result = _execute(tree, preparation, requests, budgets, runtime, fake)
     accepted = result.accepted_windows[0]
     assert len(fake.calls) == 2
@@ -120,6 +149,8 @@ def test_schema_valid_semantic_invalidity_gets_one_cache_disabled_regeneration(t
     assert len(accepted.semantic_failures) == 1
     assert accepted.rejected_semantic_rounds[0].provider_attempts == 1
     assert accepted.rejected_semantic_rounds[0].invocation_provenance.request_hash == requests[0].request.request_hash
+    assert accepted.rejected_semantic_rounds[0].invocation_provenance == fake.responses[0].provenance
+    assert accepted.invocation_provenance == fake.responses[1].provenance
 
 
 def test_provider_attempts_accumulate_non_unit_adapter_attempts_across_regeneration(tmp_path):
@@ -144,7 +175,55 @@ def test_semantic_regeneration_exhaustion_does_not_return_partial_result(tmp_pat
     with pytest.raises(B13WindowGenerationExhaustedError) as raised:
         _execute(tree, preparation, requests, budgets, runtime, fake)
     assert raised.value.rounds_attempted == 2
+    assert raised.value.window_id == requests[0].packet.window_id
+    assert raised.value.request_identity == requests[0].request_identity
+    assert len(raised.value.failures) == 2
     assert len(fake.calls) == 2
+
+
+def test_schema_failure_propagates_without_regeneration(tmp_path):
+    tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
+    fake = _FakeClient([({}, False)], runtime)
+    with pytest.raises(B13WindowSchemaError):
+        _execute(tree, preparation, requests, budgets, runtime, fake)
+    assert len(fake.calls) == 1
+
+
+def test_authority_change_after_preflight_fails_before_invocation(tmp_path, monkeypatch):
+    import short_drama.adaptation.disposition_execution as execution_module
+
+    tree, semantic, publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
+    preflight = execution_module._verify_preflight
+
+    def move_after_preflight(**kwargs):
+        preflight(**kwargs)
+        _move_current_to_payload(tree, semantic, publication, publication.artifact.to_dict())
+
+    monkeypatch.setattr(execution_module, "_verify_preflight", move_after_preflight)
+    fake = _FakeClient([], runtime)
+    with pytest.raises(B13WindowExecutionError, match="B1.2 CURRENT"):
+        _execute(tree, preparation, requests, budgets, runtime, fake)
+    assert fake.calls == []
+
+
+def test_budget_is_rechecked_before_invocation(tmp_path, monkeypatch):
+    import short_drama.adaptation.disposition_execution as execution_module
+
+    tree, _semantic, _publication, preparation, requests, budgets, runtime = _execution_inputs(tmp_path)
+    verify_budget = execution_module._verify_budget
+    checks = []
+
+    def fail_after_preflight(*args):
+        checks.append(args)
+        if len(checks) == 3:
+            raise B13WindowSemanticBudgetError("budget changed")
+        verify_budget(*args)
+
+    monkeypatch.setattr(execution_module, "_verify_budget", fail_after_preflight)
+    fake = _FakeClient([], runtime)
+    with pytest.raises(B13WindowSemanticBudgetError, match="budget changed"):
+        _execute(tree, preparation, requests, budgets, runtime, fake)
+    assert fake.calls == []
 
 
 def test_provenance_mismatch_fails_closed_without_regeneration(tmp_path):

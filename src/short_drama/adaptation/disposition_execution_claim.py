@@ -3,6 +3,10 @@
 All cooperating executors for one story must use the same private execution
 root, outside Foundation artifact and pointer trees. The advisory flock cannot
 stop non-cooperating processes and requires reliable local filesystem locking.
+Root parents and protected trees must be trusted and stable; only the final
+root directory may be created. The guard requires the same store instances
+later passed to claim creation. Privileged filesystem manipulation is outside
+this boundary.
 Hold the guard through execution and checkpoint persistence. A claim does not
 prove dispatch or count provider requests; unresolved claims are never reclaimed.
 The caller must freshly discover runtime/tokenizer limits and validate the
@@ -19,7 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from short_drama.artifacts import canonical_json_bytes, content_hash, strict_json_loads
+from short_drama.artifacts import FileArtifactStore, canonical_json_bytes, content_hash, strict_json_loads
+from short_drama.foundation import FilePointerStore
 from . import disposition_checkpoint_storage as storage
 from .disposition_resume import _verify
 
@@ -77,14 +82,10 @@ def _same(a: os.stat_result, b: os.stat_result) -> bool:
     return (a.st_dev, a.st_ino, stat.S_IFMT(a.st_mode)) == (b.st_dev, b.st_ino, stat.S_IFMT(b.st_mode))
 
 
-def _open_root(root: Path | str, create: bool) -> tuple[Path, int] | None:
+def _open_root(root: Path | str) -> tuple[Path, int] | None:
     path = Path(root).expanduser().absolute()
     seen = False
     try:
-        if create:
-            storage._root(path, create=True)
-            # Also sync on retries after a previous root-creation sync failure.
-            storage._fsync_directory(path.parent)
         before = os.lstat(path)
         seen = True
         if not stat.S_ISDIR(before.st_mode) or not _private(before):
@@ -97,7 +98,7 @@ def _open_root(root: Path | str, create: bool) -> tuple[Path, int] | None:
             raise B13ExecutionClaimError('execution root changed')
         return path, fd
     except FileNotFoundError as exc:
-        if not create and not seen and not path.is_symlink():
+        if not seen and not path.is_symlink():
             return None
         raise B13ExecutionClaimError('execution root disappeared') from exc
     except (OSError, storage.B13CheckpointStorageError) as exc:
@@ -113,10 +114,84 @@ def _check_root(path: Path, fd: int) -> None:
         raise B13ExecutionClaimError('execution root disappeared') from exc
 
 
+def _open_isolated_root(root: Path | str, store: FileArtifactStore,
+                        pointers: FilePointerStore) -> tuple[Path, int, tuple]:
+    """Validate against real protected paths before creating the final component.
+
+    Parents and protected trees must be trusted and stable, as in the stores.
+    Directory descriptors and inode checks detect ordinary replacement; they do
+    not defend against privileged manipulation or hostile mount changes.
+    """
+    if (not isinstance(store, FileArtifactStore) or not isinstance(pointers, FilePointerStore)
+            or pointers.artifact_store is not store):
+        raise B13ExecutionClaimError('guard requires the matching artifact and pointer stores')
+    raw = Path(root).expanduser().absolute()
+    if raw.name in ('', '.', '..'):
+        raise B13ExecutionClaimError('invalid execution root component')
+    parent_fd = None
+    root_fd = None
+    try:
+        # Strict resolution handles '..' and intermediate symlinks and requires
+        # every parent to exist. The final component must never be a symlink.
+        parent = raw.parent.resolve(strict=True)
+        path = parent / raw.name
+        protected = tuple(Path(item.root).resolve(strict=True) for item in (store, pointers))
+        protected_stats = tuple(os.stat(item) for item in protected)
+        if any(not stat.S_ISDIR(st.st_mode) for st in protected_stats):
+            raise B13ExecutionClaimError('protected root is not a directory')
+        if any(path.is_relative_to(item) or item.is_relative_to(path) for item in protected):
+            raise B13ExecutionClaimError('execution root must be outside artifact and pointer trees')
+        if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY'):
+            raise B13ExecutionClaimError('safe directory opening is unsupported')
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        parent_before = os.lstat(parent)
+        parent_fd = os.open(parent, flags)
+        if (not stat.S_ISDIR(parent_before.st_mode) or not _same(parent_before, os.fstat(parent_fd))
+                or any(_same(parent_before, st) for st in protected_stats)):
+            raise B13ExecutionClaimError('execution root parent changed')
+        try:
+            before = os.stat(raw.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            before = None
+        if before is not None:
+            if (not stat.S_ISDIR(before.st_mode) or not _private(before)
+                    or any(_same(before, st) for st in protected_stats)):
+                raise B13ExecutionClaimError('execution root is unsafe or aliases a protected root')
+        # Recheck both names before the first mutation. No recursive mkdir.
+        if not _same(parent_before, os.lstat(parent)) or any(
+                not _same(st, os.stat(item)) for item, st in zip(protected, protected_stats)):
+            raise B13ExecutionClaimError('execution root parent or protected root changed')
+        if before is None:
+            os.mkdir(raw.name, mode=0o700, dir_fd=parent_fd)
+            before = os.stat(raw.name, dir_fd=parent_fd, follow_symlinks=False)
+        root_fd = os.open(raw.name, flags, dir_fd=parent_fd)
+        opened = os.fstat(root_fd)
+        if (not stat.S_ISDIR(opened.st_mode) or not _private(opened)
+                or not _same(before, opened) or not _same(opened, os.lstat(path))):
+            raise B13ExecutionClaimError('execution root changed during initialization')
+        # Always sync the parent, including after a prior failed creation sync.
+        os.fsync(parent_fd)
+        _check_root(path, root_fd)
+        result = (path, root_fd, tuple(zip(protected, protected_stats)))
+        root_fd = None
+        return result
+    except B13ExecutionClaimError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise B13ExecutionClaimError('cannot safely establish isolated execution root') from exc
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
 class ExecutionGuard:
     """Nonblocking process guard; acquire via ``execution_guard`` context manager."""
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, *, store: FileArtifactStore, pointers: FilePointerStore):
         self._root_arg = root
+        self._store = store
+        self._pointers = pointers
         self._fd = self._dirfd = None
         self._pid = None
         self._locked = False
@@ -124,10 +199,11 @@ class ExecutionGuard:
     def __enter__(self):
         if self._fd is not None:
             raise B13ExecutionClaimError('guard already active')
-        opened = _open_root(self._root_arg, True)
-        assert opened is not None
-        self.path, self._dirfd = opened
+        self.path, self._dirfd, self._protected = _open_isolated_root(
+            self._root_arg, self._store, self._pointers)
         try:
+            _check_root(self.path, self._dirfd)
+            self._check_protected()
             flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
             self._fd = os.open(_LOCK, flags, 0o600, dir_fd=self._dirfd)
             self._pid = os.getpid()
@@ -142,10 +218,22 @@ class ExecutionGuard:
                 raise
             raise B13ExecutionClaimError('cannot acquire exclusive execution lock') from exc
 
+    def _check_protected(self):
+        try:
+            if self._pointers.artifact_store is not self._store or any(
+                    Path(item.root).resolve(strict=True) != path or not _same(original, os.stat(path))
+                    for item, (path, original) in zip((self._store, self._pointers), self._protected)):
+                raise B13ExecutionClaimError('guard protected roots changed')
+        except B13ExecutionClaimError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise B13ExecutionClaimError('cannot verify guard protected roots') from exc
+
     def _check_identity(self):
         if self._fd is None or self._dirfd is None or self._pid != os.getpid():
             raise B13ExecutionClaimError('execution guard is not active in this process')
         _check_root(self.path, self._dirfd)
+        self._check_protected()
         try:
             opened = os.fstat(self._fd)
             named = os.stat(_LOCK, dir_fd=self._dirfd, follow_symlinks=False)
@@ -170,8 +258,10 @@ class ExecutionGuard:
         self._locked = False
 
 
-def execution_guard(root: Path | str) -> ExecutionGuard:
-    return ExecutionGuard(root)
+def execution_guard(root: Path | str, *, store: FileArtifactStore,
+                    pointers: FilePointerStore) -> ExecutionGuard:
+    """Acquire a guard only after isolating its root from both supplied stores."""
+    return ExecutionGuard(root, store=store, pointers=pointers)
 
 
 def _inspect_at(path: Path, dirfd: int, expected: bytes) -> ClaimInspection:
@@ -216,7 +306,7 @@ def _inspect_at(path: Path, dirfd: int, expected: bytes) -> ClaimInspection:
 def inspect_claim(root: Path | str, session: Any, window_id: str) -> ClaimInspection:
     path = claim_path(root, session, window_id)
     expected = _encoded(_identity(session, window_id))
-    opened = _open_root(root, False)
+    opened = _open_root(root)
     if opened is None:
         return ClaimInspection(ClaimState.ABSENT, path)
     directory, fd = opened
@@ -237,10 +327,8 @@ def create_claim(*, guard: ExecutionGuard, store, pointers, session: Any,
     if not isinstance(guard, ExecutionGuard):
         raise B13ExecutionClaimError('active execution guard required')
     guard.verify()
-    for forbidden in (store.root, pointers.root):
-        forbidden_path = Path(forbidden).resolve()
-        if guard.path.is_relative_to(forbidden_path) or forbidden_path.is_relative_to(guard.path):
-            raise B13ExecutionClaimError('execution root must be outside artifact and pointer trees')
+    if guard._store is not store or guard._pointers is not pointers:
+        raise B13ExecutionClaimError('guard was acquired for different stores')
     try:
         initial = _verify(store, pointers, session)
         evidence = (session.runtime_config, tuple(session.budgets), session.preflight_verdict,

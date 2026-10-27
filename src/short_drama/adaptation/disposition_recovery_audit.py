@@ -22,6 +22,13 @@ from . import disposition_checkpoint_storage as storage
 from .disposition_resume import _verify
 
 MAX_RECORD_BYTES = 32768
+# Matches the safe diagnostics emitted by b13_alice_live_acceptance (#159).
+FAILURE_CODES = frozenset({
+    'PROVIDER_TIMEOUT', 'PROVIDER_TRANSPORT_FAILURE', 'PROVIDER_HTTP_FAILURE',
+    'STRUCTURED_OUTPUT_FAILURE', 'SEMANTIC_GENERATION_EXHAUSTED',
+    'PROVENANCE_FAILURE', 'AUTHORITY_FAILURE', 'CHECKPOINT_STORAGE_FAILURE',
+    'UNKNOWN_FAILURE',
+})
 _TYPES = ('root_intent', 'root_result', 'decision', 'consumption', 'terminal')
 _FIELDS = {
     'root_intent': {'binding', 'operator_id', 'recorded_at', 'reason', 'parent', 'desired_path', 'historically_absent'},
@@ -95,7 +102,7 @@ def decode_record(raw: bytes, record_type: str) -> dict:
                     'request_identity', 'semantic_request_hash', 'authority_hash'))
                 or not _text(b['window_id']) or type(b['window_ordinal']) is not int or b['window_ordinal'] < 1):
             raise RecoveryEvidenceError('invalid binding')
-        for key in ('operator_id', 'recorded_at', 'reason', 'decision_id', 'attempt_id', 'policy_reference', 'failure_code'):
+        for key in ('operator_id', 'recorded_at', 'reason', 'decision_id', 'attempt_id', 'policy_reference'):
             if key in obj and obj[key] is not None and not _text(obj[key]):
                 raise RecoveryEvidenceError('invalid text')
         for key in ('intent_identity', 'decision_identity', 'consumption_identity', 'bindings_hash', 'checkpoint_identity', 'checkpoint_bytes_hash', 'root_result_identity'):
@@ -130,7 +137,9 @@ def decode_record(raw: bytes, record_type: str) -> dict:
             if obj['outcome'] == 'CHECKPOINTED':
                 if not _digest(obj['checkpoint_identity']) or not _digest(obj['checkpoint_bytes_hash']) or obj['failure_code'] is not None or rounds is None:
                     raise RecoveryEvidenceError('invalid checkpoint terminal')
-            elif obj['checkpoint_identity'] is not None or obj['checkpoint_bytes_hash'] is not None or not _text(obj['failure_code']):
+            elif (obj['checkpoint_identity'] is not None or obj['checkpoint_bytes_hash'] is not None
+                  or (obj['failure_code'] is not None and
+                      (not isinstance(obj['failure_code'], str) or obj['failure_code'] not in FAILURE_CODES))):
                 raise RecoveryEvidenceError('invalid failure terminal')
         for k in ('operator_id', 'recorded_at', 'reason'):
             if k in obj and not _text(obj[k]):
@@ -192,6 +201,19 @@ def _root_identity(path):
     return {'path': str(path), 'dev': st.st_dev, 'ino': st.st_ino, 'type': 'directory'}
 
 
+def _authority_hash(preparation):
+    """Bind verified source and the exact B1.2 selection path and authority."""
+    selection = preparation.strategy_selection
+    pointer = selection.current_pointer_ref
+    return content_hash({
+        'source_snapshot': preparation.source_snapshot.to_dict(),
+        'strategy_ref': selection.strategy_ref.to_dict(),
+        'strategy_hash': selection.strategy_hash,
+        'selection_mode': 'CURRENT' if pointer is not None else 'EXPLICIT',
+        'current_pointer_ref': None if pointer is None else pointer.to_dict(),
+    })
+
+
 def inspect_recovery(*, store, pointers, session, execution_root, checkpoint_root, window_id,
                      approved_policy_reference=None) -> Audit:
     """Read only; never permits generation.
@@ -229,9 +251,7 @@ def inspect_recovery(*, store, pointers, session, execution_root, checkpoint_roo
                        'preparation_identity': identity['preparation_identity'], 'window_id': window_id,
                        'window_ordinal': identity['window_ordinal'], 'request_identity': identity['request_identity'],
                        'semantic_request_hash': semantic.request.request_hash,
-                       'authority_hash': content_hash({'source_snapshot': preparation.source_snapshot.to_dict(),
-                            'strategy_ref': preparation.strategy_selection.strategy_ref.to_dict(),
-                            'strategy_hash': identity['strategy_hash']})}
+                       'authority_hash': _authority_hash(preparation)}
             if any(r is not None and r['binding'] != binding for r in records.values()):
                 raise RecoveryEvidenceError('binding mismatch')
             i, r, d, c, t = (records[x] for x in _TYPES)

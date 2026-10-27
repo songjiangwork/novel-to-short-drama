@@ -371,77 +371,97 @@ def execute_b13_disposition_windows(
         runtime=runtime_config,
     )
     _verify_client_runtime(llm_client, runtime_config)
-    accepted: list[B13WindowAcceptedProposal] = []
-    retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
-    for semantic, budget in zip(semantic_preparations, budgets):
-        failures: list[str] = []
-        rejected_rounds: list[B13WindowRejectedSemanticRound] = []
-        cumulative_provider_attempts = 0
-        for round_number in range(1, policy.max_rounds + 1):
-            options = semantic.execution_options if round_number == 1 else retry_options
-            _verify_budget(semantic, runtime_config, options, budget)
-            _revalidate_authority(store, pointers, preparation)
-            result = llm_client.generate_structured(
-                semantic.request.rendered_prompt, semantic.output_schema,
-                semantic.semantic_profile, execution_options=options,
-            )
-            round_provider_attempts = _provider_attempts(result.attempts)
-            cumulative_provider_attempts += round_provider_attempts
-            # Authority races win over proposal acceptance or retry decisions.
-            _revalidate_authority(store, pointers, preparation)
-            _verify_provenance(result.provenance, semantic, runtime_config)
-            try:
-                proposal = semantic.decode_and_validate_proposal(result.parsed_json)
-            except B13WindowProposalError as exc:
-                diagnostic = str(exc)[:500]
-                failures.append(diagnostic)
-                rejected_rounds.append(B13WindowRejectedSemanticRound(
-                    semantic_round=round_number,
-                    provider_attempts=round_provider_attempts,
-                    invocation_provenance=result.provenance,
-                    diagnostic=diagnostic,
-                ))
-                continue
-            except B13WindowSchemaError:
-                raise
-            accepted.append(B13WindowAcceptedProposal(
-                window_id=semantic.packet.window_id,
-                window_ordinal=semantic.packet.window_ordinal,
-                request_identity=semantic.request_identity,
-                semantic_request_hash=semantic.request.request_hash,
-                semantic_profile_identity={
-                    "profile_id": semantic.semantic_profile.profile_id,
-                    "profile_hash": semantic.semantic_profile.semantic_profile_hash,
-                },
-                prompt_identity={
-                    "prompt_id": semantic.request.rendered_prompt.prompt_id,
-                    "prompt_version": semantic.request.rendered_prompt.prompt_version,
-                    "prompt_content_hash": semantic.request.rendered_prompt.prompt_content_hash,
-                },
-                output_schema_identity={
-                    "schema_id": semantic.output_schema.schema_id,
-                    "schema_version": semantic.output_schema.schema_version,
-                    "schema_hash": semantic.output_schema.schema_hash,
-                },
-                rendered_prompt_hash=semantic.request.rendered_prompt.rendered_prompt_hash,
-                invocation_provenance=result.provenance,
-                semantic_rounds=round_number,
-                provider_attempts=cumulative_provider_attempts,
-                accepted_round_provider_attempts=round_provider_attempts,
-                semantic_failures=tuple(failures),
-                rejected_semantic_rounds=tuple(rejected_rounds), proposal=proposal,
-            ))
-            break
-        else:
-            raise B13WindowGenerationExhaustedError(
-                window_id=semantic.packet.window_id,
-                request_identity=semantic.request_identity,
-                rounds_attempted=policy.max_rounds, failures=tuple(failures),
-            )
+    accepted = tuple(
+        _execute_one_b13_window(
+            store=store, pointers=pointers, preparation=preparation,
+            semantic=semantic, budget=budget, runtime_config=runtime_config,
+            llm_client=llm_client, policy=policy,
+        )
+        for semantic, budget in zip(semantic_preparations, budgets)
+    )
     return B13DispositionExecutionResult(
         preparation.source_snapshot, preparation.strategy_selection,
-        preparation.preparation_identity, tuple(accepted),
+        preparation.preparation_identity, accepted,
     )
+
+
+def _execute_one_b13_window(
+    *, store: FileArtifactStore, pointers: FilePointerStore,
+    preparation: B13DispositionPreparation, semantic: B13WindowSemanticPreparation,
+    budget: B13WindowSemanticBudget | None, runtime_config: RuntimeConfig,
+    llm_client: LLMClient, policy: B13WindowSemanticGenerationPolicy,
+) -> B13WindowAcceptedProposal:
+    """Execute one window after the caller has authorized the complete batch.
+
+    The caller must first run whole-batch _verify_preflight, validate the client
+    and policy, and verify client/runtime compatibility. This helper's per-call
+    budget and authority checks do not replace those prerequisites or authorize
+    standalone or resumed execution.
+    """
+    retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
+    failures: list[str] = []
+    rejected_rounds: list[B13WindowRejectedSemanticRound] = []
+    cumulative_provider_attempts = 0
+    for round_number in range(1, policy.max_rounds + 1):
+        options = semantic.execution_options if round_number == 1 else retry_options
+        _verify_budget(semantic, runtime_config, options, budget)
+        _revalidate_authority(store, pointers, preparation)
+        result = llm_client.generate_structured(
+            semantic.request.rendered_prompt, semantic.output_schema,
+            semantic.semantic_profile, execution_options=options,
+        )
+        round_provider_attempts = _provider_attempts(result.attempts)
+        cumulative_provider_attempts += round_provider_attempts
+        # Authority races win over proposal acceptance or retry decisions.
+        _revalidate_authority(store, pointers, preparation)
+        _verify_provenance(result.provenance, semantic, runtime_config)
+        try:
+            proposal = semantic.decode_and_validate_proposal(result.parsed_json)
+        except B13WindowProposalError as exc:
+            diagnostic = str(exc)[:500]
+            failures.append(diagnostic)
+            rejected_rounds.append(B13WindowRejectedSemanticRound(
+                semantic_round=round_number,
+                provider_attempts=round_provider_attempts,
+                invocation_provenance=result.provenance,
+                diagnostic=diagnostic,
+            ))
+            continue
+        except B13WindowSchemaError:
+            raise
+        return B13WindowAcceptedProposal(
+            window_id=semantic.packet.window_id,
+            window_ordinal=semantic.packet.window_ordinal,
+            request_identity=semantic.request_identity,
+            semantic_request_hash=semantic.request.request_hash,
+            semantic_profile_identity={
+                "profile_id": semantic.semantic_profile.profile_id,
+                "profile_hash": semantic.semantic_profile.semantic_profile_hash,
+            },
+            prompt_identity={
+                "prompt_id": semantic.request.rendered_prompt.prompt_id,
+                "prompt_version": semantic.request.rendered_prompt.prompt_version,
+                "prompt_content_hash": semantic.request.rendered_prompt.prompt_content_hash,
+            },
+            output_schema_identity={
+                "schema_id": semantic.output_schema.schema_id,
+                "schema_version": semantic.output_schema.schema_version,
+                "schema_hash": semantic.output_schema.schema_hash,
+            },
+            rendered_prompt_hash=semantic.request.rendered_prompt.rendered_prompt_hash,
+            invocation_provenance=result.provenance,
+            semantic_rounds=round_number,
+            provider_attempts=cumulative_provider_attempts,
+            accepted_round_provider_attempts=round_provider_attempts,
+            semantic_failures=tuple(failures),
+            rejected_semantic_rounds=tuple(rejected_rounds), proposal=proposal,
+        )
+    else:
+        raise B13WindowGenerationExhaustedError(
+            window_id=semantic.packet.window_id,
+            request_identity=semantic.request_identity,
+            rounds_attempted=policy.max_rounds, failures=tuple(failures),
+        )
 
 
 __all__ = [

@@ -53,6 +53,17 @@ def _inspect(store, pointers, session, execution_root, checkpoint_root):
     return plan, missing
 
 
+def _timeout(value):
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('timeout must be a number in (0, 3600] seconds') from exc
+    # Match RuntimeConfig's timeout bound, including rejection of NaN and infinity.
+    if not 0 < seconds <= 3600:
+        raise argparse.ArgumentTypeError('timeout must be in (0, 3600] seconds')
+    return seconds
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--story-root', type=Path, default=pf.DEFAULT_STORY_ROOT)
@@ -61,24 +72,31 @@ def main(argv=None):
     parser.add_argument('--model-context-tokens', type=int)
     parser.add_argument('--execution-root', type=Path, required=True)
     parser.add_argument('--checkpoint-root', type=Path, required=True)
-    parser.add_argument('--timeout', type=float, default=10.0)
+    parser.add_argument('--preflight-timeout', type=_timeout, default=120.0)
+    parser.add_argument('--generation-timeout', type=_timeout,
+                        help='required for live execution; timeout per provider attempt in seconds')
     parser.add_argument('--max-response-bytes', type=int, default=4_000_000)
     parser.add_argument('--execute-live', action='store_true', help='authorize generation of at most one window')
     args = parser.parse_args(argv)
+    if args.execute_live and args.generation_timeout is None:
+        parser.error('--generation-timeout is required with --execute-live')
     summary = {'status': 'FAILED', 'window_id': None, 'ordinal': None, 'request_identity': None,
                'reused_count': None, 'generated_count': None, 'semantic_rounds': None,
                'observed_provider_attempts': 0, 'checkpoint_identity': None, 'exit_status': 1}
     live_started = False
     phase = 'authority'
     try:
-        store, pointers, source = _load_authority_read_only(args.story_root)
-        phase = 'roots'
-        execution_root, checkpoint_root = _validate_roots(store, pointers, args.execution_root, args.checkpoint_root)
+        phase = 'runtime_configuration'
         runtime = RuntimeConfig(schema_version=2, transport_id=pf.DEFAULT_TRANSPORT_ID,
             base_url=args.base_url, request_model=pf.DEFAULT_REQUEST_MODEL,
             provider_family=pf.DEFAULT_PROVIDER_FAMILY, credential_environment_name=None,
-            timeout_seconds=args.timeout)
-        preflight = pf.LlamaClient(base_url=pf._server_root(args.base_url), timeout_seconds=args.timeout,
+            timeout_seconds=(args.generation_timeout if args.generation_timeout is not None
+                             else args.preflight_timeout))
+        phase = 'authority'
+        store, pointers, source = _load_authority_read_only(args.story_root)
+        phase = 'roots'
+        execution_root, checkpoint_root = _validate_roots(store, pointers, args.execution_root, args.checkpoint_root)
+        preflight = pf.LlamaClient(base_url=pf._server_root(args.base_url), timeout_seconds=args.preflight_timeout,
                                    max_response_bytes=args.max_response_bytes)
         common = dict(store=store, pointers=pointers, source_snapshot=source, runtime_config=runtime,
                       input_ceiling_tokens=args.input_ceiling_tokens,
@@ -97,7 +115,9 @@ def main(argv=None):
             rounds = B13WindowSemanticGenerationPolicy().max_rounds
             print(json.dumps({'max_new_windows': 1, 'max_semantic_rounds': rounds,
                               'max_attempts_per_round': DEFAULT_MAX_ATTEMPTS,
-                              'max_provider_attempts': rounds * DEFAULT_MAX_ATTEMPTS}), flush=True)
+                              'max_provider_attempts': rounds * DEFAULT_MAX_ATTEMPTS,
+                              'preflight_timeout_seconds': args.preflight_timeout,
+                              'generation_timeout_seconds': args.generation_timeout}), flush=True)
             phase = 'live_execution_or_checkpoint_verification'
             live_started = True
             result = bounded.run_b13_alice_bounded(

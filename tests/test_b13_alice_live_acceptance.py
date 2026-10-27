@@ -54,11 +54,11 @@ def test_live_is_one_window_and_durable_repeat_reuses(setup_cli, capsys, monkeyp
         assert kwargs['max_new_windows'] == 1
         return real(**kwargs)
     monkeypatch.setattr(cli.bounded, 'run_b13_alice_bounded', checked)
-    code, lines = invoke(args + ['--execute-live'], capsys)
+    code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
     assert code == 0 and lines[0]['max_provider_attempts'] == 6
     assert lines[-1]['generated_count'] == 1 and lines[-1]['observed_provider_attempts'] == 1
     assert len(lines[-1]['checkpoint_identity']) == 64
-    code, lines = invoke(args + ['--execute-live'], capsys)
+    code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
     assert code == 0 and lines[-1]['reused_count'] == 1 and lines[-1]['generated_count'] == 0
     assert len(fake.calls) == 1
 
@@ -89,13 +89,13 @@ def test_fail_closed(setup_cli, tmp_path, capsys, monkeypatch, failure):
             finally:
                 monkeypatch.setattr(storage.os, 'fsync', original_fsync)
         monkeypatch.setattr(runner, 'save_checkpoint', fail_save)
-    code, lines = invoke(args + ['--execute-live'], capsys)
+    code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
     assert code == 1 and lines[-1]['status'] == 'FAILED'
     assert 'secret' not in str(lines)
     if failure in ('provider', 'fsync'):
         assert lines[-1]['observed_provider_attempts'] is None
         assert claim_path(tmp_path / 'execution', session, packet.window_id).exists()
-        code, _ = invoke(args + ['--execute-live'], capsys)
+        code, _ = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
         assert code == 1
     else:
         assert not fake.calls
@@ -110,3 +110,70 @@ def test_missing_foundation_layout_is_not_created(tmp_path):
     with pytest.raises(ValueError):
         cli._load_authority_read_only(tmp_path / "missing")
     assert not (tmp_path / "missing").exists()
+
+
+def test_missing_live_timeout_stops_before_authority(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, '_load_authority_read_only', lambda _: pytest.fail('authority accessed'))
+    args = ['--execution-root', str(tmp_path / 'execution'), '--checkpoint-root', str(tmp_path / 'checkpoints'),
+            '--input-ceiling-tokens', '65536', '--execute-live']
+    with pytest.raises(SystemExit) as error:
+        cli.main(args)
+    assert error.value.code == 2
+    assert '--generation-timeout is required' in capsys.readouterr().err
+    assert not (tmp_path / 'execution').exists() and not (tmp_path / 'checkpoints').exists()
+
+
+@pytest.mark.parametrize('option', ['--preflight-timeout', '--generation-timeout'])
+@pytest.mark.parametrize('value', ['invalid', '0', '-1', '3601', 'nan', 'inf'])
+def test_invalid_timeouts_stop_before_authority(tmp_path, monkeypatch, option, value):
+    monkeypatch.setattr(cli, '_load_authority_read_only', lambda _: pytest.fail('authority accessed'))
+    args = ['--execution-root', str(tmp_path / 'execution'), '--checkpoint-root', str(tmp_path / 'checkpoints'),
+            '--input-ceiling-tokens', '65536', option, value]
+    with pytest.raises(SystemExit) as error:
+        cli.main(args)
+    assert error.value.code == 2
+    assert not (tmp_path / 'execution').exists() and not (tmp_path / 'checkpoints').exists()
+
+
+def test_timeouts_reach_separate_clients(setup_cli, capsys, monkeypatch):
+    from types import SimpleNamespace
+    from short_drama.llm import RuntimeConfig
+    _, _, _, _, args = setup_cli
+    seen = {}
+    monkeypatch.setattr(cli, 'RuntimeConfig', RuntimeConfig)
+    monkeypatch.setattr(cli.pf, 'LlamaClient', lambda **kw: seen.setdefault('preflight', kw))
+    def adapter(runtime):
+        seen['runtime'] = runtime
+        return object()
+    monkeypatch.setattr(cli, 'OpenAICompatibleLLMClient', adapter)
+    monkeypatch.setattr(cli.bounded, 'run_b13_alice_bounded', lambda **kw: SimpleNamespace(
+        status=runner.B13RunnerStatus.BOUNDED_PROGRESS, reused_windows=0, generated_windows=0,
+        new_semantic_calls=0, new_provider_attempts=0))
+    code, lines = invoke(args + ['--execute-live', '--preflight-timeout', '123',
+                                 '--generation-timeout', '1800'], capsys)
+    assert code == 0
+    assert seen['preflight']['timeout_seconds'] == 123
+    assert seen['runtime'].timeout_seconds == 1800
+    assert lines[0]['preflight_timeout_seconds'] == 123
+    assert lines[0]['generation_timeout_seconds'] == 1800
+    assert lines[0]['max_provider_attempts'] == 6
+
+
+def test_read_only_uses_default_preflight_timeout_and_no_adapter(setup_cli, capsys, monkeypatch):
+    _, _, _, _, args = setup_cli
+    seen = {}
+    monkeypatch.setattr(cli.pf, 'LlamaClient', lambda **kw: seen.update(kw) or object())
+    monkeypatch.setattr(cli, 'OpenAICompatibleLLMClient', lambda _: pytest.fail('adapter constructed'))
+    code, _ = invoke(args, capsys)
+    assert code == 0 and seen['timeout_seconds'] == 120
+
+
+def test_generation_timeout_does_not_change_request_identity(setup_cli):
+    from short_drama.adaptation import build_b13_window_semantic_preparation
+    _, session, packet, _, _ = setup_cli
+    original = build_b13_window_semantic_preparation(packet, runtime_config=session.runtime_config)
+    long_timeout = build_b13_window_semantic_preparation(
+        packet, runtime_config=replace(session.runtime_config, timeout_seconds=1800))
+    assert original.request_identity == long_timeout.request_identity
+    assert original.semantic_profile == long_timeout.semantic_profile
+    assert original.request == long_timeout.request

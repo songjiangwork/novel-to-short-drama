@@ -36,6 +36,10 @@ class B13WindowExecutionError(B13PreparationError):
     """A B1.3-B2B execution precondition or authority check failed."""
 
 
+class B13WindowAuthorityError(B13WindowExecutionError):
+    """The bound source or strategy authority could not be revalidated."""
+
+
 class B13WindowProvenanceError(B13WindowExecutionError):
     """A provider result is not for the exact prepared B1.3 request."""
 
@@ -276,9 +280,9 @@ def _revalidate_authority(
             store, pointers, source.story_analysis_manifest_ref
         )
     except Exception as exc:
-        raise B13WindowExecutionError("cannot revalidate exact A5/A6 CURRENT authority") from exc
+        raise B13WindowAuthorityError("cannot revalidate exact A5/A6 CURRENT authority") from exc
     if current != source:
-        raise B13WindowExecutionError("exact A5/A6 source authority changed during B1.3 execution")
+        raise B13WindowAuthorityError("exact A5/A6 source authority changed during B1.3 execution")
     target_id = preparation.strategy_selection.artifact.strategy.resolved_target.adaptation_target_id
     try:
         pinned = resolve_b12_strategy_selection(
@@ -287,10 +291,10 @@ def _revalidate_authority(
             strategy_ref=preparation.strategy_selection.strategy_ref,
         )
     except Exception as exc:
-        raise B13WindowExecutionError("selected immutable B1.2 strategy lineage is no longer valid") from exc
+        raise B13WindowAuthorityError("selected immutable B1.2 strategy lineage is no longer valid") from exc
     selection = preparation.strategy_selection
     if pinned.strategy_ref != selection.strategy_ref or pinned.artifact != selection.artifact:
-        raise B13WindowExecutionError("selected immutable B1.2 strategy lineage changed during execution")
+        raise B13WindowAuthorityError("selected immutable B1.2 strategy lineage changed during execution")
     if selection.current_pointer_ref is not None:
         try:
             current_selection = resolve_b12_strategy_selection(
@@ -298,10 +302,10 @@ def _revalidate_authority(
                 adaptation_target_id=target_id,
             )
         except Exception as exc:
-            raise B13WindowExecutionError("B1.2 CURRENT strategy authority changed during execution") from exc
+            raise B13WindowAuthorityError("B1.2 CURRENT strategy authority changed during execution") from exc
         if (current_selection.current_pointer_ref != selection.current_pointer_ref
                 or current_selection.strategy_ref != selection.strategy_ref):
-            raise B13WindowExecutionError("B1.2 CURRENT strategy authority changed during execution")
+            raise B13WindowAuthorityError("B1.2 CURRENT strategy authority changed during execution")
 
 
 def _verify_preflight(
@@ -466,7 +470,7 @@ def _execute_one_b13_window(
 
 __all__ = [
     "B13_MAX_SEMANTIC_GENERATION_ROUNDS", "B13WindowExecutionError",
-    "B13WindowProvenanceError", "B13WindowGenerationExhaustedError",
+    "B13WindowProvenanceError", "B13WindowAuthorityError", "B13WindowGenerationExhaustedError",
     "B13WindowSemanticGenerationPolicy", "B13WindowRejectedSemanticRound",
     "B13WindowAcceptedProposal",
     "B13DispositionExecutionResult", "execute_b13_disposition_windows",

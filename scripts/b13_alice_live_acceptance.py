@@ -18,11 +18,48 @@ import b13_alice_bounded_runner as bounded
 import b13_alice_runner_preparation as preparation
 import b13_alice_token_budget_preflight as pf
 from short_drama.adaptation.disposition_checkpoint import encode_checkpoint
-from short_drama.adaptation.disposition_execution import B13WindowSemanticGenerationPolicy
+from short_drama.adaptation.disposition_execution import (
+    B13WindowSemanticGenerationPolicy, B13WindowAuthorityError,
+    B13WindowProvenanceError, B13WindowGenerationExhaustedError,
+)
+from short_drama.adaptation.disposition_semantic import B13WindowSchemaError
+from short_drama.adaptation.disposition_checkpoint_storage import B13CheckpointStorageError
+from short_drama.adaptation.disposition_runner import B13RunnerError
+from short_drama.llm.errors import (
+    LLMTimeoutError, LLMTransportError, LLMHTTPError, LLMResponseError,
+    LLMStructuredOutputError, LLMRetryExhaustedError,
+)
 from short_drama.adaptation.disposition_execution_claim import ClaimState, inspect_claim
 from short_drama.adaptation.disposition_resume import B13ResumeDecision, plan_b13_resume
 from short_drama.adaptation.disposition_runner import _roots
 from short_drama.llm import DEFAULT_MAX_ATTEMPTS, OpenAICompatibleLLMClient, RuntimeConfig
+
+
+def _failure_code(exc, phase):
+    """Classify known boundaries without exposing exception data or guessing counts.
+
+    Retry exhaustion describes its final technical failure, not earlier attempts.
+    Only unwrap the two wrappers whose causes are set by these execution paths.
+    """
+    while type(exc) in (B13RunnerError, LLMRetryExhaustedError) and exc.__cause__ is not None:
+        exc = exc.__cause__
+    if isinstance(exc, LLMTimeoutError):
+        return 'PROVIDER_TIMEOUT'
+    if isinstance(exc, LLMTransportError):
+        return 'PROVIDER_TRANSPORT_FAILURE'
+    if isinstance(exc, LLMHTTPError):
+        return 'PROVIDER_HTTP_FAILURE'
+    if isinstance(exc, (LLMResponseError, LLMStructuredOutputError, B13WindowSchemaError)):
+        return 'STRUCTURED_OUTPUT_FAILURE'
+    if isinstance(exc, B13WindowGenerationExhaustedError):
+        return 'SEMANTIC_GENERATION_EXHAUSTED'
+    if isinstance(exc, B13WindowProvenanceError):
+        return 'PROVENANCE_FAILURE'
+    if isinstance(exc, B13WindowAuthorityError) or phase == 'authority':
+        return 'AUTHORITY_FAILURE'
+    if isinstance(exc, B13CheckpointStorageError):
+        return 'CHECKPOINT_STORAGE_FAILURE'
+    return 'UNKNOWN_FAILURE'
 
 
 def _load_authority_read_only(story_root):
@@ -137,8 +174,9 @@ def main(argv=None):
             summary.update(status=result.status.value, reused_count=result.reused_windows,
                            generated_count=result.generated_windows, semantic_rounds=result.new_semantic_calls,
                            observed_provider_attempts=result.new_provider_attempts, exit_status=0)
-    except Exception:  # Never print exception text: it may contain provider or source content.
-        summary.update(status='FAILED', exit_status=1, failure_phase=phase)
+    except Exception as exc:  # Never print exception text: it may contain provider or source content.
+        summary.update(status='FAILED', exit_status=1, failure_phase=phase,
+                       error_code=_failure_code(exc, phase))
         if live_started:
             summary.update(generated_count=None, semantic_rounds=None, observed_provider_attempts=None)
     print(json.dumps(summary, sort_keys=True), flush=True)

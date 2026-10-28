@@ -15,6 +15,7 @@ from pathlib import Path
 from short_drama.artifacts import content_hash
 from . import disposition_execution_claim as claim
 from . import disposition_recovery_audit as audit
+from . import disposition_checkpoint_storage as checkpoint_storage
 from .disposition_resume import _verify
 
 
@@ -84,6 +85,10 @@ def _persist_decision(*, guard, store, pointers, session, checkpoint_root, windo
 
         def check():
             guard.verify()
+            for parent in (paths[0].parent, paths[1].parent):
+                st = os.lstat(parent)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+                    raise ValueError('unsafe execution or checkpoint parent')
             if (not claim._same(guard._parent_stat, os.lstat(guard.path.parent))
                     or _verify(store, pointers, session) != first
                     or session_evidence() != initial_evidence
@@ -113,6 +118,12 @@ def _persist_decision(*, guard, store, pointers, session, checkpoint_root, windo
                 raise ValueError('existing slot changed')
             check()
             return _Result.EXISTS_VERIFIED
+        def require_checkpoint_absent():
+            if checkpoint_storage.load_checkpoint(checkpoint_root, session, window_id) is not None:
+                raise ValueError('verified checkpoint takes precedence')
+
+        check()
+        require_checkpoint_absent()
         check()
         temp = f'.{name}.{secrets.token_hex(16)}.tmp'
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -136,6 +147,9 @@ def _persist_decision(*, guard, store, pointers, session, checkpoint_root, windo
         named = os.stat(temp, dir_fd=guard._dirfd, follow_symlinks=False)
         if not claim._same(temp_stat, current) or not claim._same(current, named) or current.st_size != len(raw) or current.st_nlink != 1:
             raise ValueError('temporary file changed')
+        check()
+        require_checkpoint_absent()
+        check()
         attempted = True
         os.link(temp, name, src_dir_fd=guard._dirfd, dst_dir_fd=guard._dirfd, follow_symlinks=False)
         check()
@@ -154,6 +168,7 @@ def _persist_decision(*, guard, store, pointers, session, checkpoint_root, windo
                 or audit._read_slot(guard.path, guard._dirfd, name) != raw
                 or any(prefix in n and n not in allowed for n in os.listdir(guard._dirfd))):
             raise ValueError('final verification failed')
+        require_checkpoint_absent()
         check()
         return _Result.PERSISTED
     except Exception as exc:

@@ -32,7 +32,7 @@ FAILURE_CODES = frozenset({
 _TYPES = ('root_intent', 'root_result', 'decision', 'consumption', 'terminal')
 _FIELDS = {
     'root_intent': {'binding', 'operator_id', 'recorded_at', 'reason', 'parent', 'desired_path', 'historically_absent'},
-    'root_result': {'binding', 'intent_identity', 'parent', 'root', 'absence_observed', 'parent_synced'},
+    'root_result': {'binding', 'intent_identity', 'parent', 'root', 'root_uid', 'root_mode', 'absence_observed', 'parent_synced'},
     'decision': {'binding', 'decision_id', 'operator_id', 'recorded_at', 'reason', 'evidence', 'prior_outcome',
                  'ack_prior_requests_may_have_completed', 'ack_duplicate_generation_possible', 'roots',
                  'root_result_identity', 'policy_reference', 'caps', 'attempt_id'},
@@ -112,7 +112,7 @@ def decode_record(raw: bytes, record_type: str) -> dict:
             if not _root_value(obj['parent']) or not isinstance(obj['desired_path'], str) or not Path(obj['desired_path']).is_absolute() or obj['historically_absent'] is not True:
                 raise RecoveryEvidenceError('invalid root intent')
         if record_type == 'root_result':
-            if not _root_value(obj['parent']) or not _root_value(obj['root']) or obj['absence_observed'] is not True or obj['parent_synced'] is not True or not _digest(obj['intent_identity']):
+            if not _root_value(obj['parent']) or not _root_value(obj['root']) or obj['absence_observed'] is not True or obj['parent_synced'] is not True or not _digest(obj['intent_identity']) or type(obj['root_uid']) is not int or obj['root_uid'] < 0 or type(obj['root_mode']) is not int or obj['root_mode'] != 0o700:
                 raise RecoveryEvidenceError('invalid root result')
         if record_type == 'decision':
             if (obj['prior_outcome'] != 'unknown' or obj['ack_prior_requests_may_have_completed'] is not True
@@ -260,9 +260,19 @@ def inspect_recovery(*, store, pointers, session, execution_root, checkpoint_roo
                 raise RecoveryEvidenceError('root initialization mismatch')
             if i:
                 parent_stat = os.lstat(Path(checkpoint_root).parent)
-                if (parent_stat.st_uid != os.geteuid() or parent_stat.st_mode & 0o022
-                        or not claim._private(os.lstat(checkpoint_root))):
-                    raise RecoveryEvidenceError('unsafe initialized root or parent')
+                root_stat = os.lstat(checkpoint_root)
+                root_fd = os.open(checkpoint_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    opened = os.fstat(root_fd)
+                    if (parent_stat.st_uid != os.geteuid() or parent_stat.st_mode & 0o022
+                            or not stat.S_ISDIR(opened.st_mode) or not claim._private(opened)
+                            or not claim._same(root_stat, opened)
+                            or not claim._same(opened, os.lstat(checkpoint_root))
+                            or opened.st_uid != r['root_uid']
+                            or stat.S_IMODE(opened.st_mode) != r['root_mode']):
+                        raise RecoveryEvidenceError('unsafe initialized root or parent')
+                finally:
+                    os.close(root_fd)
             if d:
                 roots = {'execution': _root_identity(execution_root), 'checkpoint': _root_identity(checkpoint_root),
                          'artifact': _root_identity(store.root), 'pointer': _root_identity(pointers.root)}
@@ -289,6 +299,15 @@ def inspect_recovery(*, store, pointers, session, execution_root, checkpoint_roo
                            (canonical_json_bytes(records[kind]) if records[kind] is not None else None)
                            for kind in _TYPES)):
                 raise RecoveryEvidenceError('claim or recovery slots changed')
+            if i:
+                parent_after = os.lstat(Path(checkpoint_root).parent)
+                root_after = os.lstat(checkpoint_root)
+                if (r['root'] != _root_identity(checkpoint_root)
+                        or r['parent'] != _root_identity(Path(checkpoint_root).parent)
+                        or parent_after.st_uid != os.geteuid() or parent_after.st_mode & 0o022
+                        or root_after.st_uid != r['root_uid']
+                        or stat.S_IMODE(root_after.st_mode) != r['root_mode']):
+                    raise RecoveryEvidenceError('initialized root changed during inspection')
             if d and roots != {'execution': _root_identity(execution_root), 'checkpoint': _root_identity(checkpoint_root),
                                'artifact': _root_identity(store.root), 'pointer': _root_identity(pointers.root)}:
                 raise RecoveryEvidenceError('roots changed during inspection')

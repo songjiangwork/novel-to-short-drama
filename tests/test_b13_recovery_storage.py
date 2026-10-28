@@ -134,13 +134,9 @@ def test_failures_retain_or_surface_ambiguous_evidence(tmp_path, monkeypatch, po
         assert err.value.link_attempted == (point in ('link', 'dir_sync', 'unlink', 'final_read'))
     monkeypatch.undo()
     # Before cleanup the tracked remnant blocks audit and every later writer.
-    if point != 'final_read':
-        assert audit.inspect_recovery(**args) == audit.Audit.BLOCKED
-        with guard(args) as g:
-            with pytest.raises(storage._StorageError): persist(args, g, raw)
-    else:
-        assert path.read_bytes() == raw
-        with guard(args) as g: assert persist(args, g, raw) == storage._Result.EXISTS_VERIFIED
+    assert audit.inspect_recovery(**args) == audit.Audit.BLOCKED
+    with guard(args) as g:
+        with pytest.raises(storage._StorageError): persist(args, g, raw)
 
 
 def test_link_success_then_exception_blocks_restart(tmp_path, monkeypatch):
@@ -413,3 +409,147 @@ def test_parent_becomes_unsafe_during_file_sync(tmp_path, monkeypatch):
         assert not path.exists()
     finally:
         parent.chmod(0o700)
+
+
+def initialized_case(tmp_path):
+    from test_b13_recovery_root import case as root_case, run
+    from short_drama.adaptation import disposition_recovery_root as root
+    source = root_case(tmp_path)
+    source['checkpoint_root'] = tmp_path / 'checkpoints'
+    assert run(source) == root._RootState.INITIALIZED
+    args = {**source, 'execution_root': source['execution']}
+    del args['execution']
+    ident = claim._identity(args['session'], args['window_id'])
+    cid = content_hash(ident)
+    intent_path = args['execution_root'] / audit.record_name(cid, 'root_intent')
+    result_path = args['execution_root'] / audit.record_name(cid, 'root_result')
+    result = audit.decode_record(result_path.read_bytes(), 'root_result')
+    roots = {k: audit._root_identity(p) for k, p in dict(execution=args['execution_root'],
+        checkpoint=args['checkpoint_root'], artifact=args['store'].root, pointer=args['pointers'].root).items()}
+    decision(args, result['binding'], roots)
+    path = args['execution_root'] / audit.record_name(cid, 'decision')
+    obj = audit.decode_record(path.read_bytes(), 'decision')
+    fields = {k: v for k, v in obj.items() if k not in ('record_type', 'schema_version', 'content_hash')}
+    fields['root_result_identity'] = result['content_hash']
+    path.unlink()
+    return args, path, audit.encode_record('decision', fields), intent_path, result_path
+
+
+def test_initialized_sibling_lineage_roundtrip(tmp_path, monkeypatch):
+    from test_b13_disposition_execution import _tree_bytes
+    monkeypatch.setattr('short_drama.llm.LLMClient.generate_structured', lambda *_a, **_k: pytest.fail('provider called'))
+    args, path, raw, intent, result = initialized_case(tmp_path)
+    assert all(p.parent == tmp_path for p in (args['execution_root'], args['checkpoint_root'], args['store'].root, args['pointers'].root))
+    original = claim.claim_path(args['execution_root'], args['session'], args['window_id'])
+    before = (original.read_bytes(), original.stat().st_ino, intent.read_bytes(), result.read_bytes(),
+              _tree_bytes(args['store'].root), _tree_bytes(args['pointers'].root))
+    with guard(args) as g:
+        assert persist(args, g, raw) == storage._Result.PERSISTED
+        assert persist(args, g, raw) == storage._Result.EXISTS_VERIFIED
+    assert audit.inspect_recovery(**args) == audit.Audit.BLOCKED
+    assert not list(args['checkpoint_root'].iterdir())
+    assert before == (original.read_bytes(), original.stat().st_ino, intent.read_bytes(), result.read_bytes(),
+                      _tree_bytes(args['store'].root), _tree_bytes(args['pointers'].root))
+    add_checkpoint(args)
+    assert audit.inspect_recovery(**args) == audit.Audit.ORDINARY_AUDIT
+
+
+@pytest.mark.parametrize('damage', ['null', 'wrong', 'intent_only', 'result_only', 'corrupt', 'root_replaced', 'root_mode', 'remnant', 'hardlink', 'link_mismatch'])
+def test_initialized_invalid_evidence_blocks(tmp_path, damage):
+    args, path, raw, intent, result = initialized_case(tmp_path)
+    if damage in ('null', 'wrong'):
+        obj = audit.decode_record(raw, 'decision')
+        fields = {k: v for k, v in obj.items() if k not in ('record_type', 'schema_version', 'content_hash')}
+        fields['root_result_identity'] = None if damage == 'null' else 'a' * 64
+        raw = audit.encode_record('decision', fields)
+    elif damage == 'intent_only': result.unlink()
+    elif damage == 'result_only': intent.unlink()
+    elif damage == 'corrupt': result.write_bytes(result.read_bytes() + b' ')
+    elif damage == 'root_replaced':
+        args['checkpoint_root'].rename(tmp_path / 'old-checkpoint')
+        args['checkpoint_root'].mkdir(mode=0o700)
+    elif damage == 'root_mode': args['checkpoint_root'].chmod(0o755)
+    elif damage == 'remnant': (intent.parent / ('.' + intent.name + '.tmp')).touch(mode=0o600)
+    elif damage == 'hardlink': os.link(result, tmp_path / 'alias')
+    elif damage == 'link_mismatch':
+        obj = audit.decode_record(result.read_bytes(), 'root_result')
+        fields = {k: v for k, v in obj.items() if k not in ('record_type', 'schema_version', 'content_hash')}
+        fields['intent_identity'] = 'a' * 64
+        result.write_bytes(audit.encode_record('root_result', fields))
+    with guard(args) as g:
+        before = set(os.listdir(g._dirfd))
+        with pytest.raises(storage._StorageError) as err: persist(args, g, raw)
+        assert not err.value.link_attempted
+        assert set(os.listdir(g._dirfd)) == before
+    assert not path.exists()
+
+
+def test_ordinary_root_rejects_nonnull_reference(tmp_path):
+    args, path, raw = case(tmp_path)
+    obj = audit.decode_record(raw, 'decision')
+    fields = {k: v for k, v in obj.items() if k not in ('record_type', 'schema_version', 'content_hash')}
+    fields['root_result_identity'] = 'a' * 64
+    with guard(args) as g:
+        with pytest.raises(storage._StorageError) as err: persist(args, g, audit.encode_record('decision', fields))
+        assert not err.value.link_attempted
+    assert not path.exists()
+
+
+def test_initialized_record_replaced_after_link_blocks(tmp_path, monkeypatch):
+    args, path, raw, intent, result = initialized_case(tmp_path)
+    real = os.link
+    def link(*a, **kw):
+        real(*a, **kw)
+        data = result.read_bytes()
+        result.unlink()
+        result.write_bytes(data)
+        result.chmod(0o600)
+    with guard(args) as g:
+        monkeypatch.setattr(storage.os, 'link', link)
+        with pytest.raises(storage._StorageError) as err: persist(args, g, raw)
+        assert err.value.link_attempted
+    assert path.exists()
+    assert any('.tmp' in p.name for p in args['execution_root'].iterdir())
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_initialized_checkpoint_precedes_new_decision(tmp_path, corrupt):
+    args, path, raw, _, _ = initialized_case(tmp_path)
+    checkpoint = add_checkpoint(args)
+    if corrupt:
+        checkpoint.write_bytes(b'corrupt')
+    with guard(args) as g:
+        before = set(os.listdir(g._dirfd))
+        with pytest.raises(storage._StorageError) as err: persist(args, g, raw)
+        assert not err.value.link_attempted
+        assert set(os.listdir(g._dirfd)) == before
+    assert not path.exists()
+
+
+def test_initialized_record_replaced_during_read_blocks(tmp_path, monkeypatch):
+    args, path, raw, _, result = initialized_case(tmp_path)
+    real = audit._read_slot
+    replaced = False
+    def read(directory, fd, name):
+        nonlocal replaced
+        data = real(directory, fd, name)
+        if name == result.name and not replaced:
+            replaced = True
+            result.unlink()
+            result.write_bytes(data)
+            result.chmod(0o600)
+        return data
+    with guard(args) as g:
+        monkeypatch.setattr(audit, '_read_slot', read)
+        with pytest.raises(storage._StorageError) as err: persist(args, g, raw)
+        assert not err.value.link_attempted
+    assert replaced and not path.exists()
+
+
+def test_noncanonical_checkpoint_path_blocks(tmp_path):
+    args, path, raw, _, _ = initialized_case(tmp_path)
+    args['checkpoint_root'] = str(tmp_path) + '/./checkpoints'
+    with guard(args) as g:
+        with pytest.raises(storage._StorageError) as err: persist(args, g, raw)
+        assert not err.value.link_attempted
+    assert not path.exists()

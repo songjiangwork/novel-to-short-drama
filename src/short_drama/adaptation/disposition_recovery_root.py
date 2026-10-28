@@ -65,10 +65,10 @@ def _initialize_root(*, guard, store, pointers, session, checkpoint_root, window
                     raise ValueError('untrustworthy checkpoint ancestor')
 
         check_ancestors()
-        if (any(parent == p or parent.is_relative_to(p) or p.is_relative_to(parent) for p in roots)
+        if (any(path == p or path.is_relative_to(p) or p.is_relative_to(path) for p in roots)
                 or any(a == b or a.is_relative_to(b) or b.is_relative_to(a)
                        for index, a in enumerate(roots) for b in roots[index + 1:])):
-            raise ValueError('checkpoint parent or protected roots overlap')
+            raise ValueError('checkpoint target or protected roots overlap')
         if len({(r['dev'], r['ino']) for r in root_ids + [parent_id]}) != 4:
             raise ValueError('root alias')
         first = _verify(store, pointers, session)

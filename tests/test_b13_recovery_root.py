@@ -241,3 +241,49 @@ def test_existing_evidence_rejects_other_selection_mode(tmp_path):
     requests = tuple(build_b13_window_semantic_preparation(p, runtime_config=current.runtime_config) for p in prep.packets)
     args['session'] = _session(prep, requests, current.runtime_config)
     with pytest.raises(root._RootError): run(args)
+
+
+def test_sibling_roots_share_trusted_parent(tmp_path, monkeypatch):
+    monkeypatch.setattr('short_drama.llm.LLMClient.generate_structured', lambda *_a, **_k: pytest.fail('provider called'))
+    args = case(tmp_path)
+    args['checkpoint_root'] = tmp_path / 'checkpoints'
+    assert all(p.parent == tmp_path for p in (args['execution'], args['store'].root,
+                                                args['pointers'].root, args['checkpoint_root']))
+    original = claim.claim_path(args['execution'], args['session'], args['window_id'])
+    before = (original.read_bytes(), original.stat().st_ino,
+              _tree_bytes(args['store'].root), _tree_bytes(args['pointers'].root))
+    assert run(args) is root._RootState.INITIALIZED
+    assert run(args) is root._RootState.EVIDENCE_VERIFIED
+    assert (original.read_bytes(), original.stat().st_ino,
+            _tree_bytes(args['store'].root), _tree_bytes(args['pointers'].root)) == before
+
+
+def test_checkpoint_target_overlapping_protected_roots_is_rejected(tmp_path):
+    args = case(tmp_path)
+    roots = (args['execution'], args['store'].root, args['pointers'].root)
+    before = (_tree_bytes(args['execution']), _tree_bytes(args['store'].root), _tree_bytes(args['pointers'].root))
+    for target in [*(p / 'nested' for p in roots), *roots, tmp_path]:
+        args['checkpoint_root'] = target
+        with pytest.raises(root._RootError) as error:
+            run(args)
+        assert str(error.value.__cause__) == 'checkpoint target or protected roots overlap'
+    assert (_tree_bytes(args['execution']), _tree_bytes(args['store'].root), _tree_bytes(args['pointers'].root)) == before
+    assert all(not (p / 'nested').exists() for p in roots)
+
+
+def test_checkpoint_inode_alias_is_rejected(tmp_path, monkeypatch):
+    args = case(tmp_path)
+    args['checkpoint_root'].mkdir(mode=0o700)
+    target = args['checkpoint_root'].stat()
+    real_identity = audit._root_identity
+    def aliased_identity(path):
+        identity = real_identity(path)
+        if path == args['store'].root:
+            identity.update(dev=target.st_dev, ino=target.st_ino)
+        return identity
+    monkeypatch.setattr(audit, '_root_identity', aliased_identity)
+    before = _tree_bytes(args['execution'])
+    with pytest.raises(root._RootError) as error:
+        run(args)
+    assert str(error.value.__cause__) == 'root changed or unsafe'
+    assert _tree_bytes(args['execution']) == before

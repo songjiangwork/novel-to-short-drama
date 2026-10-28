@@ -202,6 +202,7 @@ class ExecutionGuard:
         self.path, self._dirfd, self._protected = _open_isolated_root(
             self._root_arg, self._store, self._pointers)
         try:
+            self._parent_stat = os.lstat(self.path.parent)
             _check_root(self.path, self._dirfd)
             self._check_protected()
             flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK

@@ -11,6 +11,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 
 from short_drama.artifacts import canonical_json_bytes, strict_json_loads
 from short_drama.artifacts.errors import CanonicalSerializationError
@@ -145,10 +146,29 @@ def _validate(obj):
     _fields(roots, "execution checkpoint artifact pointer checkpoint_parent")
     for node in roots.values():
         _node(node)
+    protected = [roots[name] for name in ("execution", "checkpoint", "artifact", "pointer")]
+    paths = [PurePosixPath(node["path"]) for node in protected]
+    for index, path in enumerate(paths):
+        for other in paths[index + 1:]:
+            if path == other or path in other.parents or other in path.parents:
+                raise PreflightStructureError("overlapping root paths")
+    nodes = protected + [roots["checkpoint_parent"]]
+    identities = {(node["dev"], node["ino"]) for node in nodes}
+    if len(identities) != len(nodes):
+        raise PreflightStructureError("aliased root identities")
+    parent = PurePosixPath(roots["checkpoint_parent"]["path"])
+    if parent in paths or paths[1].parent != parent:
+        raise PreflightStructureError("invalid checkpoint parent")
+    claim_path = PurePosixPath(claim["file"]["path"])
+    if claim_path == paths[0] or claim_path.parent != paths[0]:
+        raise PreflightStructureError("invalid claim parent")
     checkpoint = obj["checkpoint"]
     _fields(checkpoint, "status expected_path")
     _literal(checkpoint["status"], "ABSENT")
     _path(checkpoint["expected_path"])
+    checkpoint_path = PurePosixPath(checkpoint["expected_path"])
+    if checkpoint_path == paths[1] or checkpoint_path.parent != paths[1]:
+        raise PreflightStructureError("invalid checkpoint path parent")
     slots = obj["slots"]
     _fields(slots, "root_intent root_result decision consumption terminal")
     for slot in slots.values():

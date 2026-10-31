@@ -84,13 +84,17 @@ class VerifiedManifest:
     _keys: tuple[_Key, ...]
     _allowlist: tuple[tuple[tuple[str, str, str], tuple[str, str, str]], ...]
     _now: datetime
+    _issued: datetime
+    _expires: datetime
 
-    def __init__(self, token, keys, allowlist, now):
+    def __init__(self, token, keys, allowlist, now, issued=None, expires=None):
         if token is not _TOKEN:
             raise TrustManifestError("manifest must be verified")
         object.__setattr__(self, "_keys", keys)
         object.__setattr__(self, "_allowlist", allowlist)
         object.__setattr__(self, "_now", now)
+        object.__setattr__(self, "_issued", issued)
+        object.__setattr__(self, "_expires", expires)
 
 
 def verify_manifest(*, raw: bytes, expected_root_public_key: bytes,
@@ -161,7 +165,7 @@ def verify_manifest(*, raw: bytes, expected_root_public_key: bytes,
         if pair in allowed:
             raise TrustManifestError("duplicate allowlist pair")
         allowed.append(pair)
-    return VerifiedManifest(_TOKEN, tuple(keys), tuple(allowed), now)
+    return VerifiedManifest(_TOKEN, tuple(keys), tuple(allowed), now, issued, expires)
 
 
 def select_signer_key(manifest: VerifiedManifest, *, expected_key_id: str,
@@ -179,6 +183,25 @@ def select_signer_key(manifest: VerifiedManifest, *, expected_key_id: str,
                 and key.not_before <= manifest._now < key.not_after):
             return key.public_key
     raise TrustManifestError("no matching active key")
+
+
+def select_signer_key_for_interval(manifest: VerifiedManifest, *, expected_key_id: str,
+                                   expected_principal_id: str, expected_role: str,
+                                   trusted_now: str, issued_at: str, expires_at: str) -> bytes:
+    """Select a role-bound key and check an interval at the manifest snapshot time.
+
+    The clock, root and manifest currentness remain caller-supplied assumptions.
+    This does not extend the manifest's revocation-currentness assertion in time.
+    """
+    public = select_signer_key(manifest, expected_key_id=expected_key_id,
+                               expected_principal_id=expected_principal_id, expected_role=expected_role)
+    now, issued, expires = (_time(value) for value in (trusted_now, issued_at, expires_at))
+    if now != manifest._now or not (manifest._issued <= issued <= now < expires <= manifest._expires):
+        raise TrustManifestError("invalid signed interval")
+    key = next(key for key in manifest._keys if key.key_id == expected_key_id)
+    if not key.not_before <= issued < expires <= key.not_after:
+        raise TrustManifestError("invalid signed interval")
+    return public
 
 
 def check_document_pair(manifest: VerifiedManifest, *, policy_document: dict,

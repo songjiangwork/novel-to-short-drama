@@ -1,4 +1,4 @@
-"""Synthetic v1/v2 records must never be silently reused or ignored."""
+"""Synthetic older prompt records must never be silently reused or ignored."""
 import pytest
 
 import short_drama.adaptation.disposition_semantic as semantic
@@ -15,10 +15,11 @@ from short_drama.adaptation.disposition_execution_claim import (
 from test_b13_disposition_checkpoint import _accepted, _fixture, _session
 
 
-def test_v1_records_block_v2_without_mixing(tmp_path, monkeypatch):
+@pytest.mark.parametrize('version', [1, 2])
+def test_old_records_block_v3_without_mixing(tmp_path, monkeypatch, version):
     with monkeypatch.context() as m:
-        m.setattr(semantic, 'B13_WINDOW_PROMPT_VERSION', 1)
-        m.setattr(semantic, 'B13_WINDOW_PROMPT_CONTENT_HASH_V2', semantic.B13_WINDOW_PROMPT_CONTENT_HASH_V1)
+        m.setattr(semantic, 'B13_WINDOW_PROMPT_VERSION', version)
+        m.setattr(semantic, 'B13_WINDOW_PROMPT_CONTENT_HASH_V3', getattr(semantic, f'B13_WINDOW_PROMPT_CONTENT_HASH_V{version}'))
         tree, old_session, packet, old_request = _fixture(tmp_path / 'fixture')
         accepted = _accepted(packet, old_request, old_session.runtime_config)
         old_checkpoint = encode_checkpoint(accepted, old_session)

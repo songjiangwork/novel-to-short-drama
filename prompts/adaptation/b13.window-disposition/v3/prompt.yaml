@@ -1,0 +1,5 @@
+schema_version: 1
+prompt_id: b13.window-disposition
+version: 3
+required_variables: [window_packet_json]
+content_hash: 56d0f0f8a4cddb76d69871513761c275c705224c324397f70a5938293d941d09

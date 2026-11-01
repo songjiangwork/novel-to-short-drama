@@ -32,11 +32,12 @@ from .target import CanonicalTargetReference
 
 
 B13_WINDOW_PROMPT_ID = "b13.window-disposition"
-B13_WINDOW_PROMPT_VERSION = 2
+B13_WINDOW_PROMPT_VERSION = 3
 B13_WINDOW_OUTPUT_SCHEMA_ID = "b13-window-disposition-proposal"
 B13_WINDOW_PROMPTS_DIR = REPO_ROOT / "prompts" / "adaptation"
 B13_WINDOW_PROMPT_CONTENT_HASH_V1 = "01052d4b6a202506851b7e560bb8cb9fadc209aa24fb1272b5d86cd2bf0e0c04"
 B13_WINDOW_PROMPT_CONTENT_HASH_V2 = "c6164d515e2d250067c6768d26b12b7d36753196a5b1e42a3e0b60b27ac7166d"
+B13_WINDOW_PROMPT_CONTENT_HASH_V3 = "56d0f0f8a4cddb76d69871513761c275c705224c324397f70a5938293d941d09"
 _LOCAL_KEY = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _RESERVED_LOCAL_PREFIXES = ("adapted_", "adaptation_", "anonymous_", "char_")
 
@@ -481,9 +482,9 @@ def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *,
     assets = _resolve_assets(semantic_asset_version, semantic_profile, output_schema)
     prompts = PromptRegistry(B13_WINDOW_PROMPTS_DIR) if prompts is None else prompts
     prompt = prompts.load(B13_WINDOW_PROMPT_ID, version=B13_WINDOW_PROMPT_VERSION)
-    if prompt.content_hash != B13_WINDOW_PROMPT_CONTENT_HASH_V2:
+    if prompt.content_hash != B13_WINDOW_PROMPT_CONTENT_HASH_V3:
         raise B13WindowSemanticError(
-            "B1.3 window prompt content hash does not match pinned v2 asset"
+            "B1.3 window prompt content hash does not match pinned v3 asset"
         )
     rendered = prompt.render({"window_packet_json": packet.canonical_bytes().decode("utf-8")})
     request = build_structured_request(rendered_prompt=rendered, output_schema=assets.output_schema, semantic_profile=assets.semantic_profile)
@@ -494,7 +495,7 @@ def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *,
 
 __all__ = [
     "B13_WINDOW_PROMPT_ID", "B13_WINDOW_PROMPT_VERSION", "B13_WINDOW_OUTPUT_SCHEMA_ID",
-    "B13_WINDOW_PROMPT_CONTENT_HASH_V1", "B13_WINDOW_PROMPT_CONTENT_HASH_V2",
+    "B13_WINDOW_PROMPT_CONTENT_HASH_V1", "B13_WINDOW_PROMPT_CONTENT_HASH_V2", "B13_WINDOW_PROMPT_CONTENT_HASH_V3",
     "B13WindowSemanticError", "B13WindowSchemaError", "B13WindowProposalError",
     "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
     "B13WindowProposal", "B13WindowSemanticBudget", "B13WindowSemanticMeasurement",

@@ -342,39 +342,50 @@ def test_modified_schema_asset_fails_closed(tmp_path, monkeypatch):
 def test_prompt_registry_rejects_modified_version(tmp_path):
     prompt_root = tmp_path / "prompts"
     shutil.copytree(semantic_module.B13_WINDOW_PROMPTS_DIR, prompt_root)
-    system = prompt_root / "b13.window-disposition" / "v2" / "system.txt"
+    system = prompt_root / "b13.window-disposition" / "v3" / "system.txt"
     system.write_text(system.read_text(encoding="utf-8") + "\n篡改。", encoding="utf-8")
-    manifest = prompt_root / "b13.window-disposition" / "v2" / "prompt.yaml"
+    manifest = prompt_root / "b13.window-disposition" / "v3" / "prompt.yaml"
     updated_hash = compute_prompt_content_hash(
-        prompt_id="b13.window-disposition", version=2,
+        prompt_id="b13.window-disposition", version=3,
         system_template=system.read_text(encoding="utf-8"),
-        user_template=(prompt_root / "b13.window-disposition" / "v2" / "user.txt").read_text(encoding="utf-8"),
+        user_template=(prompt_root / "b13.window-disposition" / "v3" / "user.txt").read_text(encoding="utf-8"),
         required_variables=["window_packet_json"],
     )
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V2, updated_hash,
+            semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V3, updated_hash,
         ), encoding="utf-8",
     )
     packet = _packet(tmp_path / "fixture")
-    with pytest.raises(B13WindowSemanticError, match="pinned v2 asset"):
+    with pytest.raises(B13WindowSemanticError, match="pinned v3 asset"):
         build_b13_window_semantic_preparation(packet, prompts=PromptRegistry(prompt_root), runtime_config=_b12_test_runtime_config())
 
 
-def test_prompt_v2_local_key_contract_and_v1_is_unchanged():
+def test_prompt_v3_contract_and_earlier_versions_unchanged():
     registry = PromptRegistry(semantic_module.B13_WINDOW_PROMPTS_DIR)
     v1 = registry.load(semantic_module.B13_WINDOW_PROMPT_ID, version=1)
     v2 = registry.load(semantic_module.B13_WINDOW_PROMPT_ID, version=2)
+    v3 = registry.load(semantic_module.B13_WINDOW_PROMPT_ID, version=3)
     assert v1.content_hash == semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V1
     assert v2.content_hash == semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V2
+    assert v3.content_hash == semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V3
     assert v2.user_template == v1.user_template
     assert v2.system_template.startswith(v1.system_template)
-    system = (semantic_module.B13_WINDOW_PROMPTS_DIR / "b13.window-disposition/v2/system.txt").read_text()
+    assert v3.user_template == v2.user_template
+    assert v3.system_template.startswith(v2.system_template)
+    system = v3.system_template
     assert "^[a-z][a-z0-9_-]{0,63}$" in system
     for value in ("adapted_", "adaptation_", "anonymous_", "char_", "person_01", "lead_01",
                   "beat_01", "role_01", "adapted_hero", "adaptation_01", "anonymous_guard",
                   "char_01", "Hero_01", "角色01", "adapted_story_beat_local_key"):
         assert value in system
+    for text in ("source_direct 和 source_condensed 各须恰好一个", "source_composite 须至少两个不同",
+                 "不得重复引用凑数", "adaptation_invented 不得有 source events", "至少一个 canonical anchor",
+                 "source_single 恰好一个来源角色", "source_composite 至少两个不同来源角色",
+                 "恰好参与一个 beat", "每个非 omit 的 owned event 须有 active mapping",
+                 "omit 的 owned event 不得有 active mapping", "compress 须至少映射到一个单源",
+                 "merge_member 的 active mapping 只能指向 source_composite"):
+        assert text in system
     for value in ("person_01", "lead_01", "beat_01", "role_01", "a" * 64):
         assert semantic_module._local_key(value, "synthetic") == value
     for value in ("adapted_hero", "adaptation_01", "anonymous_guard", "char_01", "Hero_01", "角色01", "a" * 65):
@@ -382,15 +393,20 @@ def test_prompt_v2_local_key_contract_and_v1_is_unchanged():
             semantic_module._local_key(value, "synthetic")
 
 
-def test_v1_and_v2_request_identity_differ_for_same_packet(tmp_path, monkeypatch):
+def test_all_prompt_versions_have_distinct_request_identity_for_same_packet(tmp_path, monkeypatch):
     packet = _packet(tmp_path)
     runtime = _b12_test_runtime_config()
     current = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
     with monkeypatch.context() as m:
         m.setattr(semantic_module, "B13_WINDOW_PROMPT_VERSION", 1)
-        m.setattr(semantic_module, "B13_WINDOW_PROMPT_CONTENT_HASH_V2", semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V1)
+        m.setattr(semantic_module, "B13_WINDOW_PROMPT_CONTENT_HASH_V3", semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V1)
         old = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
     assert old.request_identity != current.request_identity
+    with monkeypatch.context() as m:
+        m.setattr(semantic_module, "B13_WINDOW_PROMPT_VERSION", 2)
+        m.setattr(semantic_module, "B13_WINDOW_PROMPT_CONTENT_HASH_V3", semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V2)
+        v2 = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
+    assert v2.request_identity != current.request_identity
     assert current.request_identity != "504656656d9a228c2cbb31c82256ad691b65e0376ae24ae0695a37503d07d220"
     proposal = _proposal(packet)
     proposal["adapted_characters"] = [{"local_key": "person_01", "display_name_zh": "角色",
@@ -399,6 +415,34 @@ def test_v1_and_v2_request_identity_differ_for_same_packet(tmp_path, monkeypatch
     proposal["adapted_characters"][0]["local_key"] = "adapted_hero"
     with pytest.raises(semantic_module.B13WindowProposalError, match="non-authoritative window-local key"):
         semantic_module.B13WindowProposal.from_dict(packet, proposal, current.output_schema)
+
+
+def test_beat_origin_source_event_cardinality():
+    from types import SimpleNamespace
+
+    refs = tuple(CanonicalTargetReference("event", value) for value in ("evt_000001", "evt_000002"))
+    packet = SimpleNamespace(source_snapshot=SimpleNamespace(canonical_references=refs),
+        to_dict=lambda: {"window": {"owned_event_refs": ["evt_000001"]}})
+    original = _proposal(packet)
+    validate = semantic_module.B13WindowProposal._validate_semantics
+    for origin in ("source_direct", "source_condensed"):
+        good = deepcopy(original)
+        good["adapted_story_beats"][0]["origin"] = origin
+        validate(packet, good)
+        for events in ([], [refs[0].to_dict(), refs[1].to_dict()]):
+            bad = deepcopy(good)
+            bad["adapted_story_beats"][0]["source_event_refs"] = events
+            with pytest.raises(B13WindowSemanticError, match="requires exactly one source event"):
+                validate(packet, bad)
+    composite = deepcopy(original)
+    composite["adapted_story_beats"][0]["origin"] = "source_composite"
+    with pytest.raises(B13WindowSemanticError, match="at least two source events"):
+        validate(packet, composite)
+    composite["adapted_story_beats"][0]["source_event_refs"].append(refs[1].to_dict())
+    validate(packet, composite)
+    composite["adapted_story_beats"][0]["source_event_refs"][1] = refs[0].to_dict()
+    with pytest.raises(B13WindowSemanticError, match="must not repeat"):
+        validate(packet, composite)
 
 
 def test_schema_patterns_stay_within_llama_cpp_gbnf_safe_subset():

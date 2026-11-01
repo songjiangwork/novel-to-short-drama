@@ -35,14 +35,91 @@ from short_drama.adaptation.disposition_runner import _roots
 from short_drama.llm import DEFAULT_MAX_ATTEMPTS, OpenAICompatibleLLMClient, RuntimeConfig
 
 
+def _unwrap_failure(exc):
+    while type(exc) in (B13RunnerError, LLMRetryExhaustedError) and exc.__cause__ is not None:
+        exc = exc.__cause__
+    return exc
+
+
+# Exact, static validator diagnostics only. Never include exception text unless
+# it equals one of these reviewed literals; unknown/new diagnostics fail closed.
+_SAFE_SEMANTIC_REASONS = frozenset({
+    "only this window's owned events may receive authoritative dispositions",
+    "owned event dispositions must not be duplicated",
+    "owned event dispositions must cover exactly every owned event",
+    "adapted character local_key must be unique",
+    "character function provenance must not repeat a source character",
+    "source_single character requires exactly one function provenance",
+    "source_composite character requires at least two function provenances",
+    "adaptation_invented character must not claim source provenance",
+    "invention_rationale_zh is only permitted for adaptation_invented characters",
+    "anonymous role local_key must be unique across local participants",
+    "adapted story beat local_key must be unique",
+    "beat source references must not repeat",
+    "source_direct/source_condensed beat requires exactly one source event",
+    "source_composite beat requires at least two source events",
+    "adaptation_invented beat requires anchors and no source events",
+    "invention fields are only permitted for adaptation_invented beats",
+    "beat participants must not be duplicated",
+    "adapted character participant local_key does not resolve",
+    "anonymous role participant local_key does not resolve",
+    "adaptation mappings must not be duplicated",
+    "mapping adapted story-beat local_key does not resolve",
+    "event mapping must be declared by its beat source_event_refs",
+    "non-event mapping must be declared by its beat canonical_anchor_refs",
+    "character mapping must be backed by function provenance",
+    "omit owned event forbids active mapping candidates",
+    "omit owned event must not materialize in a beat candidate",
+    "kept/compressed/merged owned event requires an active mapping candidate",
+    "owned source-backed beat candidate requires its corresponding active mapping",
+    "compress owned event requires a single-source beat candidate",
+    "merge_member owned event requires an active mapping candidate",
+    "merge_member owned event must map only to source_composite beat candidates",
+    "anonymous role candidate must participate in exactly one beat",
+    "factual divergence candidates must not repeat a source fact",
+    "relationship requirement candidates must not repeat a source relationship",
+    "story state candidate must reference a local beat candidate",
+    "story state candidates must not repeat a local beat",
+    # _local_key and _canonical_ref receive only these hard-coded labels.
+    *(f"{name} must be a non-authoritative window-local key" for name in (
+        "adapted character local_key", "anonymous role local_key", "adapted story beat local_key",
+        "beat participant local_key", "mapping endpoint local_key", "story state local_key")),
+    *(f"{name} references source outside the exact A5/A6 snapshot" for name in (
+        "source_character_ref", "source_event_ref", "canonical_anchor_ref", "mapping source_ref",
+        "source_fact_ref", "source_relationship_ref")),
+    *(f"{name} must be a canonical source reference" for name in (
+        "source_character_ref", "source_event_ref", "canonical_anchor_ref", "mapping source_ref",
+        "source_fact_ref", "source_relationship_ref")),
+    *(f"{name} must reference a {kind}" for name, kind in (
+        ("source_character_ref", "character"), ("source_event_ref", "event"),
+        ("source_fact_ref", "fact"), ("source_relationship_ref", "relationship"))),
+    *(f"{name} must be non-empty text without NUL" for name in (
+        "source_event_id", "event disposition rationale_zh", "adapted character display_name_zh",
+        "character function_zh", "character provenance_zh", "invented character rationale",
+        "anonymous role function_zh", "adapted story beat summary_zh", "invented beat rationale",
+        "invented beat provenance", "retained_semantics_zh", "transformed_semantics_zh",
+        "adapted_assertion_zh", "requirement_zh", "assertion_zh", "provenance_zh")),
+})
+
+
+def _semantic_rejection_reasons(exc):
+    """Return exactly two safe reasons; no arbitrary exception content escapes."""
+    exc = _unwrap_failure(exc)
+    if not isinstance(exc, B13WindowGenerationExhaustedError):
+        return None
+    if type(exc.rounds_attempted) is not int or exc.rounds_attempted != 2 or type(exc.failures) is not tuple or len(exc.failures) != 2:
+        return ['UNKNOWN_SEMANTIC_REJECTION', 'UNKNOWN_SEMANTIC_REJECTION']
+    return [reason if type(reason) is str and reason in _SAFE_SEMANTIC_REASONS
+            else 'UNKNOWN_SEMANTIC_REJECTION' for reason in exc.failures]
+
+
 def _failure_code(exc, phase):
     """Classify known boundaries without exposing exception data or guessing counts.
 
     Retry exhaustion describes its final technical failure, not earlier attempts.
     Only unwrap the two wrappers whose causes are set by these execution paths.
     """
-    while type(exc) in (B13RunnerError, LLMRetryExhaustedError) and exc.__cause__ is not None:
-        exc = exc.__cause__
+    exc = _unwrap_failure(exc)
     if isinstance(exc, LLMTimeoutError):
         return 'PROVIDER_TIMEOUT'
     if isinstance(exc, LLMTransportError):
@@ -177,6 +254,9 @@ def main(argv=None):
     except Exception as exc:  # Never print exception text: it may contain provider or source content.
         summary.update(status='FAILED', exit_status=1, failure_phase=phase,
                        error_code=_failure_code(exc, phase))
+        reasons = _semantic_rejection_reasons(exc)
+        if reasons is not None:
+            summary['semantic_rejection_reasons'] = reasons
         if live_started:
             summary.update(generated_count=None, semantic_rounds=None, observed_provider_attempts=None)
     print(json.dumps(summary, sort_keys=True), flush=True)

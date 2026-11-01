@@ -194,6 +194,7 @@ def test_live_failure_code_from_fake_provider(setup_cli, capsys, monkeypatch, er
     code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
     assert code == 1 and lines[-1]['error_code'] == expected
     assert lines[-1]['semantic_rounds'] is None and lines[-1]['observed_provider_attempts'] is None
+    assert 'semantic_rejection_reasons' not in lines[-1]
     assert 'secret' not in str(lines)
 
 
@@ -228,6 +229,51 @@ def test_post_response_failure_codes(setup_cli, capsys, monkeypatch, kind, expec
     assert code == 1 and lines[-1]['error_code'] == expected
     assert len(fake.calls) == (2 if kind == 'semantic' else 1)
     assert lines[-1]['semantic_rounds'] is None and lines[-1]['observed_provider_attempts'] is None
+
+
+def test_two_semantic_rejections_report_only_safe_reasons(setup_cli, capsys, monkeypatch):
+    _, session, packet, _, args = setup_cli
+    first, second = _proposal(packet), _proposal(packet)
+    first['event_dispositions'][0]['disposition'] = 'omit'
+    first['event_dispositions'][0]['rationale_zh'] = 'secret novel text'
+    second['event_dispositions'] = []
+    fake = _FakeClient([(first, False), (second, False)], session.runtime_config)
+    monkeypatch.setattr(cli, 'OpenAICompatibleLLMClient', lambda _: fake)
+    code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
+    assert code == 1 and len(fake.calls) == 2
+    assert lines[-1]['error_code'] == 'SEMANTIC_GENERATION_EXHAUSTED'
+    assert lines[-1]['semantic_rejection_reasons'] == [
+        'omit owned event forbids active mapping candidates',
+        'owned event dispositions must cover exactly every owned event',
+    ]
+    assert lines[-1]['semantic_rounds'] is None and lines[-1]['observed_provider_attempts'] is None
+    assert 'secret' not in str(lines)
+
+
+def test_untrusted_semantic_diagnostics_do_not_leak(setup_cli, capsys, monkeypatch):
+    _, _, _, _, args = setup_cli
+    def fail(**_):
+        try:
+            raise cli.B13WindowGenerationExhaustedError(
+                window_id='secret window', request_identity='secret request', rounds_attempted=2,
+                failures=('owned event dispositions must not be duplicated',
+                          'owned event dispositions must not be duplicated: secret prompt and response'))
+        except cli.B13WindowGenerationExhaustedError as exc:
+            raise cli.B13RunnerError('secret wrapper') from exc
+    monkeypatch.setattr(cli.bounded, 'run_b13_alice_bounded', fail)
+    code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
+    assert code == 1 and lines[-1]['error_code'] == 'SEMANTIC_GENERATION_EXHAUSTED'
+    assert lines[-1]['semantic_rejection_reasons'] == [
+        'owned event dispositions must not be duplicated', 'UNKNOWN_SEMANTIC_REJECTION']
+    assert 'secret' not in str(lines)
+    assert lines[-1]['observed_provider_attempts'] is None
+
+
+def test_malformed_semantic_failure_counts_fail_closed():
+    exc = cli.B13WindowGenerationExhaustedError(
+        window_id='synthetic', request_identity='synthetic', rounds_attempted=1, failures=('secret',))
+    assert cli._semantic_rejection_reasons(exc) == ['UNKNOWN_SEMANTIC_REJECTION'] * 2
+    assert cli._semantic_rejection_reasons(RuntimeError('secret')) is None
 
 
 def test_authority_and_checkpoint_codes_do_not_unwrap_unrelated_causes():

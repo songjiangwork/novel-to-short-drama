@@ -342,23 +342,63 @@ def test_modified_schema_asset_fails_closed(tmp_path, monkeypatch):
 def test_prompt_registry_rejects_modified_version(tmp_path):
     prompt_root = tmp_path / "prompts"
     shutil.copytree(semantic_module.B13_WINDOW_PROMPTS_DIR, prompt_root)
-    system = prompt_root / "b13.window-disposition" / "v1" / "system.txt"
+    system = prompt_root / "b13.window-disposition" / "v2" / "system.txt"
     system.write_text(system.read_text(encoding="utf-8") + "\n篡改。", encoding="utf-8")
-    manifest = prompt_root / "b13.window-disposition" / "v1" / "prompt.yaml"
+    manifest = prompt_root / "b13.window-disposition" / "v2" / "prompt.yaml"
     updated_hash = compute_prompt_content_hash(
-        prompt_id="b13.window-disposition", version=1,
+        prompt_id="b13.window-disposition", version=2,
         system_template=system.read_text(encoding="utf-8"),
-        user_template=(prompt_root / "b13.window-disposition" / "v1" / "user.txt").read_text(encoding="utf-8"),
+        user_template=(prompt_root / "b13.window-disposition" / "v2" / "user.txt").read_text(encoding="utf-8"),
         required_variables=["window_packet_json"],
     )
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            "01052d4b6a202506851b7e560bb8cb9fadc209aa24fb1272b5d86cd2bf0e0c04", updated_hash,
+            semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V2, updated_hash,
         ), encoding="utf-8",
     )
     packet = _packet(tmp_path / "fixture")
-    with pytest.raises(B13WindowSemanticError, match="pinned v1 asset"):
+    with pytest.raises(B13WindowSemanticError, match="pinned v2 asset"):
         build_b13_window_semantic_preparation(packet, prompts=PromptRegistry(prompt_root), runtime_config=_b12_test_runtime_config())
+
+
+def test_prompt_v2_local_key_contract_and_v1_is_unchanged():
+    registry = PromptRegistry(semantic_module.B13_WINDOW_PROMPTS_DIR)
+    v1 = registry.load(semantic_module.B13_WINDOW_PROMPT_ID, version=1)
+    v2 = registry.load(semantic_module.B13_WINDOW_PROMPT_ID, version=2)
+    assert v1.content_hash == semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V1
+    assert v2.content_hash == semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V2
+    assert v2.user_template == v1.user_template
+    assert v2.system_template.startswith(v1.system_template)
+    system = (semantic_module.B13_WINDOW_PROMPTS_DIR / "b13.window-disposition/v2/system.txt").read_text()
+    assert "^[a-z][a-z0-9_-]{0,63}$" in system
+    for value in ("adapted_", "adaptation_", "anonymous_", "char_", "person_01", "lead_01",
+                  "beat_01", "role_01", "adapted_hero", "adaptation_01", "anonymous_guard",
+                  "char_01", "Hero_01", "角色01", "adapted_story_beat_local_key"):
+        assert value in system
+    for value in ("person_01", "lead_01", "beat_01", "role_01", "a" * 64):
+        assert semantic_module._local_key(value, "synthetic") == value
+    for value in ("adapted_hero", "adaptation_01", "anonymous_guard", "char_01", "Hero_01", "角色01", "a" * 65):
+        with pytest.raises(B13WindowSemanticError):
+            semantic_module._local_key(value, "synthetic")
+
+
+def test_v1_and_v2_request_identity_differ_for_same_packet(tmp_path, monkeypatch):
+    packet = _packet(tmp_path)
+    runtime = _b12_test_runtime_config()
+    current = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
+    with monkeypatch.context() as m:
+        m.setattr(semantic_module, "B13_WINDOW_PROMPT_VERSION", 1)
+        m.setattr(semantic_module, "B13_WINDOW_PROMPT_CONTENT_HASH_V2", semantic_module.B13_WINDOW_PROMPT_CONTENT_HASH_V1)
+        old = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
+    assert old.request_identity != current.request_identity
+    assert current.request_identity != "504656656d9a228c2cbb31c82256ad691b65e0376ae24ae0695a37503d07d220"
+    proposal = _proposal(packet)
+    proposal["adapted_characters"] = [{"local_key": "person_01", "display_name_zh": "角色",
+        "origin": "adaptation_invented", "function_provenance": [], "invention_rationale_zh": "合成理由"}]
+    semantic_module.B13WindowProposal.from_dict(packet, proposal, current.output_schema)
+    proposal["adapted_characters"][0]["local_key"] = "adapted_hero"
+    with pytest.raises(semantic_module.B13WindowProposalError, match="non-authoritative window-local key"):
+        semantic_module.B13WindowProposal.from_dict(packet, proposal, current.output_schema)
 
 
 def test_schema_patterns_stay_within_llama_cpp_gbnf_safe_subset():

@@ -268,6 +268,12 @@ def execution_guard(root: Path | str, *, store: FileArtifactStore,
 def _inspect_at(path: Path, dirfd: int, expected: bytes) -> ClaimInspection:
     _check_root(path.parent, dirfd)
     try:
+        # A changed prompt changes the request hash, but does not erase an
+        # earlier attempt for the same preparation and window.
+        prefix = path.name.rsplit('-q', 1)[0] + '-q'
+        if any(name.startswith(prefix) and name != path.name for name in os.listdir(dirfd)):
+            _check_root(path.parent, dirfd)
+            return ClaimInspection(ClaimState.INVALID, path)
         before = os.stat(path.name, dir_fd=dirfd, follow_symlinks=False)
     except FileNotFoundError:
         _check_root(path.parent, dirfd)

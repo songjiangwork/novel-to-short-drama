@@ -119,6 +119,17 @@ def _checkpoint_name(session: Any, window_id: str) -> str:
     return f"{_FILE_PREFIX}-p{preparation}-w{ordinal:08d}-q{request}.json"
 
 
+def _reject_other_window_checkpoint(target: Path) -> None:
+    # A different request for this preparation/window is not an absent
+    # checkpoint: it needs separate review, never silent v1/v2 mixing.
+    prefix = target.name.rsplit("-q", 1)[0] + "-q"
+    try:
+        if any(name.startswith(prefix) and name != target.name for name in os.listdir(target.parent)):
+            _fail("checkpoint for another request exists for this window")
+    except OSError as exc:
+        _fail("cannot inspect checkpoint directory", exc)
+
+
 def _target_stat(path: Path, *, missing_ok: bool = False) -> os.stat_result | None:
     value = _lstat(path, missing_ok=missing_ok)
     if value is None:
@@ -232,6 +243,7 @@ def save_checkpoint(root: Path | str | os.PathLike[str], accepted: B13WindowAcce
     if decoded != accepted or len(raw) > evidence.B13_CHECKPOINT_MAX_BYTES:
         _fail("checkpoint evidence did not round-trip exactly before persistence")
     target = checkpoint_path(root, session, accepted.window_id)
+    _reject_other_window_checkpoint(target)
     if _target_stat(target, missing_ok=True) is not None:
         if _existing_matches(target, raw, session):
             _fsync_directory(target.parent)
@@ -277,6 +289,7 @@ def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id
     # Do not call checkpoint_path here: it may recreate a root removed after
     # the read-only root check. Loading must never create filesystem objects.
     target = directory / _checkpoint_name(session, window_id)
+    _reject_other_window_checkpoint(target)
     if _target_stat(target, missing_ok=True) is None:
         # A root that vanished after inspection is not an ordinary cache miss.
         if _root(directory, create=False) is None:

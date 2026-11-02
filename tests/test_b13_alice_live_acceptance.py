@@ -250,6 +250,36 @@ def test_two_semantic_rejections_report_only_safe_reasons(setup_cli, capsys, mon
     assert 'secret' not in str(lines)
 
 
+def test_missing_mapping_details_survive_cli_without_source_data(setup_cli, capsys, monkeypatch):
+    _, session, packet, _, args = setup_cli
+    first, second = _proposal(packet), _proposal(packet)
+    event_id = first['event_dispositions'][0]['source_event_id']
+    first['event_dispositions'][0]['rationale_zh'] = 'secret response text'
+    first['adaptation_mappings'] = []
+    second['adaptation_mappings'][0]['active'] = False
+    fake = _FakeClient([(first, False), (second, False)], session.runtime_config)
+    monkeypatch.setattr(cli, 'OpenAICompatibleLLMClient', lambda _: fake)
+    code, lines = invoke(args + ['--execute-live', '--generation-timeout', '1800'], capsys)
+    assert code == 1
+    summary = lines[-1]
+    assert summary['semantic_rejection_reasons'] == [cli._MISSING_MAPPING_REASON] * 2
+    assert summary['semantic_rejection_details'] == [
+        {'round': 1, 'missing_count': 1, 'events': [{'owned_ordinal': 1, 'mapping_state': 'NO_EVENT_MAPPING'}], 'truncated': False},
+        {'round': 2, 'missing_count': 1, 'events': [{'owned_ordinal': 1, 'mapping_state': 'ONLY_INACTIVE_EVENT_MAPPINGS'}], 'truncated': False},
+    ]
+    assert event_id not in str(lines) and 'secret response text' not in str(lines)
+
+
+def test_malformed_rejection_details_fail_closed():
+    exc = cli.B13WindowGenerationExhaustedError(
+        window_id='secret window', request_identity='secret id', rounds_attempted=2,
+        failures=(cli._MISSING_MAPPING_REASON, cli._MISSING_MAPPING_REASON),
+        rejection_details=(cli._MissingMappingDetail(1, ((1, 'secret source id'),), False), 'secret response'))
+    details = cli._semantic_rejection_details(exc)
+    assert details == [{'round': n, 'missing_count': None, 'events': [], 'status': 'UNKNOWN'} for n in (1, 2)]
+    assert 'secret' not in str(details)
+
+
 def test_untrusted_semantic_diagnostics_do_not_leak(setup_cli, capsys, monkeypatch):
     _, _, _, _, args = setup_cli
     def fail(**_):

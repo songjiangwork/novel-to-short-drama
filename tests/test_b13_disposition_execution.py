@@ -367,6 +367,51 @@ def _allow_synthetic_two_window_preflight(monkeypatch, two):
     monkeypatch.setattr(execution_module, "_revalidate_authority", lambda *_args: None)
 
 
+def test_missing_mapping_details_are_separate_for_two_rounds(tmp_path, monkeypatch):
+    import short_drama.adaptation.disposition_execution as execution
+
+    tree, two, _requests, _budgets, runtime, first, _second = _two_window_inputs(tmp_path)
+    value = first.to_dict()
+    value['window']['owned_event_refs'] = ['evt_000001', 'evt_000002']
+    value['owned_source_events'] = [
+        {'event_id': 'evt_000001', 'narrative_order': 1},
+        {'event_id': 'evt_000002', 'narrative_order': 2},
+    ]
+    packet = B13DispositionWindowPacket(first.source_snapshot, first.strategy_selection,
+                                        first.window_id, first.window_ordinal, canonical_json_bytes(value))
+    semantic = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
+    first_response, second_response = _proposal(packet), _proposal(packet)
+    first_response['adaptation_mappings'].pop(0)
+    second_response['adaptation_mappings'][1]['active'] = False
+    fake = _FakeClient([(first_response, False), (second_response, False)], runtime)
+    monkeypatch.setattr(execution, '_revalidate_authority', lambda *_: None)
+    with pytest.raises(B13WindowGenerationExhaustedError) as caught:
+        execution._execute_one_b13_window(
+            store=tree.store, pointers=tree.pointers, preparation=two, semantic=semantic,
+            budget=B13WindowSemanticBudget(runtime.request_model, 1_000_000, 1_000_000),
+            runtime_config=runtime, llm_client=fake,
+            policy=execution.B13WindowSemanticGenerationPolicy())
+    assert caught.value.rejection_details == (
+        execution._MissingMappingDetail(1, ((1, 'NO_EVENT_MAPPING'),), False),
+        execution._MissingMappingDetail(1, ((2, 'ONLY_INACTIVE_EVENT_MAPPINGS'),), False),
+    )
+    assert execution._missing_mapping_detail(packet, _proposal(packet), semantic.output_schema) is None
+    assert execution._missing_mapping_detail(packet, {'secret': 'response'}, semantic.output_schema) is None
+
+    # A schema-valid synthetic oversized failure is bounded without exposing IDs.
+    from types import SimpleNamespace
+    ids = [f'evt_{i:06d}' for i in range(1, 35)]
+    large = _proposal(packet)
+    large['event_dispositions'] = [
+        {'source_event_id': event_id, 'disposition': 'keep', 'rationale_zh': 'test'} for event_id in ids
+    ]
+    large['adapted_story_beats'] = []
+    large['adaptation_mappings'] = []
+    synthetic_packet = SimpleNamespace(to_dict=lambda: {'window': {'owned_event_refs': ids}})
+    detail = execution._missing_mapping_detail(synthetic_packet, large, semantic.output_schema)
+    assert detail.missing_count == 34 and len(detail.events) == 32 and detail.truncated
+
+
 def test_multiple_in_memory_windows_execute_in_deterministic_ordinal_order(tmp_path, monkeypatch):
     """The executor serializes all preflight-approved windows by ordinal."""
     tree, two, requests, budgets, runtime, first, second = _two_window_inputs(tmp_path)

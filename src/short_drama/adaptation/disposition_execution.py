@@ -12,7 +12,7 @@ from short_drama.artifacts import FileArtifactStore
 from short_drama.foundation import FilePointerStore
 from short_drama.llm import (
     GenerationExecutionOptions, LLMClient, LLMInvocationProvenance,
-    RuntimeConfig,
+    RuntimeConfig, validate_against_output_schema,
 )
 from short_drama.story.chunking import estimate_tokens
 
@@ -30,6 +30,60 @@ from .target import AdaptationSourceSnapshot
 
 
 B13_MAX_SEMANTIC_GENERATION_ROUNDS = 2
+_MISSING_MAPPING_REASON = "kept/compressed/merged owned event requires an active mapping candidate"
+_MAX_DIAGNOSTIC_OWNED = 1024
+_MAX_DIAGNOSTIC_MAPPINGS = 8192
+_MAX_DIAGNOSTIC_EVENTS = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _MissingMappingDetail:
+    """Bounded transient counts and ordinal states, never source identifiers."""
+    missing_count: int | None
+    events: tuple[tuple[int, str], ...]
+    truncated: bool
+
+
+def _missing_mapping_detail(packet, proposal, schema):
+    """Return safe detail only for schema-valid candidates, otherwise no detail."""
+    try:
+        validate_against_output_schema(proposal, schema)
+    except Exception:
+        return None
+    unknown = _MissingMappingDetail(None, (), False)
+    try:
+        owned = packet.to_dict()['window']['owned_event_refs']
+        decisions = proposal['event_dispositions']
+        mappings = proposal['adaptation_mappings']
+        if (type(owned) is not list or not 0 < len(owned) <= _MAX_DIAGNOSTIC_OWNED
+                or len(set(owned)) != len(owned) or any(type(x) is not str for x in owned)
+                or type(decisions) is not list or len(decisions) != len(owned)
+                or type(mappings) is not list or len(mappings) > _MAX_DIAGNOSTIC_MAPPINGS):
+            return unknown
+        disposition = {}
+        for item in decisions:
+            event_id, value = item['source_event_id'], item['disposition']
+            if type(event_id) is not str or event_id not in owned or event_id in disposition or value not in ('keep', 'compress', 'merge_member', 'omit'):
+                return unknown
+            disposition[event_id] = value
+        states = {event_id: [] for event_id in owned}
+        for item in mappings:
+            ref, active = item['source_ref'], item['active']
+            if type(ref) is not dict or type(ref.get('kind')) is not str or type(ref.get('canonical_id')) is not str or type(active) is not bool:
+                return unknown
+            if ref['kind'] == 'event' and ref['canonical_id'] in states:
+                states[ref['canonical_id']].append(active)
+        missing = []
+        for ordinal, event_id in enumerate(owned, 1):
+            if disposition[event_id] != 'omit' and not any(states[event_id]):
+                state = 'ONLY_INACTIVE_EVENT_MAPPINGS' if states[event_id] else 'NO_EVENT_MAPPING'
+                missing.append((ordinal, state))
+        if not missing:
+            return None
+        return _MissingMappingDetail(len(missing), tuple(missing[:_MAX_DIAGNOSTIC_EVENTS]),
+                                     len(missing) > _MAX_DIAGNOSTIC_EVENTS)
+    except Exception:
+        return unknown
 
 
 class B13WindowExecutionError(B13PreparationError):
@@ -49,12 +103,13 @@ class B13WindowGenerationExhaustedError(B13WindowExecutionError):
 
     def __init__(
         self, *, window_id: str, request_identity: str, rounds_attempted: int,
-        failures: tuple[str, ...],
+        failures: tuple[str, ...], rejection_details: tuple = (),
     ) -> None:
         self.window_id = window_id
         self.request_identity = request_identity
         self.rounds_attempted = rounds_attempted
         self.failures = failures
+        self.rejection_details = rejection_details
         super().__init__(
             f"B1.3 semantic generation exhausted after {rounds_attempted} rounds "
             f"for window {window_id!r} ({request_identity}): {'; '.join(failures)}"
@@ -404,6 +459,7 @@ def _execute_one_b13_window(
     """
     retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
     failures: list[str] = []
+    rejection_details = []
     rejected_rounds: list[B13WindowRejectedSemanticRound] = []
     cumulative_provider_attempts = 0
     for round_number in range(1, policy.max_rounds + 1):
@@ -424,6 +480,10 @@ def _execute_one_b13_window(
         except B13WindowProposalError as exc:
             diagnostic = str(exc)[:500]
             failures.append(diagnostic)
+            detail = None
+            if diagnostic == _MISSING_MAPPING_REASON:
+                detail = _missing_mapping_detail(semantic.packet, result.parsed_json, semantic.output_schema)
+            rejection_details.append(detail)
             rejected_rounds.append(B13WindowRejectedSemanticRound(
                 semantic_round=round_number,
                 provider_attempts=round_provider_attempts,
@@ -465,6 +525,7 @@ def _execute_one_b13_window(
             window_id=semantic.packet.window_id,
             request_identity=semantic.request_identity,
             rounds_attempted=policy.max_rounds, failures=tuple(failures),
+            rejection_details=tuple(rejection_details),
         )
 
 

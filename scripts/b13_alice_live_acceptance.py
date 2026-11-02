@@ -21,6 +21,8 @@ from short_drama.adaptation.disposition_checkpoint import encode_checkpoint
 from short_drama.adaptation.disposition_execution import (
     B13WindowSemanticGenerationPolicy, B13WindowAuthorityError,
     B13WindowProvenanceError, B13WindowGenerationExhaustedError,
+    _MissingMappingDetail, _MISSING_MAPPING_REASON, _MAX_DIAGNOSTIC_OWNED,
+    _MAX_DIAGNOSTIC_EVENTS,
 )
 from short_drama.adaptation.disposition_semantic import B13WindowSchemaError
 from short_drama.adaptation.disposition_checkpoint_storage import B13CheckpointStorageError
@@ -111,6 +113,44 @@ def _semantic_rejection_reasons(exc):
         return ['UNKNOWN_SEMANTIC_REJECTION', 'UNKNOWN_SEMANTIC_REJECTION']
     return [reason if type(reason) is str and reason in _SAFE_SEMANTIC_REASONS
             else 'UNKNOWN_SEMANTIC_REJECTION' for reason in exc.failures]
+
+
+def _semantic_rejection_details(exc):
+    """Emit only bounded, validated ordinal diagnostics for the exact rule."""
+    exc = _unwrap_failure(exc)
+    if (not isinstance(exc, B13WindowGenerationExhaustedError)
+            or type(exc.rounds_attempted) is not int or exc.rounds_attempted != 2
+            or type(exc.failures) is not tuple or len(exc.failures) != 2
+            or type(exc.rejection_details) is not tuple or len(exc.rejection_details) != 2):
+        return []
+    output = []
+    for index, (reason, detail) in enumerate(zip(exc.failures, exc.rejection_details), 1):
+        if type(reason) is not str or reason != _MISSING_MAPPING_REASON or detail is None:
+            continue
+        unknown = {'round': index, 'missing_count': None, 'events': [], 'status': 'UNKNOWN'}
+        if type(detail) is not _MissingMappingDetail:
+            output.append(unknown)
+            continue
+        count, events, truncated = detail.missing_count, detail.events, detail.truncated
+        valid = (type(count) is int and 1 <= count <= _MAX_DIAGNOSTIC_OWNED
+                 and type(events) is tuple and len(events) <= _MAX_DIAGNOSTIC_EVENTS
+                 and type(truncated) is bool and count >= len(events)
+                 and truncated == (count > len(events)))
+        safe_events = []
+        previous = 0
+        if valid:
+            for event in events:
+                if (type(event) is not tuple or len(event) != 2
+                        or type(event[0]) is not int or not previous < event[0] <= _MAX_DIAGNOSTIC_OWNED
+                        or type(event[1]) is not str
+                        or event[1] not in ('NO_EVENT_MAPPING', 'ONLY_INACTIVE_EVENT_MAPPINGS', 'UNKNOWN')):
+                    valid = False
+                    break
+                previous = event[0]
+                safe_events.append({'owned_ordinal': event[0], 'mapping_state': event[1]})
+        output.append({'round': index, 'missing_count': count, 'events': safe_events,
+                       'truncated': truncated} if valid else unknown)
+    return output
 
 
 def _failure_code(exc, phase):
@@ -257,6 +297,9 @@ def main(argv=None):
         reasons = _semantic_rejection_reasons(exc)
         if reasons is not None:
             summary['semantic_rejection_reasons'] = reasons
+        details = _semantic_rejection_details(exc)
+        if details:
+            summary['semantic_rejection_details'] = details
         if live_started:
             summary.update(generated_count=None, semantic_rounds=None, observed_provider_attempts=None)
     print(json.dumps(summary, sort_keys=True), flush=True)

@@ -472,6 +472,26 @@ def b13_window_request_identity(*, packet: B13DispositionWindowPacket, profile: 
     })
 
 
+def build_b13_window_request(packet: B13DispositionWindowPacket, *, prompts: PromptRegistry | None = None, semantic_asset_version: int = 1, semantic_profile: SemanticLLMProfile | None = None, output_schema: OutputSchema | None = None, prompt_version: int = 3) -> StructuredGenerationRequest:
+    """Rebuild pinned semantic request without a runtime or Provider.
+
+    Callers must independently verify the historical packet's authority. This
+    does not establish live authority, capacity, or Provider identity.
+    """
+    if not isinstance(packet, B13DispositionWindowPacket):
+        raise B13WindowSemanticError("B1.3 window semantic preparation requires B13DispositionWindowPacket")
+    if type(prompt_version) is not int or prompt_version < 1:
+        raise B13WindowSemanticError("unsupported B1.3 historical prompt version")
+    assets = _resolve_assets(semantic_asset_version, semantic_profile, output_schema)
+    prompts = PromptRegistry(B13_WINDOW_PROMPTS_DIR) if prompts is None else prompts
+    prompt = prompts.load(B13_WINDOW_PROMPT_ID, version=prompt_version)
+    if prompt.content_hash != B13_WINDOW_PROMPT_CONTENT_HASH_V3:
+        raise B13WindowSemanticError("B1.3 window prompt content hash does not match pinned v3 asset")
+    rendered = prompt.render({"window_packet_json": packet.canonical_bytes().decode("utf-8")})
+    return build_structured_request(rendered_prompt=rendered, output_schema=assets.output_schema,
+                                    semantic_profile=assets.semantic_profile)
+
+
 def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *, prompts: PromptRegistry | None = None, semantic_asset_version: int = 1, semantic_profile: SemanticLLMProfile | None = None, output_schema: OutputSchema | None = None, runtime_config: RuntimeConfig | None = None, execution_options: GenerationExecutionOptions | None = None) -> B13WindowSemanticPreparation:
     if not isinstance(packet, B13DispositionWindowPacket):
         raise B13WindowSemanticError("B1.3 window semantic preparation requires B13DispositionWindowPacket")
@@ -479,18 +499,13 @@ def build_b13_window_semantic_preparation(packet: B13DispositionWindowPacket, *,
         raise B13WindowSemanticError("B1.3 window semantic preparation requires an explicit exact RuntimeConfig")
     if execution_options is not None and not isinstance(execution_options, GenerationExecutionOptions):
         raise B13WindowSemanticError("B1.3 execution_options must be GenerationExecutionOptions or None")
-    assets = _resolve_assets(semantic_asset_version, semantic_profile, output_schema)
-    prompts = PromptRegistry(B13_WINDOW_PROMPTS_DIR) if prompts is None else prompts
-    prompt = prompts.load(B13_WINDOW_PROMPT_ID, version=B13_WINDOW_PROMPT_VERSION)
-    if prompt.content_hash != B13_WINDOW_PROMPT_CONTENT_HASH_V3:
-        raise B13WindowSemanticError(
-            "B1.3 window prompt content hash does not match pinned v3 asset"
-        )
-    rendered = prompt.render({"window_packet_json": packet.canonical_bytes().decode("utf-8")})
-    request = build_structured_request(rendered_prompt=rendered, output_schema=assets.output_schema, semantic_profile=assets.semantic_profile)
+    request = build_b13_window_request(packet, prompts=prompts, semantic_asset_version=semantic_asset_version,
+                                       semantic_profile=semantic_profile, output_schema=output_schema,
+                                       prompt_version=B13_WINDOW_PROMPT_VERSION)
+    profile, schema = request.semantic_profile, request.output_schema
     provider_bytes = _mapped_provider_request_bytes(request, runtime_config, execution_options)
-    measurement = B13WindowSemanticMeasurement(len(packet.canonical_bytes()), estimate_tokens(packet.canonical_bytes().decode("utf-8")), len(provider_bytes), estimate_tokens(provider_bytes.decode("utf-8")), assets.semantic_profile.max_output_tokens)
-    return B13WindowSemanticPreparation(packet, assets.semantic_profile, assets.output_schema, request, runtime_config, execution_options, provider_bytes, measurement, b13_window_request_identity(packet=packet, profile=assets.semantic_profile, schema=assets.output_schema, request=request))
+    measurement = B13WindowSemanticMeasurement(len(packet.canonical_bytes()), estimate_tokens(packet.canonical_bytes().decode("utf-8")), len(provider_bytes), estimate_tokens(provider_bytes.decode("utf-8")), profile.max_output_tokens)
+    return B13WindowSemanticPreparation(packet, profile, schema, request, runtime_config, execution_options, provider_bytes, measurement, b13_window_request_identity(packet=packet, profile=profile, schema=schema, request=request))
 
 
 __all__ = [
@@ -500,5 +515,5 @@ __all__ = [
     "B13WindowSemanticBudgetError", "B13WindowSemanticAssetSelection",
     "B13WindowProposal", "B13WindowSemanticBudget", "B13WindowSemanticMeasurement",
     "B13WindowSemanticPreparation", "load_b13_window_semantic_assets",
-    "b13_window_request_identity", "build_b13_window_semantic_preparation",
+    "b13_window_request_identity", "build_b13_window_request", "build_b13_window_semantic_preparation",
 ]

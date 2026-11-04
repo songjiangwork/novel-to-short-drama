@@ -39,7 +39,9 @@ class FeedbackEvidenceLimits:
 def _rebuild(session, window_id):
     prep, semantics, runtime = _trusted_session(session)
     packet, semantic = _locate_window(prep, semantics, window_id)
-    rebuilt = build_b13_window_semantic_preparation(packet, runtime_config=runtime)
+    rebuilt = build_b13_window_semantic_preparation(
+        packet, runtime_config=runtime, execution_options=semantic.execution_options,
+    )
     if semantic != rebuilt:
         raise ValueError
     return prep, packet, rebuilt, runtime

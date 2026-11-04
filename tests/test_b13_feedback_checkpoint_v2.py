@@ -17,6 +17,7 @@ from short_drama.adaptation import B13DispositionWindowPacket, build_b13_window_
 from short_drama.adaptation.disposition_feedback import B13FeedbackError, build_feedback_request
 import short_drama.adaptation.disposition_feedback as feedback_module
 from short_drama.artifacts import canonical_json_bytes, content_hash, strict_json_loads
+from short_drama.llm import GenerationExecutionOptions
 from test_b13_disposition_checkpoint import _accepted, _fixture, _provenance
 from test_b13_disposition_execution import _two_window_inputs
 from test_b13_window_semantic import _proposal
@@ -73,6 +74,30 @@ def test_offline_round_trip_has_independent_requests_and_bound_carrier(case):
     with pytest.raises(B13WindowExecutionError):
         replace(accepted, proposal=_accepted(packet, semantic, session.runtime_config).proposal,
                 request_identity='0' * 64)
+
+
+def test_rebuild_preserves_bound_execution_options(case):
+    session, packet, original, kwargs, _raw = case
+    options = GenerationExecutionOptions(prompt_context_reuse='disabled')
+    semantic = build_b13_window_semantic_preparation(
+        packet, runtime_config=session.runtime_config, execution_options=options,
+    )
+    assert semantic.request_identity == original.request_identity
+    assert semantic.provider_request_bytes != original.provider_request_bytes
+    assert semantic.request.request_hash == original.request.request_hash
+    session = replace(session, semantic_preparations=(semantic,))
+    feedback = build_feedback_request(semantic, kwargs['rejected_candidate'])
+    feedback_semantic = SimpleNamespace(
+        request=feedback.request, semantic_profile=semantic.semantic_profile,
+        output_schema=semantic.output_schema,
+    )
+    updated = {**kwargs, 'session': session,
+               'first_provenance': _provenance(semantic, session.runtime_config),
+               'second_provenance': _provenance(feedback_semantic, session.runtime_config)}
+    raw = encode_feedback_checkpoint_v2(**updated)
+    accepted = verify_and_decode_feedback_checkpoint_v2(raw, session)
+    assert accepted.request_identity == semantic.request_identity
+    assert encode_verified_feedback_checkpoint_v2(accepted, session) == raw
 
 
 def test_tampering_and_limits_fail_closed_without_content_leak(case):

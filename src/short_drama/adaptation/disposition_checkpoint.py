@@ -193,6 +193,8 @@ def _accepted_to_payload(accepted: B13WindowAcceptedProposal, preparation: B13Di
 
 def encode_checkpoint(accepted: B13WindowAcceptedProposal, session: Any) -> bytes:
     """Canonicalize one accepted B1.3 window bound to its trusted session."""
+    if accepted.feedback_evidence is not None:
+        raise B13CheckpointEvidenceError("v1 codec cannot encode feedback evidence")
     preparation, semantic_preparations, _runtime = _trusted_session(session)
     packet, semantic = _locate_window(preparation, semantic_preparations, accepted.window_id)
     if (packet.window_ordinal != accepted.window_ordinal

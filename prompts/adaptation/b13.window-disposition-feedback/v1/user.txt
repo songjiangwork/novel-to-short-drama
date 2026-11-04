@@ -1,0 +1,9 @@
+{{base_user}}
+
+以下为首轮完整候选：
+{{candidate_json}}
+
+下列是确定性语义校验反馈：
+{{feedback_json}}
+
+请输出完整修正后的 JSON，而非补丁。每个非 omit owned event 都须具有符合来源叙事的 active event mapping，目标 beat 必须存在并引用该事件；必要时自行调整 beat 和 mapping，使完整结果满足所有原有约束。不得虚构 source event、为通过校验随意改成 omit，或添加缺乏叙事依据的 mapping。retained/transformed semantics 和 provenance 由你依据来源填写。

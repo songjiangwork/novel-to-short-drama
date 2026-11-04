@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -241,6 +242,31 @@ def _write_all(fd: int, raw: bytes) -> None:
         view = view[written:]
 
 
+@contextmanager
+def _staged_checkpoint(target: Path, raw: bytes):
+    """Stage bytes in the target directory; the caller owns validation/publish.
+
+    This private primitive is not a checkpoint save API or authorization.
+    """
+    temporary: Path | None = None
+    try:
+        fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        temporary = Path(name)
+        try:
+            os.fchmod(fd, 0o600)
+            _write_all(fd, raw)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        yield temporary
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _existing_matches(path: Path, raw: bytes, session: Any) -> bool:
     try:
         existing = _read_bounded(path)
@@ -271,38 +297,24 @@ def save_checkpoint(root: Path | str | os.PathLike[str], accepted: B13WindowAcce
             _reject_other_window_checkpoint(target)
             return target
         _fail("conflicting checkpoint already exists")
-    temporary: Path | None = None
     try:
-        fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-        temporary = Path(name)
-        try:
-            os.fchmod(fd, 0o600)
-            _write_all(fd, raw)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        try:
-            _reject_other_window_checkpoint(target)
-            os.link(temporary, target)
-        except FileExistsError:
-            if _existing_matches(target, raw, session):
-                _fsync_directory(target.parent)
+        with _staged_checkpoint(target, raw) as temporary:
+            try:
                 _reject_other_window_checkpoint(target)
-                return target
-            _fail("conflicting checkpoint appeared during atomic publish")
-        _fsync_directory(target.parent)
-        _reject_other_window_checkpoint(target)
-        return target
+                os.link(temporary, target)
+            except FileExistsError:
+                if _existing_matches(target, raw, session):
+                    _fsync_directory(target.parent)
+                    _reject_other_window_checkpoint(target)
+                    return target
+                _fail("conflicting checkpoint appeared during atomic publish")
+            _fsync_directory(target.parent)
+            _reject_other_window_checkpoint(target)
+            return target
     except B13CheckpointStorageError:
         raise
     except OSError as exc:
         _fail("cannot atomically persist checkpoint", exc)
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id: str) -> B13WindowAcceptedProposal | None:

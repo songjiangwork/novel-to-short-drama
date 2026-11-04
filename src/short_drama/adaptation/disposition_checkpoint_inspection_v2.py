@@ -1,11 +1,15 @@
 """Experimental read-only v1/v2 conflict inspection; not wired to the runner.
 
-Older readers are unaware of v2. Production rollout must first gate all writers
-and integrate version-aware inspection; this helper cannot make them safe.
+Older readers are unaware of v2. Before any production rollout, stop all old
+writers, fence their access, complete version cutover, and under the original
+execution guard revalidate roots, authority, claims and every checkpoint. A
+directory scan is not an atomic snapshot and cannot constrain old processes.
+This helper neither enables v2 writes nor supplies dispatch authorization.
 """
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 from . import disposition_checkpoint_storage as storage
@@ -28,10 +32,14 @@ def inspect_checkpoint_versions_offline(root, session, window_id):
         directory = storage._root(root, create=False)
         if directory is None:
             return None
-        marker = f'-p{preparation}-w{ordinal:08d}'
-        candidates = [name for name in os.listdir(directory)
-                      if name.startswith('b13-checkpoint-') and marker in name]
+        root_before = os.stat(directory, follow_symlinks=False)
+        if not stat.S_ISDIR(root_before.st_mode):
+            raise ValueError
+        candidates = storage._related_checkpoint_names(directory, preparation, ordinal)
         if not candidates:
+            if (storage._related_checkpoint_names(directory, preparation, ordinal) != candidates
+                    or not storage._stable_file(root_before, os.stat(directory, follow_symlinks=False))):
+                raise ValueError
             return None
         if len(candidates) != 1:
             raise ValueError
@@ -39,9 +47,21 @@ def inspect_checkpoint_versions_offline(root, session, window_id):
         suffix = f'-p{preparation}-w{ordinal:08d}-q{request}.json'
         if name not in (f'b13-checkpoint-v1{suffix}', f'b13-checkpoint-v2{suffix}'):
             raise ValueError
-        raw = storage._read_bounded(Path(directory) / name)
+        path = Path(directory) / name
+        before = storage._target_stat(path)
+        raw = storage._read_bounded(path)
         if name.startswith('b13-checkpoint-v1-'):
-            return verify_and_decode_checkpoint(raw, session)
-        return verify_and_decode_feedback_checkpoint_v2(raw, session)
+            accepted = verify_and_decode_checkpoint(raw, session)
+        else:
+            accepted = verify_and_decode_feedback_checkpoint_v2(raw, session)
+        if (accepted.window_id != window_id or accepted.window_ordinal != ordinal
+                or accepted.request_identity != request):
+            raise ValueError
+        after = storage._target_stat(path)
+        if (before is None or after is None or not storage._stable_file(before, after)
+                or storage._related_checkpoint_names(directory, preparation, ordinal) != candidates
+                or not storage._stable_file(root_before, os.stat(directory, follow_symlinks=False))):
+            raise ValueError
+        return accepted
     except Exception:
         raise B13OfflineCheckpointConflict('checkpoint evidence is invalid or conflicts') from None

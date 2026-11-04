@@ -119,15 +119,33 @@ def _checkpoint_name(session: Any, window_id: str) -> str:
     return f"{_FILE_PREFIX}-p{preparation}-w{ordinal:08d}-q{request}.json"
 
 
-def _reject_other_window_checkpoint(target: Path) -> None:
-    # A different request for this preparation/window is not an absent
-    # checkpoint: it needs separate review, never silent v1/v2 mixing.
-    prefix = target.name.rsplit("-q", 1)[0] + "-q"
+def _related_checkpoint_names(directory: Path, preparation: str, ordinal: int) -> tuple[str, ...]:
+    """Find all attributable version namespaces, including malformed names.
+
+    This is a point-in-time observation, not a lock against older writers.
+    """
+    marker = f"-p{preparation}-w{ordinal:08d}"
     try:
-        if any(name.startswith(prefix) and name != target.name for name in os.listdir(target.parent)):
-            _fail("checkpoint for another request exists for this window")
+        return tuple(sorted(name for name in os.listdir(directory)
+                            if name.startswith("b13-checkpoint-") and marker in name))
     except OSError as exc:
         _fail("cannot inspect checkpoint directory", exc)
+
+
+def _reject_other_window_checkpoint(target: Path) -> None:
+    # Never treat another version or request for the same window as absent.
+    try:
+        name = target.name
+        if not name.startswith(_FILE_PREFIX + "-p"):
+            raise ValueError
+        preparation, rest = name[len(_FILE_PREFIX + "-p"):].split("-w", 1)
+        ordinal = int(rest.split("-q", 1)[0])
+        if _HASH.fullmatch(preparation) is None:
+            raise ValueError
+        if any(item != name for item in _related_checkpoint_names(target.parent, preparation, ordinal)):
+            _fail("checkpoint for another request exists for this window")
+    except (ValueError, IndexError):
+        _fail("invalid checkpoint target identity")
 
 
 def _target_stat(path: Path, *, missing_ok: bool = False) -> os.stat_result | None:
@@ -185,6 +203,9 @@ def _read_bounded(path: Path) -> bytes:
         after = os.fstat(fd)
         if not _stable_file(opened, after):
             _fail("checkpoint file changed while being read")
+        named = _target_stat(path)
+        if named is None or not _stable_file(after, named):
+            _fail("checkpoint target changed while being read")
         return b"".join(parts)
     except OSError as exc:
         _fail(f"cannot read checkpoint file: {path}", exc)
@@ -247,6 +268,7 @@ def save_checkpoint(root: Path | str | os.PathLike[str], accepted: B13WindowAcce
     if _target_stat(target, missing_ok=True) is not None:
         if _existing_matches(target, raw, session):
             _fsync_directory(target.parent)
+            _reject_other_window_checkpoint(target)
             return target
         _fail("conflicting checkpoint already exists")
     temporary: Path | None = None
@@ -260,13 +282,16 @@ def save_checkpoint(root: Path | str | os.PathLike[str], accepted: B13WindowAcce
         finally:
             os.close(fd)
         try:
+            _reject_other_window_checkpoint(target)
             os.link(temporary, target)
         except FileExistsError:
             if _existing_matches(target, raw, session):
                 _fsync_directory(target.parent)
+                _reject_other_window_checkpoint(target)
                 return target
             _fail("conflicting checkpoint appeared during atomic publish")
         _fsync_directory(target.parent)
+        _reject_other_window_checkpoint(target)
         return target
     except B13CheckpointStorageError:
         raise
@@ -289,19 +314,33 @@ def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id
     # Do not call checkpoint_path here: it may recreate a root removed after
     # the read-only root check. Loading must never create filesystem objects.
     target = directory / _checkpoint_name(session, window_id)
+    root_before = os.stat(directory, follow_symlinks=False)
+    if not stat.S_ISDIR(root_before.st_mode):
+        _fail("checkpoint root changed during inspection")
     _reject_other_window_checkpoint(target)
-    if _target_stat(target, missing_ok=True) is None:
+    before = _target_stat(target, missing_ok=True)
+    if before is None:
         # A root that vanished after inspection is not an ordinary cache miss.
         if _root(directory, create=False) is None:
             _fail("checkpoint root disappeared during load")
+        _reject_other_window_checkpoint(target)
+        if (_target_stat(target, missing_ok=True) is not None
+                or not _stable_file(root_before, os.stat(directory, follow_symlinks=False))):
+            _fail("checkpoint appeared during inspection")
         return None
     raw = _read_bounded(target)
+    _reject_other_window_checkpoint(target)
     try:
         decoded = evidence.verify_and_decode_checkpoint(raw, session)
     except evidence.B13CheckpointEvidenceError:
         raise
     if decoded.window_id != window_id:
         _fail("checkpoint decoded to a different window")
+    after = _target_stat(target)
+    if (after is None or not _stable_file(before, after)
+            or not _stable_file(root_before, os.stat(directory, follow_symlinks=False))):
+        _fail("checkpoint changed during verification")
+    _reject_other_window_checkpoint(target)
     return decoded
 
 

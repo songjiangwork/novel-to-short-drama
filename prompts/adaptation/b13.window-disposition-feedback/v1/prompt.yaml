@@ -1,0 +1,5 @@
+schema_version: 1
+prompt_id: b13.window-disposition-feedback
+version: 1
+required_variables: [base_system, base_user, candidate_json, feedback_json]
+content_hash: 4522394c7618b88e7c6149a9971d70951f7a915d1ea7940b1dcf5c5b6cefcfa9

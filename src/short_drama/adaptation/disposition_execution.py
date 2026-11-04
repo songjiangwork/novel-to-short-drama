@@ -27,6 +27,7 @@ from .disposition_semantic import (
     build_b13_window_semantic_preparation,
 )
 from .target import AdaptationSourceSnapshot
+from .disposition_feedback_evidence import VerifiedFeedbackEvidenceV2
 
 
 B13_MAX_SEMANTIC_GENERATION_ROUNDS = 2
@@ -176,6 +177,7 @@ class B13WindowAcceptedProposal:
     semantic_failures: tuple[str, ...]
     rejected_semantic_rounds: tuple[B13WindowRejectedSemanticRound, ...]
     proposal: B13WindowProposal
+    feedback_evidence: VerifiedFeedbackEvidenceV2 | None = None
 
     def __post_init__(self) -> None:
         if (not isinstance(self.window_id, str) or not self.window_id
@@ -208,6 +210,14 @@ class B13WindowAcceptedProposal:
         if (self.proposal.packet.window_id != self.window_id
                 or self.proposal.packet.window_ordinal != self.window_ordinal):
             raise B13WindowExecutionError("accepted proposal/window identity mismatch")
+        if self.feedback_evidence is not None and not isinstance(self.feedback_evidence, VerifiedFeedbackEvidenceV2):
+            raise B13WindowExecutionError("invalid feedback evidence carrier")
+        if self.invocation_provenance.request_hash != self.semantic_request_hash and self.feedback_evidence is None:
+            raise B13WindowExecutionError("different-request acceptance requires feedback evidence")
+        if self.invocation_provenance.request_hash == self.semantic_request_hash and self.feedback_evidence is not None:
+            raise B13WindowExecutionError("same-request acceptance cannot carry feedback evidence")
+        if self.feedback_evidence is not None and not self.feedback_evidence.matches(self):
+            raise B13WindowExecutionError("feedback evidence does not match accepted proposal")
 
 
 @dataclass(frozen=True, slots=True)

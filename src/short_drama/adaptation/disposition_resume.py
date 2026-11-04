@@ -82,13 +82,7 @@ def _verify(store, pointers, session):
     return preparation, semantics
 
 
-def plan_b13_resume(*, store, pointers, session, checkpoint_root: Path | str) -> B13ResumePlan:
-    """Build a complete plan from declared evidence, not standalone authorization.
-
-    Fresh runtime discovery cannot be established by this lower-level API.
-    The pre- and post-read checks are verification boundaries, not atomic
-    snapshots and cannot detect unobservable ABA changes.
-    """
+def _plan_b13_resume(*, store, pointers, session, checkpoint_root, loader) -> B13ResumePlan:
     try:
         preparation, semantics = _verify(store, pointers, session)
         session_evidence = (session.runtime_config, tuple(session.budgets), session.preflight_verdict,
@@ -96,7 +90,7 @@ def plan_b13_resume(*, store, pointers, session, checkpoint_root: Path | str) ->
                             session.strategy_ref, tuple(session.window_evidence))
         windows = []
         for packet, semantic in zip(preparation.packets, semantics):
-            accepted = load_checkpoint(checkpoint_root, session, packet.window_id)
+            accepted = loader(checkpoint_root, session, packet.window_id)
             decision = (B13ResumeDecision.NEEDS_GENERATION if accepted is None
                         else B13ResumeDecision.VERIFIED_REUSE)
             windows.append(B13ResumeWindow(packet.window_id, packet.window_ordinal,
@@ -114,3 +108,20 @@ def plan_b13_resume(*, store, pointers, session, checkpoint_root: Path | str) ->
         raise
     except Exception as exc:
         raise B13ResumeError("resume verification failed") from exc
+
+
+def plan_b13_resume(*, store, pointers, session, checkpoint_root: Path | str) -> B13ResumePlan:
+    """Plan v1 reuse only; this is neither authorization nor an atomic snapshot."""
+    return _plan_b13_resume(store=store, pointers=pointers, session=session,
+                            checkpoint_root=checkpoint_root, loader=load_checkpoint)
+
+
+def inspect_b13_resume_versions(*, store, pointers, session, checkpoint_root: Path | str) -> B13ResumePlan:
+    """Unratified v1/v2 read-only inspection; never enables dispatch or writes.
+
+    Callers must establish fresh runtime evidence. Scans are not atomic;
+    legacy writers must be stopped and access fenced before any rollout.
+    """
+    from .disposition_checkpoint_inspection_v2 import inspect_checkpoint_versions_offline
+    return _plan_b13_resume(store=store, pointers=pointers, session=session,
+                            checkpoint_root=checkpoint_root, loader=inspect_checkpoint_versions_offline)

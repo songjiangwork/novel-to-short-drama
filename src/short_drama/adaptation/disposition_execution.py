@@ -5,7 +5,7 @@ creates adapted identities, persists a proposal, or advances a pointer.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from short_drama.artifacts import FileArtifactStore
@@ -459,7 +459,7 @@ def _execute_one_b13_window(
     preparation: B13DispositionPreparation, semantic: B13WindowSemanticPreparation,
     budget: B13WindowSemanticBudget | None, runtime_config: RuntimeConfig,
     llm_client: LLMClient, policy: B13WindowSemanticGenerationPolicy,
-    _synthetic_feedback=None,
+    _feedback_session=None, _feedback_tokenizer=None,
 ) -> B13WindowAcceptedProposal:
     """Execute one window after the caller has authorized the complete batch.
 
@@ -468,8 +468,8 @@ def _execute_one_b13_window(
     budget and authority checks do not replace those prerequisites or authorize
     standalone or resumed execution.
 
-    The private _synthetic_feedback hook exists solely for fake-provider tests;
-    it is not passed by the production runner and conveys no live authority.
+    The private feedback parameters are used only by the offline test entry;
+    they do not authorize live execution or production candidate retention.
     """
     retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
     failures: list[str] = []
@@ -477,6 +477,7 @@ def _execute_one_b13_window(
     rejected_rounds: list[B13WindowRejectedSemanticRound] = []
     cumulative_provider_attempts = 0
     round_semantic = semantic
+    first_result = None
     for round_number in range(1, policy.max_rounds + 1):
         options = semantic.execution_options if round_number == 1 else retry_options
         _verify_budget(round_semantic, runtime_config, options, budget)
@@ -505,15 +506,43 @@ def _execute_one_b13_window(
                 invocation_provenance=result.provenance,
                 diagnostic=diagnostic,
             ))
-            if _synthetic_feedback is not None:
+            if _feedback_session is not None:
                 if round_number != 1 or diagnostic != _MISSING_MAPPING_REASON or policy.max_rounds < 2:
                     break
-                round_semantic = _synthetic_feedback.prepare(semantic, result, retry_options, budget)
+                from .disposition_feedback import build_feedback_request
+                from short_drama.artifacts import strict_json_loads
+
+                first_result = result
+                feedback = build_feedback_request(semantic, result.parsed_json)
+                body = _mapped_provider_request_bytes(feedback.request, runtime_config, retry_options)
+                measurement = replace(semantic.measurement, provider_request_bytes=len(body),
+                    provider_request_estimated_tokens=estimate_tokens(body.decode("utf-8")))
+                round_semantic = replace(semantic, request=feedback.request, execution_options=retry_options,
+                                         provider_request_bytes=body, measurement=measurement)
+                _verify_budget(round_semantic, runtime_config, retry_options, budget)
+                try:
+                    prompt = _feedback_tokenizer.apply_template(strict_json_loads(body)["messages"], add_generation_prompt=True)
+                    if not isinstance(prompt, str) or not prompt.strip():
+                        raise ValueError
+                    tokens = _feedback_tokenizer.tokenize(prompt)
+                    if (not isinstance(tokens, list) or not tokens
+                            or any(type(token) is not int for token in tokens)
+                            or len(tokens) > budget.input_ceiling_tokens
+                            or len(tokens) + semantic.semantic_profile.max_output_tokens > budget.model_context_tokens):
+                        raise ValueError
+                except Exception:
+                    raise B13WindowSemanticBudgetError("feedback tokenizer preflight failed") from None
             continue
         except B13WindowSchemaError:
             raise
-        if _synthetic_feedback is not None and round_number == 2:
-            return _synthetic_feedback.accept(semantic, result, rejected_rounds[0], proposal)
+        if _feedback_session is not None and round_number == 2:
+            from .disposition_checkpoint_v2 import encode_feedback_checkpoint_v2, verify_and_decode_feedback_checkpoint_v2
+
+            raw = encode_feedback_checkpoint_v2(session=_feedback_session, window_id=semantic.packet.window_id,
+                rejected_candidate=first_result.parsed_json, first_provenance=rejected_rounds[0].invocation_provenance,
+                first_attempts=rejected_rounds[0].provider_attempts, accepted_proposal=proposal.to_dict(),
+                second_provenance=result.provenance, second_attempts=round_provider_attempts)
+            return verify_and_decode_feedback_checkpoint_v2(raw, _feedback_session)
         return B13WindowAcceptedProposal(
             window_id=semantic.packet.window_id,
             window_ordinal=semantic.packet.window_ordinal,
@@ -547,6 +576,24 @@ def _execute_one_b13_window(
         rounds_attempted=len(failures), failures=tuple(failures),
         rejection_details=tuple(rejection_details),
     )
+
+
+def _execute_b13_feedback_for_test(*, store, pointers, session, llm_client, tokenizer):
+    """Synthetic-only internal entry; no claim, persistence, or live authorization."""
+    from .disposition_checkpoint import _trusted_session
+
+    preparation, semantics, runtime = _trusted_session(session)
+    if len(semantics) != 1 or not isinstance(llm_client, LLMClient) or tokenizer is None:
+        raise B13WindowExecutionError("synthetic feedback requires one window and a tokenizer")
+    budgets = tuple(session.budgets)
+    _verify_preflight(store=store, pointers=pointers, preparation=preparation,
+                      semantic_preparations=semantics, budgets=budgets, runtime=runtime)
+    _verify_client_runtime(llm_client, runtime)
+    accepted = _execute_one_b13_window(store=store, pointers=pointers, preparation=preparation,
+        semantic=semantics[0], budget=budgets[0], runtime_config=runtime, llm_client=llm_client,
+        policy=B13WindowSemanticGenerationPolicy(), _feedback_session=session, _feedback_tokenizer=tokenizer)
+    return B13DispositionExecutionResult(preparation.source_snapshot, preparation.strategy_selection,
+                                         preparation.preparation_identity, (accepted,))
 
 
 __all__ = [

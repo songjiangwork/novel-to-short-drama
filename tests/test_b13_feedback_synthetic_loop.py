@@ -1,20 +1,12 @@
 """Synthetic-only opt-in through the actual B2B loop; never live authority."""
 from dataclasses import replace
 import json
-from pathlib import Path
-import sys
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
-import b13_alice_token_budget_preflight as pf
-from short_drama.adaptation.disposition_checkpoint_v2 import (
-    encode_feedback_checkpoint_v2, verify_and_decode_feedback_checkpoint_v2,
-)
 from short_drama.adaptation.disposition_execution import (
-    B13DispositionExecutionResult, B13WindowGenerationExhaustedError,
-    B13WindowProvenanceError, B13WindowSemanticGenerationPolicy,
-    _execute_one_b13_window, _verify_client_runtime, _verify_preflight,
+    B13WindowGenerationExhaustedError, B13WindowProvenanceError,
+    _execute_b13_feedback_for_test,
 )
 from short_drama.adaptation.disposition_feedback import build_feedback_request
 from short_drama.adaptation.disposition_semantic import (
@@ -57,48 +49,9 @@ class SyntheticTokenizer:
         return [1] * self.count
 
 
-class SyntheticFeedback:
-    """Opt-in callback limited to this test module; no production dispatch."""
-    def __init__(self, session, tokenizer):
-        self.session = session
-        self.tokenizer = tokenizer
-        self.first = None
-        self.feedback = None
-        self.report = None
-
-    def prepare(self, semantic, result, options, budget):
-        self.first = result
-        self.feedback = build_feedback_request(semantic, result.parsed_json)
-        body = _mapped_provider_request_bytes(self.feedback.request, semantic.runtime_config, options)
-        measurement = replace(semantic.measurement, provider_request_bytes=len(body),
-                              provider_request_estimated_tokens=estimate_tokens(body.decode('utf-8')))
-        request = replace(semantic, request=self.feedback.request, execution_options=options,
-                          provider_request_bytes=body, measurement=measurement)
-        tokens, reason = pf.count_prompt_tokens(self.tokenizer, json.loads(body)['messages'])
-        self.report = pf.assess_window(packet=semantic.packet, initial=request, regen=request,
-            model_context_tokens=budget.model_context_tokens, input_ceiling_tokens=budget.input_ceiling_tokens,
-            tokenizer_prompt_tokens=tokens, tokenizer_reason=reason)
-        if self.report['verdict'] != 'PASS':
-            raise B13WindowSemanticBudgetError('synthetic feedback budget did not pass')
-        return request
-
-    def accept(self, semantic, result, rejected, proposal):
-        raw = encode_feedback_checkpoint_v2(session=self.session, window_id=semantic.packet.window_id,
-            rejected_candidate=self.first.parsed_json, first_provenance=rejected.invocation_provenance,
-            first_attempts=rejected.provider_attempts, accepted_proposal=proposal.to_dict(),
-            second_provenance=result.provenance, second_attempts=result.attempts)
-        return verify_and_decode_feedback_checkpoint_v2(raw, self.session)
-
-
-def run_fake(tree, session, fake, adapter):
-    prep, semantic, budget = session.preparation, session.semantic_preparations[0], session.budgets[0]
-    _verify_preflight(store=tree.store, pointers=tree.pointers, preparation=prep,
-        semantic_preparations=(semantic,), budgets=(budget,), runtime=session.runtime_config)
-    _verify_client_runtime(fake, session.runtime_config)
-    accepted = _execute_one_b13_window(store=tree.store, pointers=tree.pointers, preparation=prep,
-        semantic=semantic, budget=budget, runtime_config=session.runtime_config, llm_client=fake,
-        policy=B13WindowSemanticGenerationPolicy(), _synthetic_feedback=adapter)
-    return B13DispositionExecutionResult(prep.source_snapshot, prep.strategy_selection, prep.preparation_identity, (accepted,))
+def run_fake(tree, session, fake, tokenizer):
+    return _execute_b13_feedback_for_test(store=tree.store, pointers=tree.pointers,
+        session=session, llm_client=fake, tokenizer=tokenizer)
 
 
 def authority(tree, source):
@@ -116,17 +69,23 @@ def test_real_execution_loop_feedback_to_b4a(tmp_path):
     bad = _proposal(packet)
     bad['adaptation_mappings'] = []
     fake = RecordingFakeClient([(bad, False), (_proposal(packet), False)], session.runtime_config)
-    adapter = SyntheticFeedback(session, SyntheticTokenizer())
-    execution = run_fake(tree, session, fake, adapter)
+    tokenizer = SyntheticTokenizer()
+    execution = run_fake(tree, session, fake, tokenizer)
     accepted = execution.accepted_windows[0]
     assert len(fake.calls) == 2 and accepted.provider_attempts == accepted.semantic_rounds == 2
     assert fake.prompts[0] == semantic.request.rendered_prompt
     assert fake.prompts[0].prompt_version == 3
-    assert fake.prompts[1] == adapter.feedback.request.rendered_prompt
+    feedback = build_feedback_request(semantic, bad)
+    assert fake.prompts[1] == feedback.request.rendered_prompt
     assert fake.prompts[0].rendered_prompt_hash != fake.prompts[1].rendered_prompt_hash
     assert fake.responses[0].provenance.request_hash != fake.responses[1].provenance.request_hash
-    assert adapter.tokenizer.messages == json.loads(_mapped_provider_request_bytes(adapter.feedback.request, session.runtime_config, fake.calls[1]))['messages']
+    assert accepted.request_identity == semantic.request_identity
+    assert accepted.semantic_request_hash == fake.responses[0].provenance.request_hash
+    assert accepted.invocation_provenance == fake.responses[1].provenance
+    assert tokenizer.messages == json.loads(_mapped_provider_request_bytes(feedback.request, session.runtime_config, fake.calls[1]))['messages']
     assert accepted.feedback_evidence is not None
+    from short_drama.adaptation.disposition_checkpoint_v2 import verify_and_decode_feedback_checkpoint_v2
+    assert verify_and_decode_feedback_checkpoint_v2(accepted.feedback_evidence.canonical_bytes(), session) == accepted
     inventory = build_b13_reconciliation_inventory(execution)
     review = review_b13_reconciliation(inventory, B13ReconciliationDecisionSet(inventory.inventory_identity, ()))
     assembly = assemble_b13_disposition_plan(review)
@@ -138,14 +97,25 @@ def test_real_execution_loop_feedback_to_b4a(tmp_path):
 
 
 def test_first_round_success_stays_v1(tmp_path):
+    from short_drama.adaptation.disposition_checkpoint import encode_checkpoint, verify_and_decode_checkpoint
     tree, session, packet, _ = _fixture(tmp_path)
     fake = RecordingFakeClient([(_proposal(packet), False)], session.runtime_config)
-    accepted = run_fake(tree, session, fake, SyntheticFeedback(session, SyntheticTokenizer())).accepted_windows[0]
+    accepted = run_fake(tree, session, fake, SyntheticTokenizer()).accepted_windows[0]
     assert len(fake.calls) == 1 and accepted.feedback_evidence is None and accepted.semantic_rounds == 1
+    assert verify_and_decode_checkpoint(encode_checkpoint(accepted, session), session) == accepted
 
 
-@pytest.mark.parametrize('kind', ['unsupported', 'schema', 'budget', 'tokenizer', 'provenance', 'second_failure'])
-def test_fail_closed_without_extra_dispatch(tmp_path, kind):
+def test_missing_context_evidence_stops_before_first_call(tmp_path):
+    from short_drama.adaptation.disposition_checkpoint import B13CheckpointEvidenceError
+    tree, session, packet, _ = _fixture(tmp_path)
+    fake = RecordingFakeClient([(_proposal(packet), False)], session.runtime_config)
+    with pytest.raises(B13CheckpointEvidenceError):
+        run_fake(tree, replace(session, effective_n_ctx=None), fake, SyntheticTokenizer())
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize('kind', ['unsupported', 'schema', 'budget', 'tokenizer', 'authority', 'provenance', 'second_failure'])
+def test_fail_closed_without_extra_dispatch(tmp_path, kind, monkeypatch):
     tree, session, packet, _ = _fixture(tmp_path)
     bad = _proposal(packet)
     bad['adaptation_mappings'] = []
@@ -156,16 +126,34 @@ def test_fail_closed_without_extra_dispatch(tmp_path, kind):
         bad = {}
     fake = RecordingFakeClient([(bad, False), ((_proposal(packet) if kind != 'second_failure' else bad), kind == 'provenance')], session.runtime_config)
     tokenizer = SyntheticTokenizer(2_000_000 if kind == 'tokenizer' else 10)
-    adapter = SyntheticFeedback(session, tokenizer)
+    if kind == 'authority':
+        import short_drama.adaptation.disposition_execution as execution
+        original = execution._revalidate_authority
+        after_first = 0
+        def fail_before_second(*args):
+            nonlocal after_first
+            if len(fake.calls) == 1:
+                after_first += 1
+                if after_first == 2:
+                    raise execution.B13WindowAuthorityError('synthetic authority changed')
+            return original(*args)
+        monkeypatch.setattr(execution, '_revalidate_authority', fail_before_second)
     if kind == 'budget':
-        # The first request fits; force the feedback's actual mapped request over its ceiling.
-        old_prepare = adapter.prepare
-        def too_small(semantic, result, options, budget):
-            return old_prepare(semantic, result, options, replace(budget, input_ceiling_tokens=1))
-        adapter.prepare = too_small
+        from short_drama.llm import GenerationExecutionOptions
+        semantic = session.semantic_preparations[0]
+        opts = GenerationExecutionOptions(prompt_context_reuse='disabled')
+        first = estimate_tokens(_mapped_provider_request_bytes(semantic.request, session.runtime_config, opts).decode())
+        feedback = build_feedback_request(semantic, bad)
+        second = estimate_tokens(_mapped_provider_request_bytes(feedback.request, session.runtime_config, opts).decode())
+        ceiling = max(first, semantic.measurement.provider_request_estimated_tokens)
+        assert second > ceiling
+        budget = replace(session.budgets[0], input_ceiling_tokens=ceiling)
+        session = replace(session, budgets=(budget,), input_ceiling_tokens=ceiling)
+    from short_drama.adaptation.disposition_execution import B13WindowAuthorityError
     expected = {'unsupported': B13WindowGenerationExhaustedError, 'schema': B13WindowSchemaError,
                 'budget': B13WindowSemanticBudgetError, 'tokenizer': B13WindowSemanticBudgetError,
+                'authority': B13WindowAuthorityError,
                 'provenance': B13WindowProvenanceError, 'second_failure': B13WindowGenerationExhaustedError}[kind]
     with pytest.raises(expected):
-        run_fake(tree, session, fake, adapter)
+        run_fake(tree, session, fake, tokenizer)
     assert len(fake.calls) == (2 if kind in ('provenance', 'second_failure') else 1)

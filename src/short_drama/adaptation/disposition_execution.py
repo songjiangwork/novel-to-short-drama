@@ -459,6 +459,7 @@ def _execute_one_b13_window(
     preparation: B13DispositionPreparation, semantic: B13WindowSemanticPreparation,
     budget: B13WindowSemanticBudget | None, runtime_config: RuntimeConfig,
     llm_client: LLMClient, policy: B13WindowSemanticGenerationPolicy,
+    _synthetic_feedback=None,
 ) -> B13WindowAcceptedProposal:
     """Execute one window after the caller has authorized the complete batch.
 
@@ -466,25 +467,29 @@ def _execute_one_b13_window(
     and policy, and verify client/runtime compatibility. This helper's per-call
     budget and authority checks do not replace those prerequisites or authorize
     standalone or resumed execution.
+
+    The private _synthetic_feedback hook exists solely for fake-provider tests;
+    it is not passed by the production runner and conveys no live authority.
     """
     retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
     failures: list[str] = []
     rejection_details = []
     rejected_rounds: list[B13WindowRejectedSemanticRound] = []
     cumulative_provider_attempts = 0
+    round_semantic = semantic
     for round_number in range(1, policy.max_rounds + 1):
         options = semantic.execution_options if round_number == 1 else retry_options
-        _verify_budget(semantic, runtime_config, options, budget)
+        _verify_budget(round_semantic, runtime_config, options, budget)
         _revalidate_authority(store, pointers, preparation)
         result = llm_client.generate_structured(
-            semantic.request.rendered_prompt, semantic.output_schema,
-            semantic.semantic_profile, execution_options=options,
+            round_semantic.request.rendered_prompt, round_semantic.output_schema,
+            round_semantic.semantic_profile, execution_options=options,
         )
         round_provider_attempts = _provider_attempts(result.attempts)
         cumulative_provider_attempts += round_provider_attempts
         # Authority races win over proposal acceptance or retry decisions.
         _revalidate_authority(store, pointers, preparation)
-        _verify_provenance(result.provenance, semantic, runtime_config)
+        _verify_provenance(result.provenance, round_semantic, runtime_config)
         try:
             proposal = semantic.decode_and_validate_proposal(result.parsed_json)
         except B13WindowProposalError as exc:
@@ -500,9 +505,15 @@ def _execute_one_b13_window(
                 invocation_provenance=result.provenance,
                 diagnostic=diagnostic,
             ))
+            if _synthetic_feedback is not None:
+                if round_number != 1 or diagnostic != _MISSING_MAPPING_REASON or policy.max_rounds < 2:
+                    break
+                round_semantic = _synthetic_feedback.prepare(semantic, result, retry_options, budget)
             continue
         except B13WindowSchemaError:
             raise
+        if _synthetic_feedback is not None and round_number == 2:
+            return _synthetic_feedback.accept(semantic, result, rejected_rounds[0], proposal)
         return B13WindowAcceptedProposal(
             window_id=semantic.packet.window_id,
             window_ordinal=semantic.packet.window_ordinal,
@@ -530,13 +541,12 @@ def _execute_one_b13_window(
             semantic_failures=tuple(failures),
             rejected_semantic_rounds=tuple(rejected_rounds), proposal=proposal,
         )
-    else:
-        raise B13WindowGenerationExhaustedError(
-            window_id=semantic.packet.window_id,
-            request_identity=semantic.request_identity,
-            rounds_attempted=policy.max_rounds, failures=tuple(failures),
-            rejection_details=tuple(rejection_details),
-        )
+    raise B13WindowGenerationExhaustedError(
+        window_id=semantic.packet.window_id,
+        request_identity=semantic.request_identity,
+        rounds_attempted=len(failures), failures=tuple(failures),
+        rejection_details=tuple(rejection_details),
+    )
 
 
 __all__ = [

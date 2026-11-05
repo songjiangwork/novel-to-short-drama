@@ -6,7 +6,7 @@ writes an artifact nor resolves a CURRENT pointer.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from short_drama.artifacts import (
@@ -36,9 +36,12 @@ from .disposition_semantic import (
 )
 from .strategy_execution import B12_STRATEGY_ARTIFACT_SCHEMA_VERSION, B12StrategyArtifact
 from .target import AdaptationSourceSnapshot
+from .disposition_checkpoint_v2 import verify_historical_feedback_checkpoint_v2
+from .disposition_publication_authority_v2 import reconstruct_publication_authority_v2
 
 
 B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION = 1
+B13_DISPOSITION_PUBLICATION_V2_MAX_BYTES = 4_000_000  # PROPOSED, not ratified
 B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE = "b13_disposition_publication"
 
 
@@ -107,8 +110,10 @@ def _verify_reconstructed_provenance(
         )
 
 
-def _accepted_to_dict(value: B13WindowAcceptedProposal) -> dict[str, Any]:
-    return {
+def _accepted_to_dict(value: B13WindowAcceptedProposal, *, version: int = 1) -> dict[str, Any]:
+    if value.feedback_evidence is not None and version != 2:
+        raise B13DispositionPublicationError("v1 cannot serialize feedback evidence")
+    result = {
         "packet": value.proposal.packet.to_dict(),
         "request_identity": value.request_identity,
         "semantic_request_hash": value.semantic_request_hash,
@@ -128,6 +133,9 @@ def _accepted_to_dict(value: B13WindowAcceptedProposal) -> dict[str, Any]:
         ],
         "proposal": value.proposal.to_dict(),
     }
+    if value.feedback_evidence is not None:
+        result['feedback_evidence'] = strict_json_loads(value.feedback_evidence.canonical_bytes())
+    return result
 
 
 def _decision_from_dict(value: Any) -> B13ReconciliationDecision:
@@ -190,9 +198,10 @@ def _lineage(source: AdaptationSourceSnapshot, selection: B12StrategySelection) 
 
 
 def _semantic_identity(source: AdaptationSourceSnapshot, selection: B12StrategySelection,
-                       execution: B13DispositionExecutionResult, decisions: B13ReconciliationDecisionSet) -> str:
-    return content_hash({
-        "stage": "B1.3-B4A", "schema_version": B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION,
+                       execution: B13DispositionExecutionResult, decisions: B13ReconciliationDecisionSet,
+                       *, version: int = 1, authority: Any = None) -> str:
+    material = {
+        "stage": "B1.3-B4A", "schema_version": version,
         "source_snapshot": source.to_dict(), "strategy_ref": selection.strategy_ref.to_dict(),
         "strategy_artifact_hash": selection.strategy_ref.content_hash,
         "strategy_hash": selection.strategy_hash, "preparation_identity": execution.preparation_identity,
@@ -206,7 +215,14 @@ def _semantic_identity(source: AdaptationSourceSnapshot, selection: B12StrategyS
             for item in execution.accepted_windows
         ],
         "decisions": [item.to_dict() for item in decisions.decisions],
-    })
+    }
+    if version == 2:
+        material['historical_authority_hash'] = content_hash(authority)
+        material['feedback_checkpoint_identities'] = [
+            None if item.feedback_evidence is None else strict_json_loads(
+                item.feedback_evidence.canonical_bytes())['checkpoint_identity']
+            for item in execution.accepted_windows]
+    return content_hash(material)
 
 
 def _publication_identity(value: dict[str, Any]) -> str:
@@ -219,7 +235,7 @@ def _publication_identity(value: dict[str, Any]) -> str:
 class B13DispositionPublication:
     """Canonical versioned payload intended for B4B immutable persistence."""
 
-    _canonical_payload: bytes
+    _canonical_payload: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self._canonical_payload, bytes):
@@ -230,6 +246,8 @@ class B13DispositionPublication:
             raise B13DispositionPublicationError("publication payload is invalid JSON") from exc
         if not isinstance(payload, dict) or canonical_json_bytes(payload) != self._canonical_payload:
             raise B13DispositionPublicationError("publication payload must be canonical JSON")
+        if payload.get('schema_version') == 2 and len(self._canonical_payload) > B13_DISPOSITION_PUBLICATION_V2_MAX_BYTES:
+            raise B13DispositionPublicationError("v2 publication exceeds size limit")
 
     def to_dict(self) -> dict[str, Any]:
         value = strict_json_loads(self._canonical_payload)
@@ -274,19 +292,32 @@ def _reconstruct_execution(payload: dict[str, Any]) -> tuple[B13DispositionExecu
         raise B13DispositionPublicationError("retained B1.2 selection is invalid") from exc
     if source != strategy.source_snapshot:
         raise B13DispositionPublicationError("retained A5/A6 snapshot disagrees with B1.2 strategy")
+    version = payload['schema_version']
+    historical = None
+    if version == 2:
+        try:
+            historical = reconstruct_publication_authority_v2(source, selection, evidence['historical_authority'])
+            if historical.preparation_identity != evidence['preparation_identity']:
+                raise ValueError
+        except Exception:
+            raise B13DispositionPublicationError("v2 historical authority is invalid") from None
     assets = load_b13_window_semantic_assets()
     prompts = PromptRegistry(B13_WINDOW_PROMPTS_DIR)
     accepted: list[B13WindowAcceptedProposal] = []
     raw_windows = evidence["accepted_windows"]
     if not isinstance(raw_windows, list):
         raise B13DispositionPublicationError("accepted window evidence must be an array")
-    for raw in raw_windows:
+    if historical is not None and len(raw_windows) != len(historical.packets):
+        raise B13DispositionPublicationError("v2 window count mismatch")
+    for index, raw in enumerate(raw_windows):
         fields = {
             "packet", "request_identity", "semantic_request_hash", "semantic_profile_identity",
             "prompt_identity", "output_schema_identity", "rendered_prompt_hash", "invocation_provenance",
             "semantic_rounds", "provider_attempts", "accepted_round_provider_attempts", "semantic_failures",
             "rejected_semantic_rounds", "proposal",
         }
+        if version == 2 and isinstance(raw, dict) and 'feedback_evidence' in raw:
+            fields.add('feedback_evidence')
         if not isinstance(raw, dict) or set(raw) != fields:
             raise B13DispositionPublicationError("accepted window evidence has an invalid shape")
         packet_data = raw["packet"]
@@ -295,6 +326,16 @@ def _reconstruct_execution(payload: dict[str, Any]) -> tuple[B13DispositionExecu
             packet = B13DispositionWindowPacket(
                 source, selection, window["window_id"], window["window_ordinal"], canonical_json_bytes(packet_data),
             )
+            if historical is not None and packet != historical.packets[index]:
+                raise ValueError
+            if 'feedback_evidence' in raw:
+                feedback_raw = canonical_json_bytes(raw['feedback_evidence'])
+                item = verify_historical_feedback_checkpoint_v2(
+                    feedback_raw, packet=historical.packets[index], preparation_identity=historical.preparation_identity)
+                if canonical_json_bytes(_accepted_to_dict(item, version=2)) != canonical_json_bytes(raw):
+                    raise ValueError
+                accepted.append(item)
+                continue
             proposal = B13WindowProposal.from_dict(packet, raw["proposal"], assets.output_schema)
             rendered = prompts.load(B13_WINDOW_PROMPT_ID, version=B13_WINDOW_PROMPT_VERSION).render(
                 {"window_packet_json": packet.canonical_bytes().decode("utf-8")}
@@ -313,6 +354,8 @@ def _reconstruct_execution(payload: dict[str, Any]) -> tuple[B13DispositionExecu
                 raw["accepted_round_provider_attempts"], tuple(raw["semantic_failures"]), rejected, proposal,
             )
         except Exception as exc:
+            if version == 2:
+                raise B13DispositionPublicationError("accepted window evidence is invalid") from None
             raise B13DispositionPublicationError("accepted window evidence is invalid") from exc
         if (item.semantic_request_hash != request.request_hash
                 or item.rendered_prompt_hash != rendered.rendered_prompt_hash
@@ -343,6 +386,8 @@ def _reconstruct_execution(payload: dict[str, Any]) -> tuple[B13DispositionExecu
                     "rejected semantic round declared routing differs from its accepted invocation"
                 )
         accepted.append(item)
+    if version == 2 and not any(item.feedback_evidence is not None for item in accepted):
+        raise B13DispositionPublicationError("v2 publication requires feedback evidence")
     try:
         execution = B13DispositionExecutionResult(source, selection, evidence["preparation_identity"], tuple(accepted))
         decisions_raw = evidence["reconciliation"]["decisions"]
@@ -352,14 +397,23 @@ def _reconstruct_execution(payload: dict[str, Any]) -> tuple[B13DispositionExecu
     return execution, decisions
 
 
-def verify_b13_disposition_publication(value: B13DispositionPublication | dict[str, Any]) -> B13DispositionAssemblyResult:
+def _verify_b13_disposition_publication(value: B13DispositionPublication | dict[str, Any]) -> B13DispositionAssemblyResult:
     """Independently reconstruct every B2B/B3A/B3B result from retained evidence."""
     payload = value.to_dict() if isinstance(value, B13DispositionPublication) else value
     fields = {"schema_version", "artifact_type", "stage_artifact_id", "semantic_identity", "publication_identity", "lineage", "evidence"}
     if not isinstance(payload, dict) or set(payload) != fields:
         raise B13DispositionPublicationError("publication payload has an invalid shape")
-    if payload["schema_version"] != B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION:
+    if type(payload['schema_version']) is not int or payload['schema_version'] not in (1, 2):
         raise B13DispositionPublicationError("unsupported B1.3 publication schema version")
+    version = payload['schema_version']
+    if version == 2:
+        if len(canonical_json_bytes(payload)) > B13_DISPOSITION_PUBLICATION_V2_MAX_BYTES:
+            raise B13DispositionPublicationError("v2 publication exceeds size limit")
+        if not isinstance(payload.get('evidence'), dict) or set(payload['evidence']) != {
+            'source_snapshot', 'strategy_selection', 'preparation_identity', 'accepted_windows',
+            'reconciliation', 'assembly', 'historical_authority',
+        }:
+            raise B13DispositionPublicationError("v2 publication evidence has invalid shape")
     if payload["artifact_type"] != B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE:
         raise B13DispositionPublicationError("publication artifact type is invalid")
     _hash(payload["semantic_identity"], "semantic_identity")
@@ -387,14 +441,28 @@ def verify_b13_disposition_publication(value: B13DispositionPublication | dict[s
         raise B13DispositionPublicationError("publication stage artifact identity is invalid")
     if payload["lineage"] != _lineage(source, selection):
         raise B13DispositionPublicationError("publication immutable lineage is incomplete or inconsistent")
-    if payload["semantic_identity"] != _semantic_identity(source, selection, execution, decisions):
+    if payload["semantic_identity"] != _semantic_identity(
+            source, selection, execution, decisions, version=version,
+            authority=evidence.get('historical_authority')):
         raise B13DispositionPublicationError("publication semantic identity is inconsistent")
     return assembled
+
+
+def verify_b13_disposition_publication(value: B13DispositionPublication | dict[str, Any]) -> B13DispositionAssemblyResult:
+    """Verify v1 or experimental v2 in memory; no authority authentication."""
+    try:
+        return _verify_b13_disposition_publication(value)
+    except Exception:
+        payload = value.to_dict() if isinstance(value, B13DispositionPublication) else value
+        if isinstance(payload, dict) and payload.get('schema_version') == 2:
+            raise B13DispositionPublicationError('v2 publication verification failed') from None
+        raise
 
 
 def prepare_b13_disposition_publication(
     review: B13ReconciliationReview, assembly: B13DispositionAssemblyResult,
     execution: B13DispositionExecutionResult,
+    *, historical_authority: dict[str, Any] | None = None,
 ) -> B13DispositionPublication:
     """Prepare, validate, and serialize B4A evidence without providers or writes."""
     if (not isinstance(review, B13ReconciliationReview)
@@ -413,7 +481,13 @@ def prepare_b13_disposition_publication(
         raise B13DispositionPublicationError("assembly B1.2 or preparation identity is inconsistent")
     if execution.source_snapshot != review.inventory.source_snapshot:
         raise B13DispositionPublicationError("execution source snapshot disagrees with reconciliation review")
-    semantic_identity = _semantic_identity(execution.source_snapshot, execution.strategy_selection, execution, review.decisions)
+    version = 2 if any(item.feedback_evidence is not None for item in execution.accepted_windows) else 1
+    if version == 2 and historical_authority is None:
+        raise B13DispositionPublicationError('v2 historical authority is required')
+    if version == 1 and historical_authority is not None:
+        raise B13DispositionPublicationError('v1 does not accept v2 authority evidence')
+    semantic_identity = _semantic_identity(execution.source_snapshot, execution.strategy_selection, execution,
+                                           review.decisions, version=version, authority=historical_authority)
     evidence = {
         "source_snapshot": execution.source_snapshot.to_dict(),
         "strategy_selection": {
@@ -422,7 +496,7 @@ def prepare_b13_disposition_publication(
             "strategy_artifact": execution.strategy_selection.artifact.to_dict(),
         },
         "preparation_identity": execution.preparation_identity,
-        "accepted_windows": [_accepted_to_dict(item) for item in execution.accepted_windows],
+        "accepted_windows": [_accepted_to_dict(item, version=version) for item in execution.accepted_windows],
         "reconciliation": {
             "inventory": inventory.to_dict(),
             "decisions": {"inventory_identity": review.decisions.inventory_identity,
@@ -430,8 +504,10 @@ def prepare_b13_disposition_publication(
         },
         "assembly": _assembly_to_dict(assembly),
     }
+    if version == 2:
+        evidence['historical_authority'] = historical_authority
     payload = {
-        "schema_version": B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION,
+        "schema_version": version,
         "artifact_type": B13_DISPOSITION_PUBLICATION_ARTIFACT_TYPE,
         "stage_artifact_id": b13_disposition_publication_artifact_id(execution.source_snapshot, execution.strategy_selection.artifact),
         "semantic_identity": semantic_identity,

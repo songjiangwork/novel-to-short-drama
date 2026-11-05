@@ -49,6 +49,19 @@ class B13DispositionPersistenceError(ValueError):
     """A B1.3 CURRENT, persisted evidence, or authority check failed closed."""
 
 
+def _require_v1_publication_shape(payload: Any) -> None:
+    # B4B cannot store experimental evidence, even inside an otherwise v1
+    # payload. B4A's historical v1 verifier remains unchanged.
+    if not isinstance(payload, dict) or payload.get("schema_version") != B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION:
+        raise B13DispositionPersistenceError("B4B supports only v1 publication")
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "source_snapshot", "strategy_selection", "preparation_identity", "accepted_windows",
+        "reconciliation", "assembly",
+    }:
+        raise B13DispositionPersistenceError("B4B v1 publication evidence has invalid shape")
+
+
 def b13_disposition_pointer_id(project_id: str, adaptation_target_id: str) -> str:
     """Return B1.3's dedicated stage-local CURRENT pointer identity."""
     if not isinstance(project_id, str) or not project_id:
@@ -298,9 +311,10 @@ class B13DispositionPersistenceService:
         CURRENT CAS.  A matching final semantic identity reuses only a healthy
         CURRENT; request-level identity alone is deliberately insufficient.
         """
-        self._validate_request(preparation, semantic_preparations)
         if not isinstance(publication, B13DispositionPublication):
             raise B13DispositionPersistenceError("publication requires exact B4A publication evidence")
+        _require_v1_publication_shape(publication.to_dict())
+        self._validate_request(preparation, semantic_preparations)
         try:
             plan = verify_b13_disposition_publication(publication)
         except Exception as exc:
@@ -505,8 +519,10 @@ class B13DispositionPersistenceService:
             if (
                 envelope.schema_version != B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION
                 or not isinstance(envelope.payload, dict)
+                or envelope.payload.get('schema_version') != B13_DISPOSITION_PUBLICATION_SCHEMA_VERSION
             ):
                 raise ValueError("unsupported immutable envelope")
+            _require_v1_publication_shape(envelope.payload)
             publication = B13DispositionPublication.from_dict(envelope.payload)
             verify_b13_disposition_publication(publication)
             if ref.artifact_id != publication.to_dict()["stage_artifact_id"]:

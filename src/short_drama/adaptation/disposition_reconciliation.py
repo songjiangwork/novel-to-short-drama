@@ -405,18 +405,34 @@ def _ref(value: dict[str, Any]) -> CanonicalTargetReference:
     return CanonicalTargetReference.from_dict(value)
 
 
-def _window_from_accepted(accepted: B13WindowAcceptedProposal) -> B13InventoryWindow:
+def _window_from_accepted(accepted: B13WindowAcceptedProposal, preparation_identity: str) -> B13InventoryWindow:
     packet = accepted.proposal.packet
     if packet.window_id != accepted.window_id or packet.window_ordinal != accepted.window_ordinal:
         raise B13ReconciliationError("accepted proposal window identity is stale")
-    if accepted.semantic_request_hash != accepted.invocation_provenance.request_hash or accepted.rendered_prompt_hash != accepted.invocation_provenance.rendered_prompt_hash:
-        raise B13ReconciliationError("accepted semantic request provenance is mismatched")
+    if accepted.feedback_evidence is None:
+        if accepted.semantic_request_hash != accepted.invocation_provenance.request_hash or accepted.rendered_prompt_hash != accepted.invocation_provenance.rendered_prompt_hash:
+            raise B13ReconciliationError("accepted semantic request provenance is mismatched")
+    else:
+        # A feedback-round invocation has its own request identity.  Verify the
+        # complete carrier instead of treating that provenance as the base call.
+        from .disposition_checkpoint_v2 import verify_historical_feedback_checkpoint_v2
+        try:
+            verified = verify_historical_feedback_checkpoint_v2(
+                accepted.feedback_evidence.canonical_bytes(), packet=packet,
+                preparation_identity=preparation_identity,
+            )
+            if verified != accepted:
+                raise ValueError("carrier mismatch")
+        except Exception:
+            raise B13ReconciliationError("feedback evidence is invalid") from None
     profile = accepted.semantic_profile_identity
     prompt = accepted.prompt_identity
     schema = accepted.output_schema_identity
-    if (profile != {"profile_id": accepted.invocation_provenance.semantic_profile_id, "profile_hash": accepted.invocation_provenance.semantic_profile_hash}
-            or prompt != {"prompt_id": accepted.invocation_provenance.prompt_id, "prompt_version": accepted.invocation_provenance.prompt_version, "prompt_content_hash": accepted.invocation_provenance.prompt_content_hash}
-            or schema != {"schema_id": accepted.invocation_provenance.output_schema_id, "schema_version": accepted.invocation_provenance.output_schema_version, "schema_hash": accepted.invocation_provenance.output_schema_hash}):
+    base_provenance = (accepted.invocation_provenance if accepted.feedback_evidence is None
+                       else accepted.rejected_semantic_rounds[0].invocation_provenance)
+    if (profile != {"profile_id": base_provenance.semantic_profile_id, "profile_hash": base_provenance.semantic_profile_hash}
+            or prompt != {"prompt_id": base_provenance.prompt_id, "prompt_version": base_provenance.prompt_version, "prompt_content_hash": base_provenance.prompt_content_hash}
+            or schema != {"schema_id": base_provenance.output_schema_id, "schema_version": base_provenance.output_schema_version, "schema_hash": base_provenance.output_schema_hash}):
         raise B13ReconciliationError("accepted semantic asset provenance is mismatched")
     payload = packet.to_dict()
     window = payload["window"]
@@ -559,7 +575,7 @@ def build_b13_reconciliation_inventory(result: B13DispositionExecutionResult) ->
         raise B13ReconciliationError("execution result is missing or reorders accepted windows")
     if len({item.window_id for item in accepted}) != len(accepted):
         raise B13ReconciliationError("execution result duplicates an accepted window")
-    windows = tuple(_window_from_accepted(item) for item in accepted)
+    windows = tuple(_window_from_accepted(item, result.preparation_identity) for item in accepted)
     packets = tuple(item.proposal.packet for item in accepted)
     if any(packet.source_snapshot != result.source_snapshot or packet.strategy_selection != result.strategy_selection for packet in packets):
         raise B13ReconciliationError("execution result has a source or B1.2 strategy mismatch")

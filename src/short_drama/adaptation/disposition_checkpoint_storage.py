@@ -137,9 +137,9 @@ def _reject_other_window_checkpoint(target: Path) -> None:
     # Never treat another version or request for the same window as absent.
     try:
         name = target.name
-        if not name.startswith(_FILE_PREFIX + "-p"):
+        if not name.startswith(("b13-checkpoint-v1-p", "b13-checkpoint-v2-p")):
             raise ValueError
-        preparation, rest = name[len(_FILE_PREFIX + "-p"):].split("-w", 1)
+        preparation, rest = name.split("-p", 1)[1].split("-w", 1)
         ordinal = int(rest.split("-q", 1)[0])
         if _HASH.fullmatch(preparation) is None:
             raise ValueError
@@ -317,6 +317,75 @@ def save_checkpoint(root: Path | str | os.PathLike[str], accepted: B13WindowAcce
         _fail("cannot atomically persist checkpoint", exc)
 
 
+def save_feedback_checkpoint_v2(root: Path | str | os.PathLike[str],
+                                accepted: B13WindowAcceptedProposal, session: Any) -> Path:
+    """Persist a verified two-request v2 checkpoint, under the caller's guard.
+
+    This function does not grant dispatch or claim-recovery authority.  The
+    caller must fence old writers and approve private evidence retention.
+    """
+    from .disposition_checkpoint_v2 import (
+        DEFAULT_EVIDENCE_LIMIT, encode_verified_feedback_checkpoint_v2,
+        verify_and_decode_feedback_checkpoint_v2,
+    )
+
+    try:
+        if accepted.feedback_evidence is None:
+            raise ValueError
+        raw = encode_verified_feedback_checkpoint_v2(accepted, session)
+        if (len(raw) > DEFAULT_EVIDENCE_LIMIT
+                or verify_and_decode_feedback_checkpoint_v2(raw, session) != accepted):
+            raise ValueError
+    except Exception:
+        _fail("v2 checkpoint evidence is invalid")
+
+    legacy = checkpoint_path(root, session, accepted.window_id)
+    target = legacy.with_name(legacy.name.replace("b13-checkpoint-v1-", "b13-checkpoint-v2-", 1))
+    root_stat = os.stat(target.parent, follow_symlinks=False)
+    if (not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(root_stat.st_mode) != 0o700):
+        _fail("v2 checkpoint root must be a private owned directory")
+
+    def verify_published() -> None:
+        current = _target_stat(target)
+        if (current is None or current.st_uid != os.geteuid()
+                or stat.S_IMODE(current.st_mode) != 0o600):
+            _fail("v2 checkpoint file must be private and owned")
+        try:
+            if (_read_bounded(target) != raw
+                    or verify_and_decode_feedback_checkpoint_v2(raw, session) != accepted):
+                raise ValueError
+        except Exception:
+            _fail("published v2 checkpoint failed exact read-back")
+
+    _reject_other_window_checkpoint(target)
+    if _target_stat(target, missing_ok=True) is not None:
+        verify_published()
+        _fsync_directory(target.parent)
+        _reject_other_window_checkpoint(target)
+        verify_published()
+        return target
+    try:
+        with _staged_checkpoint(target, raw) as temporary:
+            try:
+                _reject_other_window_checkpoint(target)
+                os.link(temporary, target)
+            except FileExistsError:
+                verify_published()
+                _fsync_directory(target.parent)
+                _reject_other_window_checkpoint(target)
+                verify_published()
+                return target
+            _fsync_directory(target.parent)
+            _reject_other_window_checkpoint(target)
+            verify_published()
+            return target
+    except B13CheckpointStorageError:
+        raise
+    except OSError as exc:
+        _fail("cannot durably publish v2 checkpoint", exc)
+
+
 def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id: str) -> B13WindowAcceptedProposal | None:
     """Load exactly one expected checkpoint, or ``None`` only when it is absent."""
     directory = _root(root, create=False)
@@ -357,5 +426,6 @@ def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id
 
 
 __all__ = [
-    "B13CheckpointStorageError", "checkpoint_path", "save_checkpoint", "load_checkpoint",
+    "B13CheckpointStorageError", "checkpoint_path", "save_checkpoint",
+    "save_feedback_checkpoint_v2", "load_checkpoint",
 ]

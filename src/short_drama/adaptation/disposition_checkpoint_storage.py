@@ -48,7 +48,7 @@ def _lstat(path: Path, *, missing_ok: bool = False) -> os.stat_result | None:
         _fail(f"cannot inspect checkpoint path: {path}", exc)
 
 
-def _root(root: Path | str | os.PathLike[str], *, create: bool) -> Path | None:
+def _root(root: Path | str | os.PathLike[str], *, create: bool, _observed: list | None = None) -> Path | None:
     path = Path(root).expanduser()
     before = _lstat(path, missing_ok=True)
     if before is None:
@@ -74,6 +74,8 @@ def _root(root: Path | str | os.PathLike[str], *, create: bool) -> Path | None:
         _fail(f"checkpoint root is not a directory: {path}")
     if before is None:
         _fsync_directory(path.parent)
+    if _observed is not None:
+        _observed.append(current)
     return path.resolve()
 
 
@@ -451,16 +453,29 @@ def save_feedback_checkpoint_v2(root: Path | str | os.PathLike[str],
     except Exception:
         _fail("v2 checkpoint evidence is invalid")
 
-    legacy = checkpoint_path(root, session, accepted.window_id)
-    target = legacy.with_name(legacy.name.replace("b13-checkpoint-v1-", "b13-checkpoint-v2-", 1))
-    directory, name = target.parent, target.name
+    # Never use the resolved path returned by the legacy helper: the named
+    # root must itself be pinned without following a late symlink replacement.
+    directory = Path(root).expanduser().absolute()
+    initial_root = _lstat(directory, missing_ok=True)
+    observed_root = []
+    _root(root, create=True, _observed=observed_root)
+    if initial_root is None:
+        initial_root = observed_root[0]
+    elif not _same_file(initial_root, observed_root[0]):
+        _fail("v2 checkpoint root changed during preparation")
+    assert initial_root is not None
+    name = _checkpoint_name(session, accepted.window_id).replace("b13-checkpoint-v1-", "b13-checkpoint-v2-", 1)
+    target = directory / name
     with _private_v2_directory(directory) as dirfd:
+        if not _same_file(initial_root, os.fstat(dirfd)):
+            _fail("v2 checkpoint root changed before it was pinned")
         def verify_published() -> None:
             _verify_private_v2_directory(directory, dirfd)
             _related_v2_names_at(dirfd, name)
             if (_read_private_v2_at(dirfd, name) != raw
                     or verify_and_decode_feedback_checkpoint_v2(raw, session) != accepted):
                 _fail("published v2 checkpoint failed exact read-back")
+            _related_v2_names_at(dirfd, name)
             _verify_private_v2_directory(directory, dirfd)
 
         _related_v2_names_at(dirfd, name)

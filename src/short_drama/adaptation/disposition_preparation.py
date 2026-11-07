@@ -8,7 +8,7 @@ not call a provider, make a disposition, reconcile proposals, or publish.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from short_drama.artifacts import (
@@ -299,11 +299,11 @@ def build_b13_disposition_preparation_from_authority(
 class B13DispositionWindowPacket:
     """Canonical, immutable input for exactly one future B1.3 semantic window."""
 
-    source_snapshot: AdaptationSourceSnapshot
-    strategy_selection: B12StrategySelection
+    source_snapshot: AdaptationSourceSnapshot = field(repr=False)
+    strategy_selection: B12StrategySelection = field(repr=False)
     window_id: str
     window_ordinal: int
-    _canonical_payload: bytes
+    _canonical_payload: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         if self.source_snapshot != self.strategy_selection.artifact.source_snapshot:

@@ -59,7 +59,7 @@ def run_b13_alice_bounded(*, store, pointers, source_snapshot, runtime_config,
                 store=store, pointers=pointers, session=session, llm_client=llm_client,
                 execution_root=execution_root, checkpoint_root=checkpoint_root,
                 max_new_windows=max_new_windows, feedback_tokenizer=preflight_client,
-                refresh_session=refresh_session, selected_window_ids=selected_window_ids)
+                selected_window_ids=selected_window_ids)
         except Exception:
             failed = True
         # A failed read-only model/tokenizer discovery may also include remote

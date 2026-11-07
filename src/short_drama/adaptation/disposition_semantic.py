@@ -7,7 +7,7 @@ persists or publishes anything.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
@@ -131,7 +131,7 @@ class B13WindowProposal:
     """Validated provider proposal with local keys only, ready for B1.3-B3."""
 
     packet: B13DispositionWindowPacket
-    _canonical_payload: bytes
+    _canonical_payload: bytes = field(repr=False)
 
     @classmethod
     def from_dict(cls, packet: B13DispositionWindowPacket, value: dict[str, Any], schema: OutputSchema) -> "B13WindowProposal":

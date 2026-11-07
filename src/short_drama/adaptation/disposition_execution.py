@@ -5,7 +5,7 @@ creates adapted identities, persists a proposal, or advances a pointer.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from short_drama.artifacts import FileArtifactStore
@@ -224,8 +224,8 @@ class B13WindowAcceptedProposal:
 class B13DispositionExecutionResult:
     """Deterministic in-memory B2B output for the later B1.3-B3 reconciler."""
 
-    source_snapshot: AdaptationSourceSnapshot
-    strategy_selection: B12StrategySelection
+    source_snapshot: AdaptationSourceSnapshot = field(repr=False)
+    strategy_selection: B12StrategySelection = field(repr=False)
     preparation_identity: str
     accepted_windows: tuple[B13WindowAcceptedProposal, ...]
 
@@ -460,6 +460,7 @@ def _execute_one_b13_window(
     budget: B13WindowSemanticBudget | None, runtime_config: RuntimeConfig,
     llm_client: LLMClient, policy: B13WindowSemanticGenerationPolicy,
     _feedback_session=None, _feedback_tokenizer=None, _feedback_runtime_check=None,
+    _feedback_guard_check=None,
 ) -> B13WindowAcceptedProposal:
     """Execute one window after the caller has authorized the complete batch.
 
@@ -486,6 +487,26 @@ def _execute_one_b13_window(
         if _feedback_runtime_check is not None:
             _feedback_runtime_check()
             _revalidate_authority(store, pointers, preparation)
+        if round_number == 2 and _feedback_session is not None:
+            from short_drama.artifacts import strict_json_loads
+            if _feedback_guard_check is not None:
+                _feedback_guard_check()
+            try:
+                prompt = _feedback_tokenizer.apply_template(
+                    strict_json_loads(round_semantic.provider_request_bytes)["messages"], add_generation_prompt=True)
+                if not isinstance(prompt, str) or not prompt.strip():
+                    raise ValueError
+                tokens = _feedback_tokenizer.tokenize(prompt)
+                if (not isinstance(tokens, list) or not tokens
+                        or any(type(token) is not int for token in tokens)
+                        or len(tokens) > budget.input_ceiling_tokens
+                        or len(tokens) + semantic.semantic_profile.max_output_tokens > budget.model_context_tokens):
+                    raise ValueError
+            except Exception:
+                raise B13WindowSemanticBudgetError("feedback tokenizer preflight failed") from None
+            _revalidate_authority(store, pointers, preparation)
+        if _feedback_guard_check is not None:
+            _feedback_guard_check()
         result = llm_client.generate_structured(
             round_semantic.request.rendered_prompt, round_semantic.output_schema,
             round_semantic.semantic_profile, execution_options=options,
@@ -514,7 +535,6 @@ def _execute_one_b13_window(
                 if round_number != 1 or diagnostic != _MISSING_MAPPING_REASON or policy.max_rounds < 2:
                     break
                 from .disposition_feedback import build_feedback_request
-                from short_drama.artifacts import strict_json_loads
 
                 first_result = result
                 feedback = build_feedback_request(semantic, result.parsed_json)
@@ -524,18 +544,6 @@ def _execute_one_b13_window(
                 round_semantic = replace(semantic, request=feedback.request, execution_options=retry_options,
                                          provider_request_bytes=body, measurement=measurement)
                 _verify_budget(round_semantic, runtime_config, retry_options, budget)
-                try:
-                    prompt = _feedback_tokenizer.apply_template(strict_json_loads(body)["messages"], add_generation_prompt=True)
-                    if not isinstance(prompt, str) or not prompt.strip():
-                        raise ValueError
-                    tokens = _feedback_tokenizer.tokenize(prompt)
-                    if (not isinstance(tokens, list) or not tokens
-                            or any(type(token) is not int for token in tokens)
-                            or len(tokens) > budget.input_ceiling_tokens
-                            or len(tokens) + semantic.semantic_profile.max_output_tokens > budget.model_context_tokens):
-                        raise ValueError
-                except Exception:
-                    raise B13WindowSemanticBudgetError("feedback tokenizer preflight failed") from None
             continue
         except B13WindowSchemaError:
             raise

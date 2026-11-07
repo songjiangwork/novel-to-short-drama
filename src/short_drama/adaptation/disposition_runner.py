@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -43,7 +43,7 @@ class B13RunnerError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class B13RunnerResult:
     status: B13RunnerStatus
-    execution_result: B13DispositionExecutionResult | None
+    execution_result: B13DispositionExecutionResult | None = field(repr=False)
     reused_windows: int
     generated_windows: int
     new_semantic_calls: int
@@ -86,6 +86,40 @@ def _roots(store, pointers, execution_root, checkpoint_root):
     return tuple(paths)
 
 
+def _verify_feedback_client_binding(*, session, llm_client, tokenizer):
+    """Reject replaced transports, methods, routing or tokenizer clients."""
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root, _urllib_request
+    from short_drama.llm import OpenAICompatibleLLMClient
+    from short_drama.llm.openai_compatible import UrllibTransport
+
+    if (type(tokenizer) is not LlamaClient or tokenizer.transport is not _urllib_request
+            or type(llm_client) is not OpenAICompatibleLLMClient
+            or type(llm_client._transport) is not UrllibTransport
+            or getattr(llm_client._transport.post, "__func__", None) is not UrllibTransport.post
+            or getattr(llm_client.generate_structured, "__func__", None) is not OpenAICompatibleLLMClient.generate_structured
+            or getattr(tokenizer.apply_template, "__func__", None) is not LlamaClient.apply_template
+            or getattr(tokenizer.tokenize, "__func__", None) is not LlamaClient.tokenize
+            or llm_client.runtime_config != session.runtime_config
+            or _server_root(session.runtime_config.base_url) != tokenizer.base_url.rstrip("/")):
+        raise B13RunnerError("feedback requires matched live generation/tokenizer runtime")
+
+
+def _build_feedback_refresh(*, store, pointers, session, llm_client, tokenizer):
+    """Bind the actual clients and construct fresh preflight internally."""
+    from b13_alice_runner_preparation import prepare_b13_alice_execution_session
+
+    _verify_feedback_client_binding(session=session, llm_client=llm_client, tokenizer=tokenizer)
+    def refresh():
+        _verify_feedback_client_binding(session=session, llm_client=llm_client, tokenizer=tokenizer)
+        return prepare_b13_alice_execution_session(
+            store=store, pointers=pointers, source_snapshot=session.preparation.source_snapshot,
+            runtime_config=session.runtime_config, client=tokenizer,
+            input_ceiling_tokens=session.input_ceiling_tokens,
+            model_context_tokens=session.effective_n_ctx, strategy_ref=session.strategy_ref,
+            adaptation_target_id=session.preparation.strategy_selection.artifact.strategy.resolved_target.adaptation_target_id)
+    return refresh
+
+
 def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_root,
                       checkpoint_root, max_new_windows: int, enable_feedback: bool = False,
                       feedback_tokenizer=None, refresh_session=None,
@@ -103,11 +137,10 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
         if type(enable_feedback) is not bool:
             raise B13RunnerError("feedback mode must be an explicit boolean")
         if enable_feedback:
-            if (not callable(refresh_session) or feedback_tokenizer is None
-                    or not callable(getattr(feedback_tokenizer, "apply_template", None))
-                    or not callable(getattr(feedback_tokenizer, "tokenize", None))
-                    or getattr(llm_client, "runtime_config", None) != session.runtime_config):
-                raise B13RunnerError("feedback execution requires a bound runtime and fresh tokenizer preflight")
+            if refresh_session is not None:
+                raise B13RunnerError("feedback preflight cannot be caller supplied")
+            refresh_session = _build_feedback_refresh(store=store, pointers=pointers, session=session,
+                                                      llm_client=llm_client, tokenizer=feedback_tokenizer)
             if (not isinstance(selected_window_ids, tuple) or not selected_window_ids
                     or any(type(item) is not str or not item for item in selected_window_ids)
                     or len(set(selected_window_ids)) != len(selected_window_ids)):
@@ -161,13 +194,18 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
             return finish(plan.verified_reuse_count, ())
         with execution_guard(execution_root, store=store, pointers=pointers) as guard:
             def check_runtime():
-                # Only the Alice production entry supplies this fresh preflight.
+                # The runner constructs this guarded preflight itself.
                 # Equality to the pinned session is necessary, not proof of
                 # cryptographically authenticated serving-model identity.
                 guard.verify()
                 if refresh_session() != session:
                     raise B13RunnerError("fresh guarded runtime/tokenizer preflight changed")
                 _verify_client_runtime(llm_client, session.runtime_config)
+                guard.verify()
+
+            def check_feedback_guard():
+                guard.verify()
+                _verify_feedback_client_binding(session=session, llm_client=llm_client, tokenizer=feedback_tokenizer)
                 guard.verify()
 
             _roots(store, pointers, execution_root, checkpoint_root)
@@ -204,7 +242,8 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
                     llm_client=llm_client, policy=B13WindowSemanticGenerationPolicy())
                 if enable_feedback:
                     execution_kwargs.update(_feedback_session=session,
-                        _feedback_tokenizer=feedback_tokenizer, _feedback_runtime_check=check_runtime)
+                        _feedback_tokenizer=feedback_tokenizer, _feedback_runtime_check=check_runtime,
+                        _feedback_guard_check=check_feedback_guard)
                 accepted = _execute_one_b13_window(**execution_kwargs)
                 guard.verify()
                 _roots(store, pointers, execution_root, checkpoint_root)
@@ -229,9 +268,14 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
             guard.verify()
             return finish(plan.verified_reuse_count, generated)
     except B13RunnerError:
-        raise
+        if not enable_feedback:
+            raise
     except Exception as exc:
-        raise B13RunnerError("bounded execution failed closed; a claim may remain unresolved") from exc
+        if not enable_feedback:
+            raise B13RunnerError("bounded execution failed closed; a claim may remain unresolved") from exc
+    # Do not expose Provider or candidate data even through a direct call to
+    # this internal feedback seam. Raise outside the handlers to drop context.
+    raise B13RunnerError("feedback execution failed closed; inspect the private execution state")
 
 
 def run_b13_resumable(*, store, pointers, session, llm_client, execution_root,
@@ -245,13 +289,13 @@ def run_b13_resumable(*, store, pointers, session, llm_client, execution_root,
 
 def _run_b13_feedback_resumable(*, store, pointers, session, llm_client, execution_root,
                                 checkpoint_root, max_new_windows: int,
-                                feedback_tokenizer, refresh_session,
+                                feedback_tokenizer,
                                 selected_window_ids: tuple[str, ...]) -> B13RunnerResult:
-    """Internal feedback executor; ONLY the Alice entry authenticates its clients.
+    """Internal feedback executor with independently checked client binding.
 
-    Do not call this injectable test seam as a standalone live entry. In the
-    supported entry, real Provider and tokenizer clients are validated and
-    bound to the same runtime before arriving here. No underlying exception
+    The supported Alice entry remains responsible for initial preflight and
+    live authorization; the internal runner rechecks its actual clients and
+    constructs each guarded refresh itself. No underlying exception
     text or cause, including Provider/schema diagnostics, may cross this
     feedback execution boundary.
     """
@@ -261,7 +305,7 @@ def _run_b13_feedback_resumable(*, store, pointers, session, llm_client, executi
             store=store, pointers=pointers, session=session, llm_client=llm_client,
             execution_root=execution_root, checkpoint_root=checkpoint_root,
             max_new_windows=max_new_windows, enable_feedback=True,
-            feedback_tokenizer=feedback_tokenizer, refresh_session=refresh_session,
+            feedback_tokenizer=feedback_tokenizer,
             selected_window_ids=selected_window_ids)
     except Exception:
         failed = True

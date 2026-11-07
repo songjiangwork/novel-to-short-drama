@@ -1,5 +1,6 @@
 """Focused production-entry wiring tests; isolated fake Provider only."""
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 
@@ -25,14 +26,15 @@ def _run(tree, session, tmp_path, client, selected, *, refresh=None, tokenizer=N
     # its bound RuntimeConfig; match that contract rather than loosening the
     # production runner's pre-dispatch identity check.
     client.runtime_config = session.runtime_config
-    return _run_b13_feedback_resumable(
-        store=tree.store, pointers=tree.pointers, session=session,
-        llm_client=client, execution_root=tmp_path / "execution",
-        checkpoint_root=tmp_path / "checkpoints", max_new_windows=limit,
-        feedback_tokenizer=tokenizer or SyntheticTokenizer(),
-        refresh_session=refresh or (lambda: session),
-        selected_window_ids=selected,
-    )
+    with patch('short_drama.adaptation.disposition_runner._build_feedback_refresh',
+               return_value=refresh or (lambda: session)), patch(
+                   'short_drama.adaptation.disposition_runner._verify_feedback_client_binding'):
+        return _run_b13_feedback_resumable(
+            store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / "execution",
+            checkpoint_root=tmp_path / "checkpoints", max_new_windows=limit,
+            feedback_tokenizer=tokenizer or SyntheticTokenizer(), selected_window_ids=selected,
+        )
 
 
 def test_feedback_checkpoint_v2_durable_and_exact_reuse(tmp_path):
@@ -119,7 +121,7 @@ def test_mismatched_client_runtime_refuses_before_claim(tmp_path):
             llm_client=client, execution_root=tmp_path / "execution",
             checkpoint_root=tmp_path / "checkpoints", max_new_windows=1,
             feedback_tokenizer=SyntheticTokenizer(),
-            refresh_session=lambda: session, selected_window_ids=(packet.window_id,))
+            selected_window_ids=(packet.window_id,))
     assert not client.calls and not (tmp_path / "execution").exists()
 
 
@@ -361,3 +363,201 @@ def test_production_feedback_preflight_failure_does_not_leak_exception_graph(tmp
     assert secret not in str(caught.value)
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     assert not preflight.requested_paths
+
+
+def test_internal_feedback_rejects_fake_tokenizer_for_real_client(tmp_path):
+    from short_drama.llm import OpenAICompatibleLLMClient
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    with pytest.raises(B13RunnerError):
+        _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+            max_new_windows=1, feedback_tokenizer=SyntheticTokenizer(), selected_window_ids=(packet.window_id,))
+    assert not (tmp_path / 'execution').exists()
+
+
+def test_internal_impl_rejects_caller_supplied_refresh(tmp_path):
+    from short_drama.adaptation.disposition_runner import _run_b13_resumable_impl
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    client.runtime_config = session.runtime_config
+    with pytest.raises(B13RunnerError, match='feedback execution failed closed'):
+        _run_b13_resumable_impl(store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+            max_new_windows=1, enable_feedback=True, feedback_tokenizer=SyntheticTokenizer(),
+            refresh_session=lambda: session, selected_window_ids=(packet.window_id,))
+    assert not client.calls
+
+
+def test_feedback_tokens_rechecked_after_runtime_refresh(tmp_path):
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected['adaptation_mappings'] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    tokenizer = SyntheticTokenizer()
+    def refresh():
+        if len(client.calls) == 1:
+            tokenizer.count = session.input_ceiling_tokens + 1
+        return session
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,), refresh=refresh, tokenizer=tokenizer)
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize('replacement', ['symlink', 'directory'])
+@pytest.mark.parametrize('existing', [True, False])
+def test_v2_root_swap_during_legacy_resolution_does_not_redirect(tmp_path, monkeypatch, replacement, existing):
+    import os
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected['adaptation_mappings'] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    root = tmp_path / 'checkpoints'
+    if existing:
+        root.mkdir(mode=0o700)
+    alternate = tmp_path / 'alternate'
+    alternate.mkdir(mode=0o700)
+    old_root = tmp_path / 'old-root'
+    original = storage._root
+    switched = False
+    def switch_after_check(path, *, create, **kwargs):
+        nonlocal switched
+        result = original(path, create=create, **kwargs)
+        if create and not switched:
+            switched = True
+            os.rename(root, old_root)
+            if replacement == 'symlink':
+                os.symlink(alternate, root)
+                return alternate
+            os.rename(alternate, root)
+            return root
+        return result
+    monkeypatch.setattr(storage, '_root', switch_after_check)
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    destination = alternate if replacement == 'symlink' else root
+    assert switched and len(client.calls) == 2 and list(destination.iterdir()) == []
+
+
+def test_v2_writer_detects_conflict_inserted_during_readback(tmp_path, monkeypatch):
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected['adaptation_mappings'] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    original = storage._read_private_v2_at
+    def add_conflict(fd, name):
+        raw = original(fd, name)
+        other = name.replace('b13-checkpoint-v2-', 'b13-checkpoint-v1-', 1)
+        import os
+        other_fd = os.open(other, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+        os.close(other_fd)
+        return raw
+    monkeypatch.setattr(storage, '_read_private_v2_at', add_conflict)
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert len(client.calls) == 2
+    assert inspect_claim(tmp_path / 'execution', session, packet.window_id).state is ClaimState.CLAIMED_UNRESOLVED
+
+
+def test_complete_result_repr_excludes_window_text(tmp_path):
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([(_proposal(packet), False)], session.runtime_config)
+    result = _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert result.execution_result is not None
+    assert packet.window_id not in repr(result)
+    assert repr(packet.canonical_bytes()) not in repr(result)
+    assert repr(packet.canonical_bytes()) not in repr(packet)
+    assert repr(result.execution_result.accepted_windows[0].proposal.canonical_bytes()) not in repr(result.execution_result.accepted_windows[0].proposal)
+
+
+@pytest.mark.parametrize('method', ['transport_post', 'generation'])
+def test_internal_binding_rejects_instance_method_substitution(tmp_path, method):
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    tree, session, packet, _ = _fixture(tmp_path)
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    if method == 'transport_post':
+        client._transport.post = lambda **_kwargs: None
+    else:
+        client.generate_structured = lambda *_a, **_kw: None
+    with pytest.raises(B13RunnerError):
+        _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+            max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    assert not tokenizer.requested_paths and not (tmp_path / 'execution').exists()
+
+
+def test_internal_binding_accepts_matched_unmodified_clients_without_io(tmp_path, monkeypatch):
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    import b13_alice_runner_preparation as preparation_module
+    from short_drama.llm import OpenAICompatibleLLMClient
+    from short_drama.adaptation.disposition_runner import _build_feedback_refresh
+    tree, session, _packet, _ = _fixture(tmp_path)
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    observed = []
+    def prepare(**kwargs):
+        observed.append(kwargs)
+        return session
+    monkeypatch.setattr(preparation_module, 'prepare_b13_alice_execution_session', prepare)
+    refresh = _build_feedback_refresh(store=tree.store, pointers=tree.pointers,
+        session=session, llm_client=client, tokenizer=tokenizer)
+    assert refresh() == session and not tokenizer.requested_paths
+    assert observed[0]['client'] is tokenizer
+    assert observed[0]['model_context_tokens'] == session.effective_n_ctx
+    assert observed[0]['strategy_ref'] == session.strategy_ref
+
+
+def test_refresh_rechecks_runtime_binding_before_preflight(tmp_path):
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    from short_drama.adaptation.disposition_runner import _build_feedback_refresh
+    tree, session, _packet, _ = _fixture(tmp_path)
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    refresh = _build_feedback_refresh(store=tree.store, pointers=tree.pointers,
+        session=session, llm_client=client, tokenizer=tokenizer)
+    client._transport.post = lambda **_kwargs: None
+    with pytest.raises(B13RunnerError):
+        refresh()
+    assert not tokenizer.requested_paths
+
+
+def test_binding_change_blocks_feedback_before_tokenizer(tmp_path):
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected['adaptation_mappings'] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    client.runtime_config = session.runtime_config
+    tokenizer = SyntheticTokenizer()
+    def binding(**_kwargs):
+        if client.calls:
+            raise B13RunnerError('runtime binding changed')
+    with patch('short_drama.adaptation.disposition_runner._build_feedback_refresh', return_value=lambda: session), patch(
+            'short_drama.adaptation.disposition_runner._verify_feedback_client_binding', side_effect=binding):
+        with pytest.raises(B13RunnerError):
+            _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
+                llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+                max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    assert len(client.calls) == 1 and tokenizer.messages is None
+
+
+def test_internal_impl_feedback_failure_has_no_exception_graph(tmp_path):
+    from short_drama.adaptation.disposition_runner import _run_b13_resumable_impl
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    client.runtime_config = session.runtime_config
+    secret = 'SYNTHETIC_NOVEL_SECRET'
+    def fail(*_a, **_kw):
+        raise ValueError(secret)
+    client.generate_structured = fail
+    with patch('short_drama.adaptation.disposition_runner._build_feedback_refresh', return_value=lambda: session), patch(
+            'short_drama.adaptation.disposition_runner._verify_feedback_client_binding'):
+        with pytest.raises(B13RunnerError) as caught:
+            _run_b13_resumable_impl(store=tree.store, pointers=tree.pointers, session=session,
+                llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+                max_new_windows=1, enable_feedback=True, feedback_tokenizer=SyntheticTokenizer(),
+                selected_window_ids=(packet.window_id,))
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None

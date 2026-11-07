@@ -468,8 +468,9 @@ def _execute_one_b13_window(
     budget and authority checks do not replace those prerequisites or authorize
     standalone or resumed execution.
 
-    The private feedback parameters are used only by the offline test entry;
-    they do not authorize live execution or production candidate retention.
+    Private feedback parameters are supplied by both the synthetic test entry
+    and the separately gated production runner. They do not themselves authorize
+    dispatch, live model identity, or retention of rejected candidates.
     """
     retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
     failures: list[str] = []

@@ -50,6 +50,16 @@ def inspect_checkpoint_versions_offline(root, session, window_id):
             raise ValueError
         path = Path(directory) / name
         before = storage._target_stat(path)
+        is_feedback_v2 = name.startswith('b13-checkpoint-v2-')
+        # v2 persists a rejected, schema-valid Provider candidate. Unlike
+        # historical v1 evidence, that carrier requires strict confidentiality
+        # on both its directory and its hard-link-free final file.
+        if is_feedback_v2 and (
+            root_before.st_uid != os.geteuid() or stat.S_IMODE(root_before.st_mode) != 0o700
+            or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+        ):
+            raise ValueError
         raw = storage._read_bounded(path)
         if name.startswith('b13-checkpoint-v1-'):
             accepted = verify_and_decode_checkpoint(raw, session)
@@ -60,6 +70,9 @@ def inspect_checkpoint_versions_offline(root, session, window_id):
             raise ValueError
         after = storage._target_stat(path)
         if (before is None or after is None or not storage._stable_file(before, after)
+                or (is_feedback_v2 and (
+                    after.st_uid != os.geteuid() or stat.S_IMODE(after.st_mode) != 0o600
+                    or after.st_nlink != 1))
                 or storage._related_checkpoint_names(directory, preparation, ordinal) != candidates
                 or not storage._stable_file(root_before, os.stat(directory, follow_symlinks=False))):
             raise ValueError

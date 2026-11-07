@@ -20,6 +20,11 @@ from test_b13_window_semantic import _proposal
 
 
 def _run(tree, session, tmp_path, client, selected, *, refresh=None, tokenizer=None, limit=1):
+    # Existing RecordingFakeClient intentionally omits runtime_config unless
+    # provided explicitly.  The real OpenAICompatibleLLMClient always exposes
+    # its bound RuntimeConfig; match that contract rather than loosening the
+    # production runner's pre-dispatch identity check.
+    client.runtime_config = session.runtime_config
     return run_b13_resumable(
         store=tree.store, pointers=tree.pointers, session=session,
         llm_client=client, execution_root=tmp_path / "execution",

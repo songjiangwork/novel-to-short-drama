@@ -83,7 +83,7 @@ def _roots(store, pointers, execution_root, checkpoint_root):
     return tuple(paths)
 
 
-def run_b13_resumable(*, store, pointers, session, llm_client, execution_root,
+def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_root,
                       checkpoint_root, max_new_windows: int, enable_feedback: bool = False,
                       feedback_tokenizer=None, refresh_session=None,
                       selected_window_ids: tuple[str, ...] | None = None) -> B13RunnerResult:
@@ -208,3 +208,43 @@ def run_b13_resumable(*, store, pointers, session, llm_client, execution_root,
         raise
     except Exception as exc:
         raise B13RunnerError("bounded execution failed closed; a claim may remain unresolved") from exc
+
+
+def run_b13_resumable(*, store, pointers, session, llm_client, execution_root,
+                      checkpoint_root, max_new_windows: int) -> B13RunnerResult:
+    """Public, legacy v1-only bounded runner; no feedback opt-in surface."""
+    return _run_b13_resumable_impl(
+        store=store, pointers=pointers, session=session, llm_client=llm_client,
+        execution_root=execution_root, checkpoint_root=checkpoint_root,
+        max_new_windows=max_new_windows)
+
+
+def _run_b13_feedback_resumable(*, store, pointers, session, llm_client, execution_root,
+                                checkpoint_root, max_new_windows: int,
+                                feedback_tokenizer, refresh_session,
+                                selected_window_ids: tuple[str, ...]) -> B13RunnerResult:
+    """Internal feedback executor; ONLY the Alice entry authenticates its clients.
+
+    Do not call this injectable test seam as a standalone live entry. In the
+    supported entry, real Provider and tokenizer clients are validated and
+    bound to the same runtime before arriving here. No underlying exception
+    text or cause, including Provider/schema diagnostics, may cross this
+    feedback execution boundary.
+    """
+    failed = False
+    try:
+        return _run_b13_resumable_impl(
+            store=store, pointers=pointers, session=session, llm_client=llm_client,
+            execution_root=execution_root, checkpoint_root=checkpoint_root,
+            max_new_windows=max_new_windows, enable_feedback=True,
+            feedback_tokenizer=feedback_tokenizer, refresh_session=refresh_session,
+            selected_window_ids=selected_window_ids)
+    except Exception:
+        failed = True
+
+    # Intentionally outside the except handler: no __cause__ or __context__
+    # retaining schema instances, rejected candidates or Provider messages.
+    if failed:
+        raise B13RunnerError(
+            "feedback execution failed closed; inspect the private execution state")
+    raise AssertionError("unreachable feedback failure state")

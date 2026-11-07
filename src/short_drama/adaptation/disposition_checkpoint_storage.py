@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import stat
 import tempfile
 from contextlib import contextmanager
@@ -317,18 +318,129 @@ def save_checkpoint(root: Path | str | os.PathLike[str], accepted: B13WindowAcce
         _fail("cannot atomically persist checkpoint", exc)
 
 
+@contextmanager
+def _private_v2_directory(directory: Path):
+    """Pin one owner-only directory inode for all v2 filesystem operations."""
+    before = _lstat(directory)
+    if (before is None or not stat.S_ISDIR(before.st_mode)
+            or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o700):
+        _fail("v2 checkpoint root must be a private owned directory")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_flag is None:
+        _fail("platform cannot safely pin v2 checkpoint directory")
+    try:
+        fd = os.open(directory, flags | nofollow | directory_flag)
+    except OSError as exc:
+        _fail("cannot safely open v2 checkpoint directory", exc)
+    try:
+        _verify_private_v2_directory(directory, fd)
+        if not _same_file(before, os.fstat(fd)):
+            _fail("v2 checkpoint root changed while being opened")
+        yield fd
+        _verify_private_v2_directory(directory, fd)
+    finally:
+        os.close(fd)
+
+
+def _verify_private_v2_directory(directory: Path, fd: int) -> None:
+    try:
+        by_name, opened = os.lstat(directory), os.fstat(fd)
+    except OSError as exc:
+        _fail("v2 checkpoint root disappeared", exc)
+    if (not _same_file(by_name, opened) or not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(by_name.st_mode)
+            or by_name.st_uid != os.geteuid() or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(by_name.st_mode) != 0o700
+            or stat.S_IMODE(opened.st_mode) != 0o700):
+        _fail("v2 checkpoint root identity or confidentiality changed")
+
+
+def _related_v2_names_at(fd: int, target_name: str) -> tuple[str, ...]:
+    """Reject every other checkpoint namespace for the same window and request."""
+    try:
+        if not target_name.startswith("b13-checkpoint-v2-p"):
+            raise ValueError
+        preparation, rest = target_name.split("-p", 1)[1].split("-w", 1)
+        ordinal = int(rest.split("-q", 1)[0])
+        if _HASH.fullmatch(preparation) is None or ordinal < 1:
+            raise ValueError
+        marker = f"-p{preparation}-w{ordinal:08d}"
+        related = tuple(sorted(item for item in os.listdir(fd)
+                               if item.startswith("b13-checkpoint-") and marker in item))
+    except (ValueError, OSError) as exc:
+        _fail("cannot inspect v2 checkpoint namespace", exc)
+    if any(item != target_name for item in related):
+        _fail("v2 checkpoint conflicts with another version or request")
+    return related
+
+
+def _read_private_v2_at(fd: int, name: str) -> bytes:
+    """Bounded nofollow read with inode, byte-size and privacy revalidation."""
+    try:
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1
+                or before.st_size > evidence.B13_CHECKPOINT_MAX_BYTES):
+            raise ValueError
+        flags = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+        file_fd = os.open(name, flags, dir_fd=fd)
+        try:
+            opened = os.fstat(file_fd)
+            if not _stable_file(before, opened):
+                raise ValueError
+            parts = []
+            total = 0
+            while True:
+                chunk = os.read(file_fd, min(65_536, evidence.B13_CHECKPOINT_MAX_BYTES + 1 - total))
+                if not chunk:
+                    break
+                parts.append(chunk)
+                total += len(chunk)
+                if total > evidence.B13_CHECKPOINT_MAX_BYTES:
+                    raise ValueError
+            if total != opened.st_size or not _stable_file(opened, os.fstat(file_fd)):
+                raise ValueError
+        finally:
+            os.close(file_fd)
+        after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not _stable_file(before, after) or after.st_nlink != 1:
+            raise ValueError
+        return b"".join(parts)
+    except (OSError, ValueError) as exc:
+        _fail("v2 checkpoint failed private read-back", exc)
+
+
+def confirm_feedback_checkpoint_directory(root: Path | str | os.PathLike[str]) -> None:
+    """Durably confirm any visible v2 checkpoint before accepting its reuse.
+
+    A previous post-link directory fsync may have failed after exposing a
+    valid file. This guarded directory fsync closes that indeterminate state
+    before the caller can report verified reuse or COMPLETE.
+    """
+    directory = Path(root).expanduser()
+    with _private_v2_directory(directory) as fd:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            _fail("cannot confirm v2 checkpoint directory durability", exc)
+        _verify_private_v2_directory(directory, fd)
+
+
 def save_feedback_checkpoint_v2(root: Path | str | os.PathLike[str],
                                 accepted: B13WindowAcceptedProposal, session: Any) -> Path:
-    """Persist a verified two-request v2 checkpoint, under the caller's guard.
+    """Publish verified feedback evidence through one pinned private directory.
 
-    This function does not grant dispatch or claim-recovery authority.  The
-    caller must fence old writers and approve private evidence retention.
+    Requires a caller-held execution guard and an approved retention policy.
+    Once staging starts all file operations use dir_fd; never follow a swapped
+    directory symlink or accept an orphaned temporary hard link as success.
     """
     from .disposition_checkpoint_v2 import (
         DEFAULT_EVIDENCE_LIMIT, encode_verified_feedback_checkpoint_v2,
         verify_and_decode_feedback_checkpoint_v2,
     )
-
     try:
         if accepted.feedback_evidence is None:
             raise ValueError
@@ -341,49 +453,81 @@ def save_feedback_checkpoint_v2(root: Path | str | os.PathLike[str],
 
     legacy = checkpoint_path(root, session, accepted.window_id)
     target = legacy.with_name(legacy.name.replace("b13-checkpoint-v1-", "b13-checkpoint-v2-", 1))
-    root_stat = os.stat(target.parent, follow_symlinks=False)
-    if (not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.geteuid()
-            or stat.S_IMODE(root_stat.st_mode) != 0o700):
-        _fail("v2 checkpoint root must be a private owned directory")
-
-    def verify_published() -> None:
-        current = _target_stat(target)
-        if (current is None or current.st_uid != os.geteuid()
-                or stat.S_IMODE(current.st_mode) != 0o600):
-            _fail("v2 checkpoint file must be private and owned")
-        try:
-            if (_read_bounded(target) != raw
+    directory, name = target.parent, target.name
+    with _private_v2_directory(directory) as dirfd:
+        def verify_published() -> None:
+            _verify_private_v2_directory(directory, dirfd)
+            _related_v2_names_at(dirfd, name)
+            if (_read_private_v2_at(dirfd, name) != raw
                     or verify_and_decode_feedback_checkpoint_v2(raw, session) != accepted):
-                raise ValueError
-        except Exception:
-            _fail("published v2 checkpoint failed exact read-back")
+                _fail("published v2 checkpoint failed exact read-back")
+            _verify_private_v2_directory(directory, dirfd)
 
-    _reject_other_window_checkpoint(target)
-    if _target_stat(target, missing_ok=True) is not None:
-        verify_published()
-        _fsync_directory(target.parent)
-        _reject_other_window_checkpoint(target)
-        verify_published()
-        return target
-    try:
-        with _staged_checkpoint(target, raw) as temporary:
+        _related_v2_names_at(dirfd, name)
+        try:
+            existing = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            _fail("cannot inspect existing v2 checkpoint", exc)
+        if existing is not None:
+            verify_published()
             try:
-                _reject_other_window_checkpoint(target)
-                os.link(temporary, target)
-            except FileExistsError:
-                verify_published()
-                _fsync_directory(target.parent)
-                _reject_other_window_checkpoint(target)
-                verify_published()
-                return target
-            _fsync_directory(target.parent)
-            _reject_other_window_checkpoint(target)
+                os.fsync(dirfd)
+            except OSError as exc:
+                _fail("cannot confirm existing v2 checkpoint durability", exc)
             verify_published()
             return target
-    except B13CheckpointStorageError:
-        raise
-    except OSError as exc:
-        _fail("cannot durably publish v2 checkpoint", exc)
+
+        staged_name = None
+        try:
+            # Open temp and destination relative to the same pinned directory
+            # descriptor. EEXIST is never a reason to overwrite existing data.
+            for _ in range(3):
+                candidate = f".{name}.{secrets.token_hex(16)}.tmp"
+                try:
+                    staged_fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                        | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                                        0o600, dir_fd=dirfd)
+                    staged_name = candidate
+                    break
+                except FileExistsError:
+                    continue
+            if staged_name is None:
+                _fail("cannot allocate private v2 checkpoint staging file")
+            try:
+                os.fchmod(staged_fd, 0o600)
+                _write_all(staged_fd, raw)
+                os.fsync(staged_fd)
+            finally:
+                os.close(staged_fd)
+
+            _verify_private_v2_directory(directory, dirfd)
+            _related_v2_names_at(dirfd, name)
+            try:
+                os.link(staged_name, name, src_dir_fd=dirfd, dst_dir_fd=dirfd,
+                        follow_symlinks=False)
+            except FileExistsError:
+                # A concurrent same-name writer cannot grant us overwrite
+                # authority. The exact final file is checked after cleanup.
+                pass
+            try:
+                os.fsync(dirfd)
+            except OSError as exc:
+                _fail("post-link v2 directory fsync failed", exc)
+            _verify_private_v2_directory(directory, dirfd)
+        finally:
+            if staged_name is not None:
+                try:
+                    os.unlink(staged_name, dir_fd=dirfd)
+                    os.fsync(dirfd)
+                except OSError as exc:
+                    _fail("v2 staging cleanup or directory fsync failed", exc)
+
+        # Only after cleanup is it possible for final st_nlink == 1. If
+        # cleanup failed, there is no success-shaped return even if visible.
+        verify_published()
+        return target
 
 
 def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id: str) -> B13WindowAcceptedProposal | None:
@@ -427,5 +571,5 @@ def load_checkpoint(root: Path | str | os.PathLike[str], session: Any, window_id
 
 __all__ = [
     "B13CheckpointStorageError", "checkpoint_path", "save_checkpoint",
-    "save_feedback_checkpoint_v2", "load_checkpoint",
+    "save_feedback_checkpoint_v2", "confirm_feedback_checkpoint_directory", "load_checkpoint",
 ]

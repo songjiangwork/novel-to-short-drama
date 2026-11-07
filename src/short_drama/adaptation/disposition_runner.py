@@ -16,7 +16,10 @@ from short_drama.artifacts import FileArtifactStore
 from short_drama.foundation import FilePointerStore
 from short_drama.llm import LLMClient
 
-from .disposition_checkpoint_storage import load_checkpoint, save_checkpoint, save_feedback_checkpoint_v2
+from .disposition_checkpoint_storage import (
+    confirm_feedback_checkpoint_directory, load_checkpoint, save_checkpoint,
+    save_feedback_checkpoint_v2,
+)
 from .disposition_execution import (
     B13DispositionExecutionResult, B13WindowSemanticGenerationPolicy,
     _execute_one_b13_window, _verify_client_runtime,
@@ -119,8 +122,19 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
                 or not 0 <= max_new_windows <= plan.windows_total):
             raise B13RunnerError("max_new_windows must be between zero and the complete window count")
 
+        def any_feedback_evidence(resume_plan):
+            return any(w.accepted_proposal is not None
+                       and w.accepted_proposal.feedback_evidence is not None
+                       for w in resume_plan.windows)
+
         def finish(initial_reused, generated):
             final = planning(store=store, pointers=pointers, session=session, checkpoint_root=checkpoint_root)
+            if enable_feedback and any_feedback_evidence(final):
+                # Treat a visible post-link target from a failed prior fsync as
+                # indeterminate until a guarded fsync durably confirms it.
+                confirm_feedback_checkpoint_directory(checkpoint_root)
+                final = planning(store=store, pointers=pointers, session=session,
+                                 checkpoint_root=checkpoint_root)
             expected = {w.window_id: w.accepted_proposal for w in plan.windows if w.accepted_proposal is not None}
             expected.update({p.window_id: p for p in generated})
             if any(w.accepted_proposal != expected.get(w.window_id) for w in final.windows):
@@ -138,6 +152,12 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
                 sum(w.accepted_proposal.semantic_rounds for w in final.windows if w.accepted_proposal), remaining)
 
         if not plan.needs_generation_count:
+            if enable_feedback and any_feedback_evidence(plan):
+                with execution_guard(execution_root, store=store, pointers=pointers) as guard:
+                    _roots(store, pointers, execution_root, checkpoint_root)
+                    confirm_feedback_checkpoint_directory(checkpoint_root)
+                    guard.verify()
+                    return finish(plan.verified_reuse_count, ())
             return finish(plan.verified_reuse_count, ())
         with execution_guard(execution_root, store=store, pointers=pointers) as guard:
             def check_runtime():
@@ -154,6 +174,10 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
             if enable_feedback:
                 check_runtime()
             plan = planning(store=store, pointers=pointers, session=session, checkpoint_root=checkpoint_root)
+            if enable_feedback and any_feedback_evidence(plan):
+                confirm_feedback_checkpoint_directory(checkpoint_root)
+                plan = planning(store=store, pointers=pointers, session=session,
+                                checkpoint_root=checkpoint_root)
             missing = [w for w in plan.windows if w.decision is B13ResumeDecision.NEEDS_GENERATION
                        and (not enable_feedback or w.window_id in selected_window_ids)]
             for window in missing:

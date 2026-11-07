@@ -109,6 +109,20 @@ def test_invalid_window_selection_has_no_side_effects(tmp_path, selection):
     assert not client.calls and not (tmp_path / "execution").exists()
 
 
+def test_mismatched_client_runtime_refuses_before_claim(tmp_path):
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    client.runtime_config = replace(session.runtime_config, request_model="wrong-model")
+    with pytest.raises(B13RunnerError):
+        run_b13_resumable(
+            store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / "execution",
+            checkpoint_root=tmp_path / "checkpoints", max_new_windows=1,
+            enable_feedback=True, feedback_tokenizer=SyntheticTokenizer(),
+            refresh_session=lambda: session, selected_window_ids=(packet.window_id,))
+    assert not client.calls and not (tmp_path / "execution").exists()
+
+
 def test_fresh_runtime_required_before_claim(tmp_path):
     tree, session, packet, _ = _fixture(tmp_path)
     client = RecordingFakeClient([], session.runtime_config)

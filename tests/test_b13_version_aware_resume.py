@@ -48,6 +48,7 @@ def test_v2_only_blocks_v1_loader_and_save_preserves_carrier(case, tmp_path):
     tree, session, packet, semantic, raw = case
     path = tmp_path / _name(session, packet)
     path.write_bytes(raw)
+    path.chmod(0o600)
     before = path.read_bytes()
     with pytest.raises(storage.B13CheckpointStorageError):
         storage.load_checkpoint(tmp_path, session, packet.window_id)
@@ -92,6 +93,7 @@ def test_mixed_windows_read_only_resume(tmp_path, monkeypatch):
     two = root / _name(session, second)
     raw = _v2(session, second, requests[1])
     two.write_bytes(raw)
+    two.chmod(0o600)
     before = {p.name: p.read_bytes() for p in root.iterdir()}
     plan = resume.inspect_b13_resume_versions(store=tree.store, pointers=tree.pointers, session=session,
                                              checkpoint_root=root)
@@ -136,12 +138,36 @@ def test_conflicts_and_unsafe_files_fail_closed(case, tmp_path, kind):
         storage.save_checkpoint(tmp_path, _accepted(packet, semantic, session.runtime_config), session)
 
 
+@pytest.mark.parametrize('unsafe', ['file_mode', 'root_mode', 'hardlink'])
+def test_feedback_v2_requires_private_unlinked_file_and_root(case, tmp_path, unsafe):
+    _tree, session, packet, _semantic, raw = case
+    target = tmp_path / _name(session, packet)
+    target.write_bytes(raw)
+    target.chmod(0o600)
+    if unsafe == 'file_mode':
+        target.chmod(0o644)
+    elif unsafe == 'root_mode':
+        tmp_path.chmod(0o750)
+    else:
+        os.link(target, tmp_path / 'unexpected-second-link')
+
+    try:
+        with pytest.raises(B13OfflineCheckpointConflict):
+            inspect_checkpoint_versions_offline(tmp_path, session, packet.window_id)
+        assert target.read_bytes() == raw
+    finally:
+        if unsafe == 'root_mode':
+            tmp_path.chmod(0o700)
+
+
 def test_file_replaced_during_read_is_rejected(case, tmp_path, monkeypatch):
     _tree, session, packet, _semantic, raw = case
     target = tmp_path / _name(session, packet)
     target.write_bytes(raw)
+    target.chmod(0o600)
     replacement = tmp_path / 'replacement'
     replacement.write_bytes(raw)
+    replacement.chmod(0o600)
     real_read = storage.os.read
     switched = False
     def read_and_replace(fd, n):

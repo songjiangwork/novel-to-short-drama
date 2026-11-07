@@ -1,10 +1,11 @@
-"""Experimental read-only v1/v2 conflict inspection; not wired to the runner.
+"""Read-only v1/v2 conflict inspection, used by the opt-in feedback runner.
 
 Older readers are unaware of v2. Before any production rollout, stop all old
 writers, fence their access, complete version cutover, and under the original
 execution guard revalidate roots, authority, claims and every checkpoint. A
 directory scan is not an atomic snapshot and cannot constrain old processes.
-This helper neither enables v2 writes nor supplies dispatch authorization.
+This helper itself neither enables v2 writes nor supplies dispatch authorization.
+The runner supplies an execution guard and explicit selected-window policy.
 """
 from __future__ import annotations
 
@@ -49,6 +50,16 @@ def inspect_checkpoint_versions_offline(root, session, window_id):
             raise ValueError
         path = Path(directory) / name
         before = storage._target_stat(path)
+        is_feedback_v2 = name.startswith('b13-checkpoint-v2-')
+        # v2 persists a rejected, schema-valid Provider candidate. Unlike
+        # historical v1 evidence, that carrier requires strict confidentiality
+        # on both its directory and its hard-link-free final file.
+        if is_feedback_v2 and (
+            root_before.st_uid != os.geteuid() or stat.S_IMODE(root_before.st_mode) != 0o700
+            or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+        ):
+            raise ValueError
         raw = storage._read_bounded(path)
         if name.startswith('b13-checkpoint-v1-'):
             accepted = verify_and_decode_checkpoint(raw, session)
@@ -59,6 +70,9 @@ def inspect_checkpoint_versions_offline(root, session, window_id):
             raise ValueError
         after = storage._target_stat(path)
         if (before is None or after is None or not storage._stable_file(before, after)
+                or (is_feedback_v2 and (
+                    after.st_uid != os.geteuid() or stat.S_IMODE(after.st_mode) != 0o600
+                    or after.st_nlink != 1))
                 or storage._related_checkpoint_names(directory, preparation, ordinal) != candidates
                 or not storage._stable_file(root_before, os.stat(directory, follow_symlinks=False))):
             raise ValueError

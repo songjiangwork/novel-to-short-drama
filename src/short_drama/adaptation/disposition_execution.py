@@ -459,7 +459,7 @@ def _execute_one_b13_window(
     preparation: B13DispositionPreparation, semantic: B13WindowSemanticPreparation,
     budget: B13WindowSemanticBudget | None, runtime_config: RuntimeConfig,
     llm_client: LLMClient, policy: B13WindowSemanticGenerationPolicy,
-    _feedback_session=None, _feedback_tokenizer=None,
+    _feedback_session=None, _feedback_tokenizer=None, _feedback_runtime_check=None,
 ) -> B13WindowAcceptedProposal:
     """Execute one window after the caller has authorized the complete batch.
 
@@ -468,8 +468,9 @@ def _execute_one_b13_window(
     budget and authority checks do not replace those prerequisites or authorize
     standalone or resumed execution.
 
-    The private feedback parameters are used only by the offline test entry;
-    they do not authorize live execution or production candidate retention.
+    Private feedback parameters are supplied by both the synthetic test entry
+    and the separately gated production runner. They do not themselves authorize
+    dispatch, live model identity, or retention of rejected candidates.
     """
     retry_options = GenerationExecutionOptions(prompt_context_reuse="disabled")
     failures: list[str] = []
@@ -482,6 +483,9 @@ def _execute_one_b13_window(
         options = semantic.execution_options if round_number == 1 else retry_options
         _verify_budget(round_semantic, runtime_config, options, budget)
         _revalidate_authority(store, pointers, preparation)
+        if _feedback_runtime_check is not None:
+            _feedback_runtime_check()
+            _revalidate_authority(store, pointers, preparation)
         result = llm_client.generate_structured(
             round_semantic.request.rendered_prompt, round_semantic.output_schema,
             round_semantic.semantic_profile, execution_options=options,

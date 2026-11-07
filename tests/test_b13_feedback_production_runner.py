@@ -9,7 +9,7 @@ from short_drama.adaptation.disposition_execution_claim import (
 )
 from short_drama.adaptation.disposition_resume import inspect_b13_resume_versions
 from short_drama.adaptation.disposition_runner import (
-    B13RunnerError, B13RunnerStatus, run_b13_resumable,
+    B13RunnerError, B13RunnerStatus, _run_b13_feedback_resumable, run_b13_resumable,
 )
 from test_b13_disposition_checkpoint import _fixture, _session
 from test_b13_disposition_execution import (
@@ -25,11 +25,11 @@ def _run(tree, session, tmp_path, client, selected, *, refresh=None, tokenizer=N
     # its bound RuntimeConfig; match that contract rather than loosening the
     # production runner's pre-dispatch identity check.
     client.runtime_config = session.runtime_config
-    return run_b13_resumable(
+    return _run_b13_feedback_resumable(
         store=tree.store, pointers=tree.pointers, session=session,
         llm_client=client, execution_root=tmp_path / "execution",
         checkpoint_root=tmp_path / "checkpoints", max_new_windows=limit,
-        enable_feedback=True, feedback_tokenizer=tokenizer or SyntheticTokenizer(),
+        feedback_tokenizer=tokenizer or SyntheticTokenizer(),
         refresh_session=refresh or (lambda: session),
         selected_window_ids=selected,
     )
@@ -114,11 +114,11 @@ def test_mismatched_client_runtime_refuses_before_claim(tmp_path):
     client = RecordingFakeClient([], session.runtime_config)
     client.runtime_config = replace(session.runtime_config, request_model="wrong-model")
     with pytest.raises(B13RunnerError):
-        run_b13_resumable(
+        _run_b13_feedback_resumable(
             store=tree.store, pointers=tree.pointers, session=session,
             llm_client=client, execution_root=tmp_path / "execution",
             checkpoint_root=tmp_path / "checkpoints", max_new_windows=1,
-            enable_feedback=True, feedback_tokenizer=SyntheticTokenizer(),
+            feedback_tokenizer=SyntheticTokenizer(),
             refresh_session=lambda: session, selected_window_ids=(packet.window_id,))
     assert not client.calls and not (tmp_path / "execution").exists()
 
@@ -165,3 +165,30 @@ def test_v2_writer_failure_preserves_claim_and_prevents_replay(tmp_path, monkeyp
     with pytest.raises(B13RunnerError):
         _run(tree, session, tmp_path, client, (packet.window_id,))
     assert len(client.calls) == 2
+
+
+def test_public_runner_has_no_feedback_opt_in_surface(tmp_path):
+    tree, session, _packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    with pytest.raises(TypeError):
+        run_b13_resumable(
+            store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / "execution",
+            checkpoint_root=tmp_path / "checkpoints", max_new_windows=1,
+            enable_feedback=True, feedback_tokenizer=SyntheticTokenizer())
+    assert not client.calls and not (tmp_path / "execution").exists()
+
+
+def test_feedback_error_has_no_provider_content_in_exception_graph(tmp_path):
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    secret = "SECRET_NOVEL_CONTENT_SHOULD_NOT_ESCAPE"
+    def schema_leak(*_args, **_kwargs):
+        raise ValueError(secret)
+    client.generate_structured = schema_leak
+    with pytest.raises(B13RunnerError) as caught:
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    error = caught.value
+    assert secret not in str(error)
+    assert error.__cause__ is None and error.__context__ is None
+    assert error.__suppress_context__ is False

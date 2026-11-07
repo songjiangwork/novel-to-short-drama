@@ -319,3 +319,45 @@ def test_private_directory_swap_never_redirects_v2_bytes(tmp_path, monkeypatch):
     assert switched[0] and len(client.calls) == 2
     assert list(alternate.iterdir()) == []
     assert claim_path(tmp_path / "execution", session, packet.window_id).exists()
+
+
+def test_production_entry_rejects_generation_transport_substitution(tmp_path):
+    import b13_alice_bounded_runner as alice
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    tree, session, packet, _ = _fixture(tmp_path)
+    preflight = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    client = OpenAICompatibleLLMClient(session.runtime_config, transport=object())
+    with pytest.raises(B13RunnerError, match="matched live generation/tokenizer"):
+        alice.run_b13_alice_bounded(
+            store=tree.store, pointers=tree.pointers, source_snapshot=session.preparation.source_snapshot,
+            runtime_config=session.runtime_config, preflight_client=preflight,
+            llm_client=client, input_ceiling_tokens=10_000,
+            execution_root=tmp_path / "execution", checkpoint_root=tmp_path / "checkpoints",
+            max_new_windows=1, enable_feedback=True, selected_window_ids=(packet.window_id,))
+    assert not preflight.requested_paths
+
+
+def test_production_feedback_preflight_failure_does_not_leak_exception_graph(tmp_path, monkeypatch):
+    import b13_alice_bounded_runner as alice
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    tree, session, packet, _ = _fixture(tmp_path)
+    preflight = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    secret = "SOURCE_NOVEL_TEXT_NOT_FOR_EXCEPTION_CAUSE"
+
+    def fail_preflight(**_kw):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(alice, "prepare_b13_alice_execution_session", fail_preflight)
+    with pytest.raises(B13RunnerError) as caught:
+        alice.run_b13_alice_bounded(
+            store=tree.store, pointers=tree.pointers, source_snapshot=session.preparation.source_snapshot,
+            runtime_config=session.runtime_config, preflight_client=preflight,
+            llm_client=client, input_ceiling_tokens=10_000,
+            execution_root=tmp_path / "execution", checkpoint_root=tmp_path / "checkpoints",
+            max_new_windows=1, enable_feedback=True, selected_window_ids=(packet.window_id,))
+    assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert not preflight.requested_paths

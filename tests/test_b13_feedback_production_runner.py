@@ -192,3 +192,130 @@ def test_feedback_error_has_no_provider_content_in_exception_graph(tmp_path):
     assert secret not in str(error)
     assert error.__cause__ is None and error.__context__ is None
     assert error.__suppress_context__ is False
+
+
+def test_production_entry_rejects_synthetic_client_without_preflight_or_dispatch(tmp_path, monkeypatch):
+    import b13_alice_bounded_runner as alice
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    client.runtime_config = session.runtime_config
+    def should_not_prepare(**_kw):
+        raise AssertionError("must fail before production preflight")
+    monkeypatch.setattr(alice, "prepare_b13_alice_execution_session", should_not_prepare)
+    with pytest.raises(B13RunnerError, match="matched live generation/tokenizer"):
+        alice.run_b13_alice_bounded(
+            store=tree.store, pointers=tree.pointers, source_snapshot=session.preparation.source_snapshot,
+            runtime_config=session.runtime_config, preflight_client=SyntheticTokenizer(),
+            llm_client=client, input_ceiling_tokens=10_000,
+            execution_root=tmp_path / "execution", checkpoint_root=tmp_path / "checkpoints",
+            max_new_windows=1, enable_feedback=True, selected_window_ids=(packet.window_id,))
+    assert not client.calls and not (tmp_path / "execution").exists()
+
+
+def test_production_entry_rejects_injected_preflight_transport(tmp_path, monkeypatch):
+    import b13_alice_bounded_runner as alice
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    tree, session, packet, _ = _fixture(tmp_path)
+    preflight = LlamaClient(base_url=_server_root(session.runtime_config.base_url),
+                            transport=lambda *_args: (200, b"{}"))
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    monkeypatch.setattr(alice, "prepare_b13_alice_execution_session",
+                        lambda **_kw: (_ for _ in ()).throw(AssertionError("preflight must not start")))
+    with pytest.raises(B13RunnerError, match="matched live generation/tokenizer"):
+        alice.run_b13_alice_bounded(
+            store=tree.store, pointers=tree.pointers, source_snapshot=session.preparation.source_snapshot,
+            runtime_config=session.runtime_config, preflight_client=preflight,
+            llm_client=client, input_ceiling_tokens=10_000,
+            execution_root=tmp_path / "execution", checkpoint_root=tmp_path / "checkpoints",
+            max_new_windows=1, enable_feedback=True, selected_window_ids=(packet.window_id,))
+    assert not preflight.requested_paths
+
+
+def test_postlink_fsync_failure_cannot_yield_complete_until_guarded_confirmation(tmp_path, monkeypatch):
+    import os
+    import stat
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected["adaptation_mappings"] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    target_root = tmp_path / "checkpoints"
+    original_fsync = storage.os.fsync
+    refusal = [True]
+
+    def fail_v2_root_sync(fd):
+        if (refusal[0] and stat.S_ISDIR(os.fstat(fd).st_mode)
+                and target_root.exists()
+                and any(target_root.glob("b13-checkpoint-v2-*.json"))):
+            raise OSError("test-only post-link directory fsync failure")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(storage.os, "fsync", fail_v2_root_sync)
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert len(client.calls) == 2
+    visible = list(target_root.glob("b13-checkpoint-v2-*.json"))
+    assert len(visible) == 1 and visible[0].stat().st_nlink == 1
+    # The file is readable, but its directory durability has not been
+    # confirmed. A new invocation must fail without declaring COMPLETE.
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert len(client.calls) == 2
+    refusal[0] = False
+    recovered = _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert recovered.status is B13RunnerStatus.COMPLETE
+    assert recovered.generated_windows == 0 and recovered.reused_windows == 1
+    assert len(client.calls) == 2
+
+
+def test_failed_staging_unlink_never_returns_success_or_replays(tmp_path, monkeypatch):
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected["adaptation_mappings"] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    original_unlink = storage.os.unlink
+
+    def fail_v2_staging_cleanup(name, *args, **kwargs):
+        if isinstance(name, str) and name.startswith(".b13-checkpoint-v2-") and name.endswith(".tmp"):
+            raise OSError("test-only temporary link cleanup failure")
+        return original_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "unlink", fail_v2_staging_cleanup)
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert len(client.calls) == 2
+    files = list((tmp_path / "checkpoints").glob("b13-checkpoint-v2-*.json"))
+    assert len(files) == 1 and files[0].stat().st_nlink == 2
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert len(client.calls) == 2
+
+
+def test_private_directory_swap_never_redirects_v2_bytes(tmp_path, monkeypatch):
+    import os
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected["adaptation_mappings"] = []
+    client = RecordingFakeClient([(rejected, False), (_proposal(packet), False)], session.runtime_config)
+    target_root = tmp_path / "checkpoints"
+    alternate = tmp_path / "alternate"
+    relocated = tmp_path / "relocated-original"
+    alternate.mkdir(mode=0o700)
+    original_link = storage.os.link
+    switched = [False]
+
+    def swap_before_link(source, target, *args, **kwargs):
+        if (not switched[0] and isinstance(target, str)
+                and target.startswith("b13-checkpoint-v2-")
+                and kwargs.get("dst_dir_fd") is not None):
+            switched[0] = True
+            os.rename(target_root, relocated)
+            os.symlink(alternate, target_root)
+        return original_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "link", swap_before_link)
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,))
+    assert switched[0] and len(client.calls) == 2
+    assert list(alternate.iterdir()) == []
+    assert claim_path(tmp_path / "execution", session, packet.window_id).exists()

@@ -1,10 +1,11 @@
-"""Experimental read-only v1/v2 conflict inspection; not wired to the runner.
+"""Read-only v1/v2 conflict inspection, used by the opt-in feedback runner.
 
 Older readers are unaware of v2. Before any production rollout, stop all old
 writers, fence their access, complete version cutover, and under the original
 execution guard revalidate roots, authority, claims and every checkpoint. A
 directory scan is not an atomic snapshot and cannot constrain old processes.
-This helper neither enables v2 writes nor supplies dispatch authorization.
+This helper itself neither enables v2 writes nor supplies dispatch authorization.
+The runner supplies an execution guard and explicit selected-window policy.
 """
 from __future__ import annotations
 

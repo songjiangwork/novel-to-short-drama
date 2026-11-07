@@ -7,11 +7,12 @@ if _scripts not in sys.path:
     sys.path.insert(0, _scripts)
 
 from b13_alice_runner_preparation import prepare_b13_alice_execution_session
-from b13_alice_token_budget_preflight import LlamaClient, _server_root
+from b13_alice_token_budget_preflight import LlamaClient, _server_root, _urllib_request
 from short_drama.adaptation.disposition_runner import (
     B13RunnerError, _run_b13_feedback_resumable, run_b13_resumable,
 )
 from short_drama.llm import OpenAICompatibleLLMClient
+from short_drama.llm.openai_compatible import UrllibTransport
 
 
 def run_b13_alice_bounded(*, store, pointers, source_snapshot, runtime_config,
@@ -26,7 +27,9 @@ def run_b13_alice_bounded(*, store, pointers, source_snapshot, runtime_config,
     """
     if enable_feedback:
         if (type(preflight_client) is not LlamaClient
+                or preflight_client.transport is not _urllib_request
                 or type(llm_client) is not OpenAICompatibleLLMClient
+                or type(llm_client._transport) is not UrllibTransport
                 or llm_client.runtime_config != runtime_config
                 or _server_root(runtime_config.base_url) != preflight_client.base_url.rstrip("/")):
             raise B13RunnerError("production feedback requires a matched live generation/tokenizer runtime")

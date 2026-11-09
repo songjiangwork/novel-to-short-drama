@@ -482,35 +482,48 @@ def _execute_one_b13_window(
     first_result = None
     for round_number in range(1, policy.max_rounds + 1):
         options = semantic.execution_options if round_number == 1 else retry_options
-        _verify_budget(round_semantic, runtime_config, options, budget)
-        _revalidate_authority(store, pointers, preparation)
-        if _feedback_runtime_check is not None:
-            _feedback_runtime_check()
+        def check_before_attempt():
+            _verify_budget(round_semantic, runtime_config, options, budget)
             _revalidate_authority(store, pointers, preparation)
-        if round_number == 2 and _feedback_session is not None:
-            from short_drama.artifacts import strict_json_loads
+            if _feedback_runtime_check is not None:
+                _feedback_runtime_check()
+                _revalidate_authority(store, pointers, preparation)
+            if round_number == 2 and _feedback_session is not None:
+                from short_drama.artifacts import strict_json_loads
+                if _feedback_guard_check is not None:
+                    _feedback_guard_check()
+                try:
+                    prompt = _feedback_tokenizer.apply_template(
+                        strict_json_loads(round_semantic.provider_request_bytes)["messages"], add_generation_prompt=True)
+                    if not isinstance(prompt, str) or not prompt.strip():
+                        raise ValueError
+                    tokens = _feedback_tokenizer.tokenize(prompt)
+                    if (not isinstance(tokens, list) or not tokens
+                            or any(type(token) is not int for token in tokens)
+                            or len(tokens) > budget.input_ceiling_tokens
+                            or len(tokens) + semantic.semantic_profile.max_output_tokens > budget.model_context_tokens):
+                        raise ValueError
+                except Exception:
+                    raise B13WindowSemanticBudgetError("feedback tokenizer preflight failed") from None
+                _revalidate_authority(store, pointers, preparation)
             if _feedback_guard_check is not None:
                 _feedback_guard_check()
-            try:
-                prompt = _feedback_tokenizer.apply_template(
-                    strict_json_loads(round_semantic.provider_request_bytes)["messages"], add_generation_prompt=True)
-                if not isinstance(prompt, str) or not prompt.strip():
-                    raise ValueError
-                tokens = _feedback_tokenizer.tokenize(prompt)
-                if (not isinstance(tokens, list) or not tokens
-                        or any(type(token) is not int for token in tokens)
-                        or len(tokens) > budget.input_ceiling_tokens
-                        or len(tokens) + semantic.semantic_profile.max_output_tokens > budget.model_context_tokens):
-                    raise ValueError
-            except Exception:
-                raise B13WindowSemanticBudgetError("feedback tokenizer preflight failed") from None
-            _revalidate_authority(store, pointers, preparation)
-        if _feedback_guard_check is not None:
-            _feedback_guard_check()
-        result = llm_client.generate_structured(
-            round_semantic.request.rendered_prompt, round_semantic.output_schema,
-            round_semantic.semantic_profile, execution_options=options,
-        )
+
+        from short_drama.llm import OpenAICompatibleLLMClient
+        if _feedback_runtime_check is not None and type(llm_client) is OpenAICompatibleLLMClient:
+            # Unbound class method avoids instance shadowing; the binding check
+            # repeats within check_before_attempt before every real dispatch.
+            if _feedback_guard_check is not None:
+                _feedback_guard_check()
+            result = OpenAICompatibleLLMClient._generate_structured_guarded(
+                llm_client, round_semantic.request.rendered_prompt, round_semantic.output_schema,
+                round_semantic.semantic_profile, execution_options=options, before_attempt=check_before_attempt)
+        else:
+            check_before_attempt()
+            result = llm_client.generate_structured(
+                round_semantic.request.rendered_prompt, round_semantic.output_schema,
+                round_semantic.semantic_profile, execution_options=options,
+            )
         round_provider_attempts = _provider_attempts(result.attempts)
         cumulative_provider_attempts += round_provider_attempts
         # Authority races win over proposal acceptance or retry decisions.

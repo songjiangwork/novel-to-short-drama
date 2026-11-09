@@ -91,10 +91,17 @@ def _verify_feedback_client_binding(*, session, llm_client, tokenizer):
     from b13_alice_token_budget_preflight import LlamaClient, _server_root, _urllib_request
     from short_drama.llm import OpenAICompatibleLLMClient
     from short_drama.llm.openai_compatible import UrllibTransport
+    from short_drama.llm.retry import real_sleeper, validate_max_attempts
 
     if (type(tokenizer) is not LlamaClient or tokenizer.transport is not _urllib_request
+            or set(vars(tokenizer)) != {"base_url", "transport", "timeout_seconds", "max_response_bytes", "requested_paths"}
+            or type(tokenizer.requested_paths) is not list
+            or any(type(path) is not str for path in tokenizer.requested_paths)
             or type(llm_client) is not OpenAICompatibleLLMClient
+            or set(vars(llm_client)) != {"_runtime", "_transport", "_sleeper", "_max_attempts"}
             or type(llm_client._transport) is not UrllibTransport
+            or vars(llm_client._transport) != {}
+            or llm_client._sleeper is not real_sleeper
             or getattr(llm_client._transport.post, "__func__", None) is not UrllibTransport.post
             or getattr(llm_client.generate_structured, "__func__", None) is not OpenAICompatibleLLMClient.generate_structured
             or getattr(tokenizer.apply_template, "__func__", None) is not LlamaClient.apply_template
@@ -102,6 +109,10 @@ def _verify_feedback_client_binding(*, session, llm_client, tokenizer):
             or llm_client.runtime_config != session.runtime_config
             or _server_root(session.runtime_config.base_url) != tokenizer.base_url.rstrip("/")):
         raise B13RunnerError("feedback requires matched live generation/tokenizer runtime")
+    try:
+        validate_max_attempts(llm_client._max_attempts)
+    except Exception:
+        raise B13RunnerError("feedback requires a bounded technical retry policy") from None
 
 
 def _build_feedback_refresh(*, store, pointers, session, llm_client, tokenizer):
@@ -141,6 +152,7 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
                 raise B13RunnerError("feedback preflight cannot be caller supplied")
             refresh_session = _build_feedback_refresh(store=store, pointers=pointers, session=session,
                                                       llm_client=llm_client, tokenizer=feedback_tokenizer)
+            feedback_attempt_limit = getattr(llm_client, "_max_attempts", None)
             if (not isinstance(selected_window_ids, tuple) or not selected_window_ids
                     or any(type(item) is not str or not item for item in selected_window_ids)
                     or len(set(selected_window_ids)) != len(selected_window_ids)):
@@ -200,12 +212,16 @@ def _run_b13_resumable_impl(*, store, pointers, session, llm_client, execution_r
                 guard.verify()
                 if refresh_session() != session:
                     raise B13RunnerError("fresh guarded runtime/tokenizer preflight changed")
+                if getattr(llm_client, "_max_attempts", None) != feedback_attempt_limit:
+                    raise B13RunnerError("feedback retry limit changed")
                 _verify_client_runtime(llm_client, session.runtime_config)
                 guard.verify()
 
             def check_feedback_guard():
                 guard.verify()
                 _verify_feedback_client_binding(session=session, llm_client=llm_client, tokenizer=feedback_tokenizer)
+                if getattr(llm_client, "_max_attempts", None) != feedback_attempt_limit:
+                    raise B13RunnerError("feedback retry limit changed")
                 guard.verify()
 
             _roots(store, pointers, execution_root, checkpoint_root)

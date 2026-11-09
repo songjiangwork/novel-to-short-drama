@@ -470,7 +470,7 @@ def test_complete_result_repr_excludes_window_text(tmp_path):
     assert repr(result.execution_result.accepted_windows[0].proposal.canonical_bytes()) not in repr(result.execution_result.accepted_windows[0].proposal)
 
 
-@pytest.mark.parametrize('method', ['transport_post', 'generation'])
+@pytest.mark.parametrize('method', ['transport_post', 'generation', 'map_request', 'attempt', 'sleeper'])
 def test_internal_binding_rejects_instance_method_substitution(tmp_path, method):
     from b13_alice_token_budget_preflight import LlamaClient, _server_root
     from short_drama.llm import OpenAICompatibleLLMClient
@@ -479,8 +479,14 @@ def test_internal_binding_rejects_instance_method_substitution(tmp_path, method)
     client = OpenAICompatibleLLMClient(session.runtime_config)
     if method == 'transport_post':
         client._transport.post = lambda **_kwargs: None
-    else:
+    elif method == 'generation':
         client.generate_structured = lambda *_a, **_kw: None
+    elif method == 'map_request':
+        client._map_request = lambda *_a, **_kw: None
+    elif method == 'attempt':
+        client._attempt = lambda *_a, **_kw: None
+    else:
+        client._sleeper = lambda _delay: None
     with pytest.raises(B13RunnerError):
         _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
             llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
@@ -561,3 +567,209 @@ def test_internal_impl_feedback_failure_has_no_exception_graph(tmp_path):
                 selected_window_ids=(packet.window_id,))
     assert secret not in str(caught.value)
     assert caught.value.__cause__ is None and caught.value.__context__ is None
+
+
+@pytest.mark.parametrize('change', ['capacity', 'model', 'endpoint', 'map_request', 'attempt', 'transport_post', 'max_attempts', 'none'])
+def test_technical_retry_rechecks_before_each_fake_http_attempt(tmp_path, monkeypatch, change):
+    """Patch only test seams: no network, no synthetic preflight in production."""
+    import json
+    import short_drama.llm.retry as retry_module
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient, TransportResponse
+    from short_drama.llm.openai_compatible import UrllibTransport
+
+    tree, session, packet, _ = _fixture(tmp_path)
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    state = {'capacity_changed': False, 'calls': 0}
+    valid = _proposal(packet)
+    def post(_self, **_kwargs):
+        state['calls'] += 1
+        if state['calls'] == 1:
+            return TransportResponse(503, b'{}')
+        envelope = {'choices': [{'message': {'content': json.dumps(valid)}, 'finish_reason': 'stop'}]}
+        return TransportResponse(200, json.dumps(envelope).encode())
+    monkeypatch.setattr(UrllibTransport, 'post', post)
+    def sleeper(_delay):
+        if change == 'capacity':
+            state['capacity_changed'] = True
+        elif change == 'model':
+            client._runtime = replace(session.runtime_config, request_model='unexpected-model')
+        elif change == 'endpoint':
+            client._runtime = replace(session.runtime_config, base_url='http://127.0.0.1:9999/v1')
+        elif change == 'map_request':
+            client._map_request = lambda *_a, **_kw: None
+        elif change == 'attempt':
+            client._attempt = lambda *_a, **_kw: None
+        elif change == 'transport_post':
+            client._transport.post = lambda **_kwargs: None
+        elif change == 'max_attempts':
+            client._max_attempts = 1
+    # Override the trusted sleeper only in this test, before constructing the
+    # exact production adapter. The transport method above never uses a socket.
+    monkeypatch.setattr(retry_module, 'real_sleeper', sleeper)
+    client = OpenAICompatibleLLMClient(session.runtime_config, sleeper=sleeper)
+    def refresh():
+        return replace(session, effective_n_ctx=session.effective_n_ctx - 1) if state['capacity_changed'] else session
+    monkeypatch.setattr('short_drama.adaptation.disposition_runner._build_feedback_refresh', lambda **_kw: refresh)
+    kwargs = dict(store=tree.store, pointers=tree.pointers, session=session, llm_client=client,
+        execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+        max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    if change == 'none':
+        result = _run_b13_feedback_resumable(**kwargs)
+        assert state['calls'] == 2 and result.new_provider_attempts == 2
+        assert result.new_semantic_calls == 1 and result.execution_result.accepted_windows[0].feedback_evidence is None
+    else:
+        with pytest.raises(B13RunnerError) as caught:
+            _run_b13_feedback_resumable(**kwargs)
+        assert caught.value.__cause__ is None and caught.value.__context__ is None
+        assert state['calls'] == 1
+        assert inspect_claim(tmp_path / 'execution', session, packet.window_id).state is ClaimState.CLAIMED_UNRESOLVED
+        # Return to the original valid clients and session; the existing claim
+        # still blocks a new invocation and no third HTTP attempt is made.
+        client = OpenAICompatibleLLMClient(session.runtime_config, sleeper=sleeper)
+        state['capacity_changed'] = False
+        kwargs['llm_client'] = client
+        with pytest.raises(B13RunnerError):
+            _run_b13_feedback_resumable(**kwargs)
+        assert state['calls'] == 1
+    assert not tokenizer.requested_paths
+
+
+@pytest.mark.parametrize('mismatch', ['model', 'endpoint', 'tokenizer_endpoint'])
+def test_internal_binding_mismatch_blocks_before_claim(tmp_path, mismatch):
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    tree, session, packet, _ = _fixture(tmp_path)
+    runtime = session.runtime_config
+    if mismatch == 'model':
+        runtime = replace(runtime, request_model='other-model')
+    elif mismatch == 'endpoint':
+        runtime = replace(runtime, base_url='http://127.0.0.1:9999/v1')
+    root = 'http://127.0.0.1:9998' if mismatch == 'tokenizer_endpoint' else _server_root(session.runtime_config.base_url)
+    tokenizer = LlamaClient(base_url=root)
+    client = OpenAICompatibleLLMClient(runtime)
+    with pytest.raises(B13RunnerError) as caught:
+        _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+            max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert not tokenizer.requested_paths and not (tmp_path / 'execution').exists()
+
+
+@pytest.mark.parametrize('tokenizer_changes', [False, True])
+def test_feedback_round_technical_retry_rechecks_actual_token_budget(tmp_path, monkeypatch, tokenizer_changes):
+    import json
+    import short_drama.llm.retry as retry_module
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient, TransportResponse
+    from short_drama.llm.openai_compatible import UrllibTransport
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected['adaptation_mappings'] = []
+    corrected = _proposal(packet)
+    state = {'calls': 0, 'changed': False, 'token_checks': 0}
+    def envelope(proposal):
+        return TransportResponse(200, json.dumps({'choices': [{'message': {'content': json.dumps(proposal)},
+                                                                 'finish_reason': 'stop'}]}).encode())
+    def post(_self, **_kwargs):
+        state['calls'] += 1
+        if state['calls'] == 1:
+            return envelope(rejected)
+        if state['calls'] == 2:
+            return TransportResponse(503, b'{}')
+        return envelope(corrected)
+    def apply_template(_self, _messages, **_kwargs):
+        return 'synthetic prompt only'
+    def tokenize(_self, _prompt):
+        state['token_checks'] += 1
+        return [1] * (session.input_ceiling_tokens + 1 if state['changed'] else 1)
+    def sleeper(_delay):
+        state['changed'] = tokenizer_changes
+    monkeypatch.setattr(UrllibTransport, 'post', post)
+    monkeypatch.setattr(LlamaClient, 'apply_template', apply_template)
+    monkeypatch.setattr(LlamaClient, 'tokenize', tokenize)
+    monkeypatch.setattr(retry_module, 'real_sleeper', sleeper)
+    monkeypatch.setattr('short_drama.adaptation.disposition_runner._build_feedback_refresh', lambda **_kw: lambda: session)
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    client = OpenAICompatibleLLMClient(session.runtime_config, sleeper=sleeper)
+    kwargs = dict(store=tree.store, pointers=tree.pointers, session=session, llm_client=client,
+        execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+        max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    if tokenizer_changes:
+        with pytest.raises(B13RunnerError):
+            _run_b13_feedback_resumable(**kwargs)
+        assert state['calls'] == 2
+        assert inspect_claim(tmp_path / 'execution', session, packet.window_id).state is ClaimState.CLAIMED_UNRESOLVED
+        assert not list((tmp_path / 'checkpoints').glob('*.json'))
+    else:
+        result = _run_b13_feedback_resumable(**kwargs)
+        assert state['calls'] == 3 and result.new_provider_attempts == 3
+        assert result.new_semantic_calls == 2
+        assert result.execution_result.accepted_windows[0].feedback_evidence is not None
+    assert state['token_checks'] == 2
+    assert not tokenizer.requested_paths
+
+
+@pytest.mark.parametrize('kind', ['list', 'element'])
+def test_internal_binding_rejects_tokenizer_callback_state_before_claim(tmp_path, kind):
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient
+    class CallbackPaths(list):
+        def append(self, _value):
+            raise AssertionError('unexpected callback execution')
+    class CallbackPath:
+        def lstrip(self, *_args):
+            raise AssertionError('unexpected callback execution')
+    tree, session, packet, _ = _fixture(tmp_path)
+    paths = CallbackPaths() if kind == 'list' else [CallbackPath()]
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url), requested_paths=paths)
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    with pytest.raises(B13RunnerError) as caught:
+        _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+            max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert len(tokenizer.requested_paths) == (0 if kind == 'list' else 1)
+    assert not (tmp_path / 'execution').exists()
+
+
+def test_instance_capability_override_after_first_round_never_executes(tmp_path, monkeypatch):
+    import json
+    from b13_alice_token_budget_preflight import LlamaClient, _server_root
+    from short_drama.llm import OpenAICompatibleLLMClient, TransportResponse
+    from short_drama.llm.openai_compatible import UrllibTransport
+    tree, session, packet, _ = _fixture(tmp_path)
+    rejected = _proposal(packet)
+    rejected['adaptation_mappings'] = []
+    state = {'calls': 0, 'override_called': False}
+    def injected(*_args, **_kwargs):
+        state['override_called'] = True
+    def post(_self, **_kwargs):
+        state['calls'] += 1
+        client._require_structured_output_capability = injected
+        return TransportResponse(200, json.dumps({'choices': [{'message': {'content': json.dumps(rejected)},
+                                                               'finish_reason': 'stop'}]}).encode())
+    monkeypatch.setattr(UrllibTransport, 'post', post)
+    monkeypatch.setattr('short_drama.adaptation.disposition_runner._build_feedback_refresh', lambda **_kw: lambda: session)
+    client = OpenAICompatibleLLMClient(session.runtime_config)
+    tokenizer = LlamaClient(base_url=_server_root(session.runtime_config.base_url))
+    with pytest.raises(B13RunnerError):
+        _run_b13_feedback_resumable(store=tree.store, pointers=tree.pointers, session=session,
+            llm_client=client, execution_root=tmp_path / 'execution', checkpoint_root=tmp_path / 'checkpoints',
+            max_new_windows=1, feedback_tokenizer=tokenizer, selected_window_ids=(packet.window_id,))
+    assert state == {'calls': 1, 'override_called': False}
+    assert inspect_claim(tmp_path / 'execution', session, packet.window_id).state is ClaimState.CLAIMED_UNRESOLVED
+    assert not tokenizer.requested_paths
+
+
+def test_retry_limit_change_during_preflight_does_not_create_claim(tmp_path):
+    tree, session, packet, _ = _fixture(tmp_path)
+    client = RecordingFakeClient([], session.runtime_config)
+    client._max_attempts = 3
+    def refresh():
+        client._max_attempts = 1
+        return session
+    with pytest.raises(B13RunnerError):
+        _run(tree, session, tmp_path, client, (packet.window_id,), refresh=refresh)
+    assert not client.calls
+    assert inspect_claim(tmp_path / 'execution', session, packet.window_id).state is ClaimState.ABSENT

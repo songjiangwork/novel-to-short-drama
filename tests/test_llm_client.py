@@ -1216,3 +1216,27 @@ def test_real_urllib_timeout_classified():
         assert elapsed < 1.0
     finally:
         server.shutdown()
+
+
+def test_guarded_generation_rechecks_each_technical_attempt_and_preserves_count():
+    transport = FakeTransport()
+    transport.queue(TransportResponse(503, b'{}'), ok_response(json.dumps({'a': 'hello'})))
+    client = make_client(transport)
+    checks = []
+    result = client._generate_structured_guarded(make_rendered(), make_schema(), make_profile(),
+                                                  before_attempt=lambda: checks.append(len(transport.calls)))
+    assert checks == [0, 1]
+    assert result.attempts == 2 and len(transport.calls) == 2
+
+
+def test_guarded_generation_stops_retry_on_preflight_failure_without_cause():
+    transport = FakeTransport()
+    transport.queue(TransportResponse(503, b'{}'), ok_response(json.dumps({'a': 'hello'})))
+    client = make_client(transport)
+    def check():
+        if transport.calls:
+            raise LLMTransportError('SYNTHETIC_SECRET')
+    with pytest.raises(ValueError, match='guarded provider preflight failed') as caught:
+        client._generate_structured_guarded(make_rendered(), make_schema(), make_profile(), before_attempt=check)
+    assert len(transport.calls) == 1
+    assert caught.value.__cause__ is None and caught.value.__context__ is None

@@ -364,6 +364,34 @@ class OpenAICompatibleLLMClient(LLMClient):
             attempt=lambda number: self._attempt(request, number, execution_options),
         )
 
+    def _generate_structured_guarded(
+        self, rendered_prompt: RenderedPrompt, output_schema: OutputSchema,
+        semantic_profile: SemanticLLMProfile, *,
+        execution_options: GenerationExecutionOptions | None = None,
+        before_attempt: Callable[[], None],
+    ) -> StructuredGenerationResult:
+        """Use the ordinary retry policy, with a fail-closed check per HTTP attempt.
+
+        This private seam supplies no live authorization or runtime attestation.
+        The ordinary adapter path and its retry behaviour remain unchanged.
+        """
+        request = build_structured_request(rendered_prompt=rendered_prompt,
+            output_schema=output_schema, semantic_profile=semantic_profile)
+        OpenAICompatibleLLMClient._require_structured_output_capability(self, semantic_profile)
+
+        def attempt(number):
+            failed = False
+            try:
+                before_attempt()
+            except Exception:
+                failed = True
+            if failed:
+                # Not an LLMError: the transport retry loop must stop here.
+                raise ValueError("guarded provider preflight failed")
+            return self._attempt(request, number, execution_options)
+
+        return run_with_retry(max_attempts=self._max_attempts, sleeper=self._sleeper, attempt=attempt)
+
     def build_request_body(
         self,
         rendered_prompt: RenderedPrompt,
